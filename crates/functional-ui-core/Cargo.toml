@@ -1,0 +1,9 @@
+[package]
+name = "functional-ui-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+png.workspace = true
+
