@@ -1,6 +1,6 @@
 #[cfg(target_os = "macos")]
 mod imp {
-    use functional_ui_core::{NodeMetadata, Point, QueryRoot, Rect, Role, Size};
+    use glasscheck_core::{NodeMetadata, Point, QueryRoot, Rect, Role, Size};
     use objc2::rc::Retained;
     use objc2::MainThreadOnly;
     use objc2_app_kit::{NSBackingStoreType, NSView, NSWindow, NSWindowStyleMask};
@@ -61,13 +61,13 @@ mod imp {
         }
 
         #[must_use]
-        pub fn capture(&self) -> Option<functional_ui_core::Image> {
+        pub fn capture(&self) -> Option<glasscheck_core::Image> {
             let content = self.window.contentView()?;
             capture_view_image(&content)
         }
 
         #[must_use]
-        pub fn capture_view(&self, view: &NSView) -> Option<functional_ui_core::Image> {
+        pub fn capture_view(&self, view: &NSView) -> Option<glasscheck_core::Image> {
             capture_view_image(view)
         }
 
@@ -133,7 +133,7 @@ mod imp {
     #[derive(Clone, Debug)]
     pub struct InstrumentedView {
         pub id: Option<String>,
-        pub role: Option<functional_ui_core::Role>,
+        pub role: Option<glasscheck_core::Role>,
         pub label: Option<String>,
     }
 

@@ -1,6 +1,6 @@
 #[cfg(target_os = "macos")]
 mod imp {
-    use functional_ui_core::{Image, Rect, TextExpectation, TextRenderer};
+    use glasscheck_core::{Image, Rect, TextExpectation, TextRenderer};
     use objc2::rc::Retained;
     use objc2::MainThreadOnly;
     use objc2_app_kit::{
@@ -188,7 +188,7 @@ mod imp {
         Ok(font)
     }
 
-    fn color(color: functional_ui_core::RgbaColor) -> Retained<NSColor> {
+    fn color(color: glasscheck_core::RgbaColor) -> Retained<NSColor> {
         NSColor::colorWithSRGBRed_green_blue_alpha(
             f64::from(color.red) / 255.0,
             f64::from(color.green) / 255.0,
@@ -225,7 +225,7 @@ mod imp {
     fn crop_in_view_coordinates(image: &Image, rect: Rect) -> Image {
         let image_height = f64::from(image.height);
         let image_rect = Rect::new(
-            functional_ui_core::Point::new(
+            glasscheck_core::Point::new(
                 rect.origin.x,
                 (image_height - rect.origin.y - rect.size.height).max(0.0),
             ),
@@ -240,7 +240,7 @@ mod imp {
             crop_in_view_coordinates, font_manager_weight, font_traits,
             validate_font_expectation, utf16_len, AppKitTextError,
         };
-        use functional_ui_core::{Image, Point, Rect, Size, TextExpectation};
+        use glasscheck_core::{Image, Point, Rect, Size, TextExpectation};
         use objc2_app_kit::NSFontTraitMask;
 
         #[test]

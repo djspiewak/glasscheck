@@ -3,7 +3,7 @@ mod imp {
     use std::sync::Once;
     use std::time::Duration;
 
-    use functional_ui_core::{wait_for_condition, PollError, PollOptions};
+    use glasscheck_core::{wait_for_condition, PollError, PollOptions};
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
     use objc2_foundation::{MainThreadMarker, NSDate, NSRunLoop};
 

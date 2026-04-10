@@ -436,7 +436,7 @@ mod tests {
             .expect("system time should be after unix epoch")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "functional-ui-text-{}-{}-{}",
+            "glasscheck-text-{}-{}-{}",
             std::process::id(),
             nanos,
             count

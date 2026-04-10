@@ -74,25 +74,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "functional-ui"
+name = "glasscheck"
 version = "0.1.0"
 dependencies = [
- "functional-ui-appkit",
- "functional-ui-core",
+ "glasscheck-appkit",
+ "glasscheck-core",
 ]
 
 [[package]]
-name = "functional-ui-appkit"
+name = "glasscheck-appkit"
 version = "0.1.0"
 dependencies = [
- "functional-ui-core",
+ "glasscheck-core",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
 ]
 
 [[package]]
-name = "functional-ui-core"
+name = "glasscheck-core"
 version = "0.1.0"
 dependencies = [
  "png",

@@ -1,7 +1,7 @@
 #![cfg(target_os = "macos")]
 
-use functional_ui_appkit::{AppKitHarness, InstrumentedView};
-use functional_ui_core::{
+use glasscheck_appkit::{AppKitHarness, InstrumentedView};
+use glasscheck_core::{
     assert_text_renders, compare_images, CompareConfig, Point, PollOptions, Rect, RgbaColor,
     Role, Selector, Size, TextAssertionConfig, TextExpectation,
 };
@@ -105,9 +105,9 @@ fn query_reports_registered_view_geometry(harness: AppKitHarness) {
     let expected = content_view.convertRect_fromView(child_view.bounds(), Some(&child_view));
     assert_eq!(
         node.rect,
-        functional_ui_core::Rect::new(
-            functional_ui_core::Point::new(expected.origin.x, expected.origin.y),
-            functional_ui_core::Size::new(expected.size.width, expected.size.height),
+        glasscheck_core::Rect::new(
+            glasscheck_core::Point::new(expected.origin.x, expected.origin.y),
+            glasscheck_core::Size::new(expected.size.width, expected.size.height),
         )
     );
 }
@@ -439,7 +439,7 @@ fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
         .expect("system time should be after unix epoch")
         .as_nanos();
     let path = std::env::temp_dir().join(format!(
-        "functional-ui-appkit-{prefix}-{}-{}-{}",
+        "glasscheck-appkit-{prefix}-{}-{}-{}",
         std::process::id(),
         nanos,
         count

@@ -1,0 +1,13 @@
+[package]
+name = "glasscheck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["appkit"]
+appkit = ["dep:glasscheck-appkit"]
+
+[dependencies]
+glasscheck-core = { path = "../glasscheck-core" }
+glasscheck-appkit = { path = "../glasscheck-appkit", optional = true }

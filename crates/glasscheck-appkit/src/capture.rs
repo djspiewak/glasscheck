@@ -3,7 +3,7 @@ mod imp {
     use std::ffi::c_uchar;
     use std::ptr;
 
-    use functional_ui_core::Image;
+    use glasscheck_core::Image;
     use objc2::{AnyThread, ClassType};
     use objc2_app_kit::{NSBitmapImageRep, NSClipView, NSSplitView, NSView, NSWindow};
     use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
@@ -132,7 +132,7 @@ mod imp {
 #[cfg(not(target_os = "macos"))]
 mod imp {
     pub struct NSView;
-    pub fn capture_view_image(_: &NSView) -> Option<functional_ui_core::Image> {
+    pub fn capture_view_image(_: &NSView) -> Option<glasscheck_core::Image> {
         None
     }
 }
