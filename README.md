@@ -130,6 +130,24 @@ let result = compare_images(&actual, &expected, &CompareConfig::default());
 assert!(result.passed);
 ```
 
+Prefer semantic regions over hard-coded pixel rectangles when possible:
+
+```rust
+use glasscheck_core::{
+    AnchoredTextExpectation, NodePredicate, RegionSpec, RelativeBounds, Role,
+    TextMatch,
+};
+
+let expectation = AnchoredTextExpectation::new(
+    "Run",
+    RegionSpec::node(NodePredicate::and(vec![
+        NodePredicate::role_eq(Role::Button),
+        NodePredicate::label(TextMatch::contains("Run")),
+    ]))
+    .subregion(RelativeBounds::inset(0.1, 0.1, 0.1, 0.1)),
+);
+```
+
 ## macOS AppKit
 
 On macOS, `glasscheck` also exposes an in-process AppKit harness for native UI tests:
@@ -138,3 +156,5 @@ On macOS, `glasscheck` also exposes an in-process AppKit harness for native UI t
 - `AppKitWindowHost`
 - `AppKitInputDriver`
 - `AppKitTextHarness`
+- `AppKitWindowHost::capture_region`
+- `AppKitTextHarness::assert_text_renders_anchored`

@@ -2,8 +2,9 @@
 
 use glasscheck_appkit::{AppKitHarness, InstrumentedView};
 use glasscheck_core::{
-    assert_text_renders, compare_images, CompareConfig, Point, PollOptions, Rect, RgbaColor,
-    Role, Selector, Size, TextAssertionConfig, TextExpectation,
+    assert_text_renders, compare_images, AnchoredTextExpectation, CompareConfig, NodePredicate,
+    Point, PollOptions, Rect, RegionSpec, RgbaColor, Role, Selector, Size, TextAssertionConfig,
+    TextExpectation, TextMatch,
 };
 use objc2::rc::Retained;
 use objc2::MainThreadOnly;
@@ -25,21 +26,30 @@ fn main() {
     run("direct_text_input_changes_rendered_content", || {
         direct_text_input_changes_rendered_content(harness)
     });
+    run("capture_region_matches_registered_view_bounds", || {
+        capture_region_matches_registered_view_bounds(harness)
+    });
     run("rendered_text_assertion_matches_live_text", || {
         rendered_text_assertion_matches_live_text(harness)
+    });
+    run("anchored_text_assertion_matches_semantic_region", || {
+        anchored_text_assertion_matches_semantic_region(harness)
     });
     run("rendered_text_assertion_honors_non_zero_origin", || {
         rendered_text_assertion_honors_non_zero_origin(harness)
     });
-    run("rendered_text_assertion_supports_family_weight_and_italic", || {
-        rendered_text_assertion_supports_family_weight_and_italic(harness)
-    });
-    run("rendered_text_assertion_matches_clipped_text_region", || {
-        rendered_text_assertion_matches_clipped_text_region(harness)
-    });
-    run("rendered_text_assertion_matches_negative_origin_region", || {
-        rendered_text_assertion_matches_negative_origin_region(harness)
-    });
+    run(
+        "rendered_text_assertion_supports_family_weight_and_italic",
+        || rendered_text_assertion_supports_family_weight_and_italic(harness),
+    );
+    run(
+        "rendered_text_assertion_matches_clipped_text_region",
+        || rendered_text_assertion_matches_clipped_text_region(harness),
+    );
+    run(
+        "rendered_text_assertion_matches_negative_origin_region",
+        || rendered_text_assertion_matches_negative_origin_region(harness),
+    );
     run("wait_until_flushes_runloop_between_attempts", || {
         wait_until_flushes_runloop_between_attempts(harness)
     });
@@ -152,6 +162,46 @@ fn direct_text_input_changes_rendered_content(harness: AppKitHarness) {
     );
 }
 
+fn capture_region_matches_registered_view_bounds(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 160.0);
+    let view = make_text_view(harness.main_thread_marker(), NSSize::new(180.0, 80.0));
+    view.setFrameOrigin(NSPoint::new(24.0, 18.0));
+    host.set_content_view(&view);
+    host.register_view(
+        &view,
+        InstrumentedView {
+            id: Some("editor".into()),
+            role: Some(Role::TextInput),
+            label: Some("Editor Panel".into()),
+        },
+    );
+    host.input().replace_text(&view, "Functional UI");
+    harness.settle(2);
+
+    let expected = host
+        .capture_view(&view)
+        .expect("registered view should capture directly");
+    let actual = host
+        .capture_region(&RegionSpec::node(NodePredicate::label(
+            TextMatch::contains("Panel"),
+        )))
+        .expect("semantic region capture should succeed");
+
+    let result = compare_images(
+        &actual,
+        &expected,
+        &CompareConfig {
+            channel_tolerance: 0,
+            match_threshold: 1.0,
+            generate_diff: false,
+        },
+    );
+    assert!(
+        result.passed,
+        "semantic region capture should match direct view capture"
+    );
+}
+
 fn rendered_text_assertion_matches_live_text(harness: AppKitHarness) {
     let host = harness.create_window(320.0, 160.0);
     let view = make_text_view(harness.main_thread_marker(), NSSize::new(320.0, 160.0));
@@ -192,6 +242,61 @@ fn rendered_text_assertion_matches_live_text(harness: AppKitHarness) {
         },
     )
     .expect("rendered text should match the AppKit reference rendering");
+
+    let _ = std::fs::remove_dir_all(artifact_dir);
+}
+
+fn anchored_text_assertion_matches_semantic_region(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 160.0);
+    let view = make_text_view(harness.main_thread_marker(), NSSize::new(320.0, 160.0));
+    let font = NSFont::systemFontOfSize(18.0);
+    view.setFont(Some(&font));
+    if let Some(text_container) = unsafe { view.textContainer() } {
+        text_container.setLineFragmentPadding(0.0);
+    }
+    let background = NSColor::whiteColor();
+    view.setBackgroundColor(&background);
+    let foreground = NSColor::blackColor();
+    view.setTextColor(Some(&foreground));
+    host.set_content_view(&view);
+    host.register_view(
+        &view,
+        InstrumentedView {
+            id: Some("editor".into()),
+            role: Some(Role::TextInput),
+            label: Some("Editor Canvas".into()),
+        },
+    );
+
+    host.input().replace_text(&view, "Functional UI");
+    harness.settle(2);
+
+    let expectation = AnchoredTextExpectation::new(
+        "Functional UI",
+        RegionSpec::node(NodePredicate::and(vec![
+            NodePredicate::role_eq(Role::TextInput),
+            NodePredicate::label(TextMatch::contains("Canvas")),
+        ])),
+    )
+    .with_point_size(18.0)
+    .with_foreground(RgbaColor::new(0, 0, 0, 255))
+    .with_background(RgbaColor::new(255, 255, 255, 255));
+
+    let artifact_dir = unique_temp_dir("anchored-rendered-text");
+    host.text_renderer(harness.main_thread_marker())
+        .assert_text_renders_anchored(
+            &expectation,
+            &artifact_dir,
+            &TextAssertionConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 24,
+                    match_threshold: 0.97,
+                    generate_diff: true,
+                },
+                write_diff: true,
+            },
+        )
+        .expect("anchored rendered text should match the AppKit reference rendering");
 
     let _ = std::fs::remove_dir_all(artifact_dir);
 }

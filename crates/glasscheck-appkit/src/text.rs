@@ -1,6 +1,9 @@
 #[cfg(target_os = "macos")]
 mod imp {
-    use glasscheck_core::{Image, Rect, TextExpectation, TextRenderer};
+    use glasscheck_core::{
+        assert_text_renders, AnchoredTextExpectation, Image, Rect, RegionResolveError,
+        TextAssertionConfig, TextAssertionError, TextExpectation, TextRenderer,
+    };
     use objc2::rc::Retained;
     use objc2::MainThreadOnly;
     use objc2_app_kit::{
@@ -8,8 +11,9 @@ mod imp {
         NSTextView, NSView, NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSSize, NSString};
+    use std::path::Path;
 
-    use crate::capture::capture_view_image;
+    use crate::capture::{capture_view_image, crop_image_in_view_coordinates};
     use crate::window::AppKitWindowHost;
 
     /// Errors returned by the AppKit text harness.
@@ -51,6 +55,26 @@ mod imp {
 
     impl std::error::Error for AppKitTextError {}
 
+    /// Errors returned by anchored AppKit text assertions.
+    #[derive(Debug)]
+    pub enum AppKitAnchoredTextError {
+        /// Region resolution failed before rendering or capture.
+        Resolve(RegionResolveError),
+        /// The underlying text assertion failed.
+        Assert(TextAssertionError<AppKitTextError>),
+    }
+
+    impl std::fmt::Display for AppKitAnchoredTextError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Resolve(error) => write!(f, "{error}"),
+                Self::Assert(error) => write!(f, "{error}"),
+            }
+        }
+    }
+
+    impl std::error::Error for AppKitAnchoredTextError {}
+
     /// AppKit implementation of the `TextRenderer` trait.
     pub struct AppKitTextHarness<'a> {
         host: &'a AppKitWindowHost,
@@ -63,12 +87,31 @@ mod imp {
         pub fn new(host: &'a AppKitWindowHost, mtm: MainThreadMarker) -> Self {
             Self { host, mtm }
         }
+
+        /// Resolves an anchored expectation and asserts it against the live AppKit view.
+        pub fn assert_text_renders_anchored(
+            &self,
+            expectation: &AnchoredTextExpectation,
+            artifact_dir: &Path,
+            config: &TextAssertionConfig,
+        ) -> Result<(), AppKitAnchoredTextError> {
+            let rect = self
+                .host
+                .resolve_region(&expectation.region)
+                .map_err(AppKitAnchoredTextError::Resolve)?;
+            let expectation = expectation.resolve(rect);
+            assert_text_renders(self, &expectation, artifact_dir, config)
+                .map_err(AppKitAnchoredTextError::Assert)
+        }
     }
 
     impl TextRenderer for AppKitTextHarness<'_> {
         type Error = AppKitTextError;
 
-        fn render_text_reference(&self, expectation: &TextExpectation) -> Result<Image, Self::Error> {
+        fn render_text_reference(
+            &self,
+            expectation: &TextExpectation,
+        ) -> Result<Image, Self::Error> {
             let window = make_reference_window(self.mtm, expectation)?;
             let content_view = window
                 .contentView()
@@ -165,7 +208,10 @@ mod imp {
         Ok(())
     }
 
-    fn font(mtm: MainThreadMarker, expectation: &TextExpectation) -> Result<Retained<NSFont>, AppKitTextError> {
+    fn font(
+        mtm: MainThreadMarker,
+        expectation: &TextExpectation,
+    ) -> Result<Retained<NSFont>, AppKitTextError> {
         validate_font_expectation(expectation)?;
         if let Some(name) = expectation.font_name.as_deref() {
             let name = NSString::from_str(name);
@@ -230,22 +276,14 @@ mod imp {
     }
 
     fn crop_in_view_coordinates(image: &Image, rect: Rect) -> Image {
-        let image_height = f64::from(image.height);
-        let image_rect = Rect::new(
-            glasscheck_core::Point::new(
-                rect.origin.x,
-                (image_height - rect.origin.y - rect.size.height).max(0.0),
-            ),
-            rect.size,
-        );
-        image.crop(image_rect)
+        crop_image_in_view_coordinates(image, rect)
     }
 
     #[cfg(test)]
     mod tests {
         use super::{
-            crop_in_view_coordinates, font_manager_weight, font_traits,
-            validate_font_expectation, utf16_len, AppKitTextError,
+            crop_in_view_coordinates, font_manager_weight, font_traits, utf16_len,
+            validate_font_expectation, AppKitTextError,
         };
         use glasscheck_core::{Image, Point, Rect, Size, TextExpectation};
         use objc2_app_kit::NSFontTraitMask;
@@ -268,7 +306,10 @@ mod imp {
             .italic(true);
 
             let error = validate_font_expectation(&expectation).unwrap_err();
-            assert!(matches!(error, AppKitTextError::ConflictingFontOptions { .. }));
+            assert!(matches!(
+                error,
+                AppKitTextError::ConflictingFontOptions { .. }
+            ));
         }
 
         #[test]
@@ -293,8 +334,8 @@ mod imp {
                 3,
                 3,
                 vec![
-                    10, 10, 10, 255, 20, 20, 20, 255, 30, 30, 30, 255, 40, 40, 40, 255, 50, 50,
-                    50, 255, 60, 60, 60, 255, 70, 70, 70, 255, 80, 80, 80, 255, 90, 90, 90, 255,
+                    10, 10, 10, 255, 20, 20, 20, 255, 30, 30, 30, 255, 40, 40, 40, 255, 50, 50, 50,
+                    255, 60, 60, 60, 255, 70, 70, 70, 255, 80, 80, 80, 255, 90, 90, 90, 255,
                 ],
             );
             let cropped = crop_in_view_coordinates(
@@ -337,9 +378,12 @@ mod imp {
     #[derive(Debug)]
     pub enum AppKitTextError {}
 
+    #[derive(Debug)]
+    pub enum AppKitAnchoredTextError {}
+
     pub struct AppKitTextHarness<'a> {
         _marker: std::marker::PhantomData<&'a ()>,
     }
 }
 
-pub use imp::{AppKitTextError, AppKitTextHarness};
+pub use imp::{AppKitAnchoredTextError, AppKitTextError, AppKitTextHarness};

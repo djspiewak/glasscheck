@@ -1,13 +1,15 @@
 #[cfg(target_os = "macos")]
 mod imp {
-    use glasscheck_core::{NodeMetadata, Point, QueryRoot, Rect, Role, Size};
+    use glasscheck_core::{
+        NodeMetadata, Point, QueryRoot, Rect, RegionResolveError, RegionSpec, Role, Size,
+    };
     use objc2::rc::Retained;
     use objc2::MainThreadOnly;
     use objc2_app_kit::{NSBackingStoreType, NSView, NSWindow, NSWindowStyleMask};
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
     use std::cell::RefCell;
 
-    use crate::capture::capture_view_image;
+    use crate::capture::{capture_view_image, crop_image_in_view_coordinates};
     use crate::input::AppKitInputDriver;
     use crate::text::AppKitTextHarness;
 
@@ -81,6 +83,18 @@ mod imp {
             capture_view_image(view)
         }
 
+        /// Captures a semantically resolved region as an image.
+        pub fn capture_region(
+            &self,
+            region: &RegionSpec,
+        ) -> Result<glasscheck_core::Image, RegionResolveError> {
+            let rect = self.resolve_region(region)?;
+            let image = self
+                .capture()
+                .expect("window content capture should succeed before region cropping");
+            Ok(crop_image_in_view_coordinates(&image, rect))
+        }
+
         /// Returns an input driver scoped to this window.
         #[must_use]
         pub fn input(&self) -> AppKitInputDriver<'_> {
@@ -122,10 +136,28 @@ mod imp {
             QueryRoot::new(nodes)
         }
 
+        /// Resolves a semantic region against the current window.
+        pub fn resolve_region(&self, region: &RegionSpec) -> Result<Rect, RegionResolveError> {
+            let root_bounds = self.root_bounds();
+            self.query_root().resolve_region(root_bounds, region)
+        }
+
         /// Sets the window title.
         pub fn set_title(&self, title: &str) {
             let title = NSString::from_str(title);
             self.window.setTitle(&title);
+        }
+
+        fn root_bounds(&self) -> Rect {
+            let content = self
+                .window
+                .contentView()
+                .map(|view| view.bounds())
+                .unwrap_or_else(|| self.window.frame());
+            Rect::new(
+                Point::new(content.origin.x, content.origin.y),
+                Size::new(content.size.width, content.size.height),
+            )
         }
     }
 

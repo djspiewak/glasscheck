@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::{compare_images, CompareConfig, CompareResult, Image, Rect};
+use crate::{compare_images, CompareConfig, CompareResult, Image, Rect, RegionSpec};
 
 /// An RGBA color used for text expectations and compositing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +66,112 @@ impl TextExpectation {
             italic: false,
             foreground: RgbaColor::new(0, 0, 0, 255),
             background: None,
+        }
+    }
+
+    /// Sets the expected font family.
+    #[must_use]
+    pub fn with_font_family(mut self, family: impl Into<String>) -> Self {
+        self.font_family = Some(family.into());
+        self
+    }
+
+    /// Sets the expected concrete font name.
+    #[must_use]
+    pub fn with_font_name(mut self, name: impl Into<String>) -> Self {
+        self.font_name = Some(name.into());
+        self
+    }
+
+    /// Sets the expected point size.
+    #[must_use]
+    pub fn with_point_size(mut self, point_size: f64) -> Self {
+        self.point_size = point_size;
+        self
+    }
+
+    /// Sets the expected font weight.
+    #[must_use]
+    pub fn with_weight(mut self, weight: u16) -> Self {
+        self.weight = Some(weight);
+        self
+    }
+
+    /// Sets whether italic styling is expected.
+    #[must_use]
+    pub fn italic(mut self, italic: bool) -> Self {
+        self.italic = italic;
+        self
+    }
+
+    /// Sets the expected foreground color.
+    #[must_use]
+    pub fn with_foreground(mut self, foreground: RgbaColor) -> Self {
+        self.foreground = foreground;
+        self
+    }
+
+    /// Sets the expected background color.
+    #[must_use]
+    pub fn with_background(mut self, background: RgbaColor) -> Self {
+        self.background = Some(background);
+        self
+    }
+}
+
+/// Declarative text expectation whose target region is resolved semantically.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnchoredTextExpectation {
+    /// Expected text content.
+    pub content: String,
+    /// Region that should contain the rendered text.
+    pub region: RegionSpec,
+    /// Optional font family name.
+    pub font_family: Option<String>,
+    /// Optional concrete font face name.
+    pub font_name: Option<String>,
+    /// Expected point size.
+    pub point_size: f64,
+    /// Optional CSS-style font weight.
+    pub weight: Option<u16>,
+    /// Whether italic styling is expected.
+    pub italic: bool,
+    /// Expected foreground text color.
+    pub foreground: RgbaColor,
+    /// Optional background color. When absent, the background is sampled.
+    pub background: Option<RgbaColor>,
+}
+
+impl AnchoredTextExpectation {
+    /// Creates an anchored text expectation with default styling.
+    #[must_use]
+    pub fn new(content: impl Into<String>, region: RegionSpec) -> Self {
+        Self {
+            content: content.into(),
+            region,
+            font_family: None,
+            font_name: None,
+            point_size: 14.0,
+            weight: None,
+            italic: false,
+            foreground: RgbaColor::new(0, 0, 0, 255),
+            background: None,
+        }
+    }
+
+    /// Resolves to a concrete text expectation using `rect`.
+    #[must_use]
+    pub fn resolve(&self, rect: Rect) -> TextExpectation {
+        TextExpectation {
+            content: self.content.clone(),
+            rect,
+            font_family: self.font_family.clone(),
+            font_name: self.font_name.clone(),
+            point_size: self.point_size,
+            weight: self.weight,
+            italic: self.italic,
+            foreground: self.foreground,
+            background: self.background,
         }
     }
 
@@ -332,7 +438,12 @@ fn composite_over_background(image: &Image, background: RgbaColor) -> Image {
         let alpha = f64::from(pixel[3]) / 255.0;
         let inverse = 1.0 - alpha;
         data.push(composite_channel(pixel[0], background.red, alpha, inverse));
-        data.push(composite_channel(pixel[1], background.green, alpha, inverse));
+        data.push(composite_channel(
+            pixel[1],
+            background.green,
+            alpha,
+            inverse,
+        ));
         data.push(composite_channel(pixel[2], background.blue, alpha, inverse));
         data.push(255);
     }
@@ -383,7 +494,11 @@ mod tests {
     }
 
     fn image(value: u8) -> Image {
-        Image::new(2, 1, vec![value, value, value, 255, value, value, value, 255])
+        Image::new(
+            2,
+            1,
+            vec![value, value, value, 255, value, value, value, 255],
+        )
     }
 
     #[test]
@@ -408,6 +523,24 @@ mod tests {
     }
 
     #[test]
+    fn anchored_expectation_resolves_to_absolute_expectation() {
+        let anchored = AnchoredTextExpectation::new(
+            "Hello",
+            crate::RegionSpec::root().subregion(crate::RelativeBounds::new(0.25, 0.5, 0.5, 0.25)),
+        )
+        .with_font_family("SF Pro")
+        .with_point_size(18.0)
+        .with_foreground(RgbaColor::new(1, 2, 3, 255));
+
+        let resolved = anchored.resolve(rect());
+        assert_eq!(resolved.content, "Hello");
+        assert_eq!(resolved.rect, rect());
+        assert_eq!(resolved.font_family.as_deref(), Some("SF Pro"));
+        assert_eq!(resolved.point_size, 18.0);
+        assert_eq!(resolved.foreground, RgbaColor::new(1, 2, 3, 255));
+    }
+
+    #[test]
     fn compare_rendered_text_uses_text_defaults() {
         let expectation = TextExpectation::new("Hello", rect());
         let result = compare_rendered_text(
@@ -425,17 +558,17 @@ mod tests {
             3,
             3,
             vec![
-                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-                0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-                255, 255, 255,
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0,
+                0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                255, 255,
             ],
         );
         let expected = Image::new(
             3,
             3,
             vec![
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0,
             ],
         );
         let expectation = TextExpectation::new("Hi", rect());
@@ -468,7 +601,10 @@ mod tests {
             TextAssertionError::Mismatch { artifacts, .. } => {
                 assert!(artifacts.actual_path.exists());
                 assert!(artifacts.expected_path.exists());
-                assert!(artifacts.diff_path.as_ref().is_some_and(|path| path.exists()));
+                assert!(artifacts
+                    .diff_path
+                    .as_ref()
+                    .is_some_and(|path| path.exists()));
             }
             other => panic!("expected mismatch error, got {other:?}"),
         }
