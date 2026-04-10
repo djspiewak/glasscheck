@@ -29,6 +29,76 @@ impl RgbaColor {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct TextStyleDefaults {
+    font_family: Option<String>,
+    font_name: Option<String>,
+    point_size: f64,
+    weight: Option<u16>,
+    italic: bool,
+    foreground: RgbaColor,
+    background: Option<RgbaColor>,
+}
+
+impl Default for TextStyleDefaults {
+    fn default() -> Self {
+        Self {
+            font_family: None,
+            font_name: None,
+            point_size: 14.0,
+            weight: None,
+            italic: false,
+            foreground: RgbaColor::new(0, 0, 0, 255),
+            background: None,
+        }
+    }
+}
+
+trait TextStyleBuilder: Sized {
+    fn font_family_mut(&mut self) -> &mut Option<String>;
+    fn font_name_mut(&mut self) -> &mut Option<String>;
+    fn point_size_mut(&mut self) -> &mut f64;
+    fn weight_mut(&mut self) -> &mut Option<u16>;
+    fn italic_mut(&mut self) -> &mut bool;
+    fn foreground_mut(&mut self) -> &mut RgbaColor;
+    fn background_mut(&mut self) -> &mut Option<RgbaColor>;
+
+    fn with_font_family(mut self, family: impl Into<String>) -> Self {
+        *self.font_family_mut() = Some(family.into());
+        self
+    }
+
+    fn with_font_name(mut self, name: impl Into<String>) -> Self {
+        *self.font_name_mut() = Some(name.into());
+        self
+    }
+
+    fn with_point_size(mut self, point_size: f64) -> Self {
+        *self.point_size_mut() = point_size;
+        self
+    }
+
+    fn with_weight(mut self, weight: u16) -> Self {
+        *self.weight_mut() = Some(weight);
+        self
+    }
+
+    fn italic(mut self, italic: bool) -> Self {
+        *self.italic_mut() = italic;
+        self
+    }
+
+    fn with_foreground(mut self, foreground: RgbaColor) -> Self {
+        *self.foreground_mut() = foreground;
+        self
+    }
+
+    fn with_background(mut self, background: RgbaColor) -> Self {
+        *self.background_mut() = Some(background);
+        self
+    }
+}
+
 /// Declarative specification of text expected to appear in a UI region.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextExpectation {
@@ -56,66 +126,92 @@ impl TextExpectation {
     /// Creates a text expectation with default styling for the given region.
     #[must_use]
     pub fn new(content: impl Into<String>, rect: Rect) -> Self {
+        let style = TextStyleDefaults::default();
         Self {
             content: content.into(),
             rect,
-            font_family: None,
-            font_name: None,
-            point_size: 14.0,
-            weight: None,
-            italic: false,
-            foreground: RgbaColor::new(0, 0, 0, 255),
-            background: None,
+            font_family: style.font_family,
+            font_name: style.font_name,
+            point_size: style.point_size,
+            weight: style.weight,
+            italic: style.italic,
+            foreground: style.foreground,
+            background: style.background,
         }
     }
+}
 
+impl TextStyleBuilder for TextExpectation {
+    fn font_family_mut(&mut self) -> &mut Option<String> {
+        &mut self.font_family
+    }
+
+    fn font_name_mut(&mut self) -> &mut Option<String> {
+        &mut self.font_name
+    }
+
+    fn point_size_mut(&mut self) -> &mut f64 {
+        &mut self.point_size
+    }
+
+    fn weight_mut(&mut self) -> &mut Option<u16> {
+        &mut self.weight
+    }
+
+    fn italic_mut(&mut self) -> &mut bool {
+        &mut self.italic
+    }
+
+    fn foreground_mut(&mut self) -> &mut RgbaColor {
+        &mut self.foreground
+    }
+
+    fn background_mut(&mut self) -> &mut Option<RgbaColor> {
+        &mut self.background
+    }
+}
+
+impl TextExpectation {
     /// Sets the expected font family.
     #[must_use]
-    pub fn with_font_family(mut self, family: impl Into<String>) -> Self {
-        self.font_family = Some(family.into());
-        self
+    pub fn with_font_family(self, family: impl Into<String>) -> Self {
+        TextStyleBuilder::with_font_family(self, family)
     }
 
     /// Sets the expected concrete font name.
     #[must_use]
-    pub fn with_font_name(mut self, name: impl Into<String>) -> Self {
-        self.font_name = Some(name.into());
-        self
+    pub fn with_font_name(self, name: impl Into<String>) -> Self {
+        TextStyleBuilder::with_font_name(self, name)
     }
 
     /// Sets the expected point size.
     #[must_use]
-    pub fn with_point_size(mut self, point_size: f64) -> Self {
-        self.point_size = point_size;
-        self
+    pub fn with_point_size(self, point_size: f64) -> Self {
+        TextStyleBuilder::with_point_size(self, point_size)
     }
 
     /// Sets the expected font weight.
     #[must_use]
-    pub fn with_weight(mut self, weight: u16) -> Self {
-        self.weight = Some(weight);
-        self
+    pub fn with_weight(self, weight: u16) -> Self {
+        TextStyleBuilder::with_weight(self, weight)
     }
 
     /// Sets whether italic styling is expected.
     #[must_use]
-    pub fn italic(mut self, italic: bool) -> Self {
-        self.italic = italic;
-        self
+    pub fn italic(self, italic: bool) -> Self {
+        TextStyleBuilder::italic(self, italic)
     }
 
     /// Sets the expected foreground color.
     #[must_use]
-    pub fn with_foreground(mut self, foreground: RgbaColor) -> Self {
-        self.foreground = foreground;
-        self
+    pub fn with_foreground(self, foreground: RgbaColor) -> Self {
+        TextStyleBuilder::with_foreground(self, foreground)
     }
 
     /// Sets the expected background color.
     #[must_use]
-    pub fn with_background(mut self, background: RgbaColor) -> Self {
-        self.background = Some(background);
-        self
+    pub fn with_background(self, background: RgbaColor) -> Self {
+        TextStyleBuilder::with_background(self, background)
     }
 }
 
@@ -146,16 +242,17 @@ impl AnchoredTextExpectation {
     /// Creates an anchored text expectation with default styling.
     #[must_use]
     pub fn new(content: impl Into<String>, region: RegionSpec) -> Self {
+        let style = TextStyleDefaults::default();
         Self {
             content: content.into(),
             region,
-            font_family: None,
-            font_name: None,
-            point_size: 14.0,
-            weight: None,
-            italic: false,
-            foreground: RgbaColor::new(0, 0, 0, 255),
-            background: None,
+            font_family: style.font_family,
+            font_name: style.font_name,
+            point_size: style.point_size,
+            weight: style.weight,
+            italic: style.italic,
+            foreground: style.foreground,
+            background: style.background,
         }
     }
 
@@ -174,54 +271,79 @@ impl AnchoredTextExpectation {
             background: self.background,
         }
     }
+}
 
+impl TextStyleBuilder for AnchoredTextExpectation {
+    fn font_family_mut(&mut self) -> &mut Option<String> {
+        &mut self.font_family
+    }
+
+    fn font_name_mut(&mut self) -> &mut Option<String> {
+        &mut self.font_name
+    }
+
+    fn point_size_mut(&mut self) -> &mut f64 {
+        &mut self.point_size
+    }
+
+    fn weight_mut(&mut self) -> &mut Option<u16> {
+        &mut self.weight
+    }
+
+    fn italic_mut(&mut self) -> &mut bool {
+        &mut self.italic
+    }
+
+    fn foreground_mut(&mut self) -> &mut RgbaColor {
+        &mut self.foreground
+    }
+
+    fn background_mut(&mut self) -> &mut Option<RgbaColor> {
+        &mut self.background
+    }
+}
+
+impl AnchoredTextExpectation {
     /// Sets the expected font family.
     #[must_use]
-    pub fn with_font_family(mut self, family: impl Into<String>) -> Self {
-        self.font_family = Some(family.into());
-        self
+    pub fn with_font_family(self, family: impl Into<String>) -> Self {
+        TextStyleBuilder::with_font_family(self, family)
     }
 
     /// Sets the expected concrete font name.
     #[must_use]
-    pub fn with_font_name(mut self, name: impl Into<String>) -> Self {
-        self.font_name = Some(name.into());
-        self
+    pub fn with_font_name(self, name: impl Into<String>) -> Self {
+        TextStyleBuilder::with_font_name(self, name)
     }
 
     /// Sets the expected point size.
     #[must_use]
-    pub fn with_point_size(mut self, point_size: f64) -> Self {
-        self.point_size = point_size;
-        self
+    pub fn with_point_size(self, point_size: f64) -> Self {
+        TextStyleBuilder::with_point_size(self, point_size)
     }
 
     /// Sets the expected font weight.
     #[must_use]
-    pub fn with_weight(mut self, weight: u16) -> Self {
-        self.weight = Some(weight);
-        self
+    pub fn with_weight(self, weight: u16) -> Self {
+        TextStyleBuilder::with_weight(self, weight)
     }
 
     /// Sets whether italic styling is expected.
     #[must_use]
-    pub fn italic(mut self, italic: bool) -> Self {
-        self.italic = italic;
-        self
+    pub fn italic(self, italic: bool) -> Self {
+        TextStyleBuilder::italic(self, italic)
     }
 
     /// Sets the expected foreground color.
     #[must_use]
-    pub fn with_foreground(mut self, foreground: RgbaColor) -> Self {
-        self.foreground = foreground;
-        self
+    pub fn with_foreground(self, foreground: RgbaColor) -> Self {
+        TextStyleBuilder::with_foreground(self, foreground)
     }
 
     /// Sets the expected background color.
     #[must_use]
-    pub fn with_background(mut self, background: RgbaColor) -> Self {
-        self.background = Some(background);
-        self
+    pub fn with_background(self, background: RgbaColor) -> Self {
+        TextStyleBuilder::with_background(self, background)
     }
 }
 
