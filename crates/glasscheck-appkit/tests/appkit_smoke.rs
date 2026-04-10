@@ -215,9 +215,9 @@ fn capture_region_reports_missing_semantic_match(harness: AppKitHarness) {
     harness.settle(2);
 
     let error = host
-        .capture_region(&RegionSpec::node(NodePredicate::label(TextMatch::contains(
-            "Missing",
-        ))))
+        .capture_region(&RegionSpec::node(NodePredicate::label(
+            TextMatch::contains("Missing"),
+        )))
         .unwrap_err();
 
     assert!(matches!(error, RegionResolveError::NotFound(_)));
@@ -301,11 +301,7 @@ fn anchored_text_assertion_reports_ambiguous_match(harness: AppKitHarness) {
     let artifact_dir = unique_temp_dir("anchored-rendered-text-ambiguous");
     let error = host
         .text_renderer(harness.main_thread_marker())
-        .assert_text_renders_anchored(
-            &expectation,
-            &artifact_dir,
-            &TextAssertionConfig::default(),
-        )
+        .assert_text_renders_anchored(&expectation, &artifact_dir, &TextAssertionConfig::default())
         .unwrap_err();
 
     assert!(matches!(
