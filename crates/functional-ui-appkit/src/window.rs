@@ -9,6 +9,7 @@ mod imp {
 
     use crate::capture::capture_view_image;
     use crate::input::AppKitInputDriver;
+    use crate::text::AppKitTextHarness;
 
     #[derive(Clone, Debug)]
     pub struct InstrumentedView {
@@ -73,6 +74,11 @@ mod imp {
         #[must_use]
         pub fn input(&self) -> AppKitInputDriver<'_> {
             AppKitInputDriver::new(&self.window)
+        }
+
+        #[must_use]
+        pub fn text_renderer(&self, mtm: MainThreadMarker) -> AppKitTextHarness<'_> {
+            AppKitTextHarness::new(self, mtm)
         }
 
         pub fn register_view(&self, view: &NSView, descriptor: InstrumentedView) {
