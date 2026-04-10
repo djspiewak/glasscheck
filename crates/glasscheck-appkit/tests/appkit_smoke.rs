@@ -3,8 +3,8 @@
 use glasscheck_appkit::{AppKitHarness, InstrumentedView};
 use glasscheck_core::{
     assert_text_renders, compare_images, AnchoredTextExpectation, CompareConfig, NodePredicate,
-    Point, PollOptions, Rect, RegionSpec, RgbaColor, Role, Selector, Size, TextAssertionConfig,
-    TextExpectation, TextMatch,
+    Point, PollOptions, Rect, RegionResolveError, RegionSpec, RgbaColor, Role, Selector, Size,
+    TextAssertionConfig, TextExpectation, TextMatch,
 };
 use objc2::rc::Retained;
 use objc2::MainThreadOnly;
@@ -29,11 +29,17 @@ fn main() {
     run("capture_region_matches_registered_view_bounds", || {
         capture_region_matches_registered_view_bounds(harness)
     });
+    run("capture_region_reports_missing_semantic_match", || {
+        capture_region_reports_missing_semantic_match(harness)
+    });
     run("rendered_text_assertion_matches_live_text", || {
         rendered_text_assertion_matches_live_text(harness)
     });
     run("anchored_text_assertion_matches_semantic_region", || {
         anchored_text_assertion_matches_semantic_region(harness)
+    });
+    run("anchored_text_assertion_reports_ambiguous_match", || {
+        anchored_text_assertion_reports_ambiguous_match(harness)
     });
     run("rendered_text_assertion_honors_non_zero_origin", || {
         rendered_text_assertion_honors_non_zero_origin(harness)
@@ -202,6 +208,21 @@ fn capture_region_matches_registered_view_bounds(harness: AppKitHarness) {
     );
 }
 
+fn capture_region_reports_missing_semantic_match(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 160.0);
+    let view = make_text_view(harness.main_thread_marker(), NSSize::new(180.0, 80.0));
+    host.set_content_view(&view);
+    harness.settle(2);
+
+    let error = host
+        .capture_region(&RegionSpec::node(NodePredicate::label(TextMatch::contains(
+            "Missing",
+        ))))
+        .unwrap_err();
+
+    assert!(matches!(error, RegionResolveError::NotFound(_)));
+}
+
 fn rendered_text_assertion_matches_live_text(harness: AppKitHarness) {
     let host = harness.create_window(320.0, 160.0);
     let view = make_text_view(harness.main_thread_marker(), NSSize::new(320.0, 160.0));
@@ -242,6 +263,57 @@ fn rendered_text_assertion_matches_live_text(harness: AppKitHarness) {
         },
     )
     .expect("rendered text should match the AppKit reference rendering");
+
+    let _ = std::fs::remove_dir_all(artifact_dir);
+}
+
+fn anchored_text_assertion_reports_ambiguous_match(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 160.0);
+    let container = make_view(harness.main_thread_marker(), NSSize::new(320.0, 160.0));
+    let first = make_text_view(harness.main_thread_marker(), NSSize::new(140.0, 60.0));
+    let second = make_text_view(harness.main_thread_marker(), NSSize::new(140.0, 60.0));
+    second.setFrameOrigin(NSPoint::new(160.0, 0.0));
+    container.addSubview(&first);
+    container.addSubview(&second);
+    host.set_content_view(&container);
+    host.register_view(
+        &first,
+        InstrumentedView {
+            id: Some("left-editor".into()),
+            role: Some(Role::TextInput),
+            label: Some("Editor".into()),
+        },
+    );
+    host.register_view(
+        &second,
+        InstrumentedView {
+            id: Some("right-editor".into()),
+            role: Some(Role::TextInput),
+            label: Some("Editor".into()),
+        },
+    );
+
+    let expectation = AnchoredTextExpectation::new(
+        "Functional UI",
+        RegionSpec::node(NodePredicate::label(TextMatch::exact("Editor"))),
+    );
+
+    let artifact_dir = unique_temp_dir("anchored-rendered-text-ambiguous");
+    let error = host
+        .text_renderer(harness.main_thread_marker())
+        .assert_text_renders_anchored(
+            &expectation,
+            &artifact_dir,
+            &TextAssertionConfig::default(),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        glasscheck_appkit::AppKitAnchoredTextError::Resolve(
+            RegionResolveError::MultipleMatches { .. }
+        )
+    ));
 
     let _ = std::fs::remove_dir_all(artifact_dir);
 }
