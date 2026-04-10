@@ -3,15 +3,21 @@ use std::path::{Path, PathBuf};
 
 use crate::{compare_images, CompareConfig, CompareResult, Image, Rect};
 
+/// An RGBA color used for text expectations and compositing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RgbaColor {
+    /// Red channel.
     pub red: u8,
+    /// Green channel.
     pub green: u8,
+    /// Blue channel.
     pub blue: u8,
+    /// Alpha channel.
     pub alpha: u8,
 }
 
 impl RgbaColor {
+    /// Creates a color from RGBA8 components.
     #[must_use]
     pub const fn new(red: u8, green: u8, blue: u8, alpha: u8) -> Self {
         Self {
@@ -23,20 +29,31 @@ impl RgbaColor {
     }
 }
 
+/// Declarative specification of text expected to appear in a UI region.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextExpectation {
+    /// Expected text content.
     pub content: String,
+    /// Region that should contain the rendered text.
     pub rect: Rect,
+    /// Optional font family name.
     pub font_family: Option<String>,
+    /// Optional concrete font face name.
     pub font_name: Option<String>,
+    /// Expected point size.
     pub point_size: f64,
+    /// Optional CSS-style font weight.
     pub weight: Option<u16>,
+    /// Whether italic styling is expected.
     pub italic: bool,
+    /// Expected foreground text color.
     pub foreground: RgbaColor,
+    /// Optional background color. When absent, the background is sampled.
     pub background: Option<RgbaColor>,
 }
 
 impl TextExpectation {
+    /// Creates a text expectation with default styling for the given region.
     #[must_use]
     pub fn new(content: impl Into<String>, rect: Rect) -> Self {
         Self {
@@ -52,42 +69,49 @@ impl TextExpectation {
         }
     }
 
+    /// Sets the expected font family.
     #[must_use]
     pub fn with_font_family(mut self, family: impl Into<String>) -> Self {
         self.font_family = Some(family.into());
         self
     }
 
+    /// Sets the expected concrete font name.
     #[must_use]
     pub fn with_font_name(mut self, name: impl Into<String>) -> Self {
         self.font_name = Some(name.into());
         self
     }
 
+    /// Sets the expected point size.
     #[must_use]
     pub fn with_point_size(mut self, point_size: f64) -> Self {
         self.point_size = point_size;
         self
     }
 
+    /// Sets the expected font weight.
     #[must_use]
     pub fn with_weight(mut self, weight: u16) -> Self {
         self.weight = Some(weight);
         self
     }
 
+    /// Sets whether italic styling is expected.
     #[must_use]
     pub fn italic(mut self, italic: bool) -> Self {
         self.italic = italic;
         self
     }
 
+    /// Sets the expected foreground color.
     #[must_use]
     pub fn with_foreground(mut self, foreground: RgbaColor) -> Self {
         self.foreground = foreground;
         self
     }
 
+    /// Sets the expected background color.
     #[must_use]
     pub fn with_background(mut self, background: RgbaColor) -> Self {
         self.background = Some(background);
@@ -95,9 +119,12 @@ impl TextExpectation {
     }
 }
 
+/// Configuration for rendered-text assertions.
 #[derive(Clone, Debug)]
 pub struct TextAssertionConfig {
+    /// Pixel comparison settings.
     pub compare: CompareConfig,
+    /// Whether to write a diff artifact on failure.
     pub write_diff: bool,
 }
 
@@ -114,26 +141,39 @@ impl Default for TextAssertionConfig {
     }
 }
 
+/// Paths to artifacts emitted by a failed text assertion.
 #[derive(Clone, Debug, Default)]
 pub struct TextAssertionArtifacts {
+    /// Path to the captured UI region.
     pub actual_path: PathBuf,
+    /// Path to the rendered reference image.
     pub expected_path: PathBuf,
+    /// Path to the generated diff image, when available.
     pub diff_path: Option<PathBuf>,
 }
 
+/// Backend capable of rendering a text reference image and capturing a live UI region.
 pub trait TextRenderer {
+    /// Backend-specific error type.
     type Error;
 
+    /// Renders the expected text into a reference image.
     fn render_text_reference(&self, expectation: &TextExpectation) -> Result<Image, Self::Error>;
 
+    /// Captures the live UI pixels for the target text region.
     fn capture_text_region(&self, expectation: &TextExpectation) -> Result<Image, Self::Error>;
 }
 
+/// Errors returned by rendered-text assertions.
 #[derive(Debug)]
 pub enum TextAssertionError<E> {
+    /// Filesystem I/O failed while writing artifacts.
     Io(io::Error),
+    /// The backend could not render the reference image.
     Render(E),
+    /// The backend could not capture the live UI region.
     Capture(E),
+    /// The live UI region did not match the rendered reference.
     Mismatch {
         expectation: TextExpectation,
         artifacts: TextAssertionArtifacts,
@@ -174,6 +214,10 @@ impl<E> From<io::Error> for TextAssertionError<E> {
     }
 }
 
+/// Compares captured text pixels against a rendered reference for `expectation`.
+///
+/// When no background color is provided, the background is inferred from the
+/// border pixels of `actual` before compositing the reference image.
 #[must_use]
 pub fn compare_rendered_text(
     actual: &Image,
@@ -188,6 +232,10 @@ pub fn compare_rendered_text(
     compare_images(actual, &composited_expected, &config.compare)
 }
 
+/// Asserts that a backend renders and captures text consistently for `expectation`.
+///
+/// On failure, writes actual, expected, and optional diff artifacts into
+/// `artifact_dir`.
 pub fn assert_text_renders<R>(
     renderer: &R,
     expectation: &TextExpectation,

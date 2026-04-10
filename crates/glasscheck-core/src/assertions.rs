@@ -3,10 +3,14 @@ use std::path::{Path, PathBuf};
 
 use crate::Image;
 
+/// Configuration for pixel-by-pixel image comparison.
 #[derive(Clone, Debug)]
 pub struct CompareConfig {
+    /// Maximum allowed absolute per-channel difference for a pixel to match.
     pub channel_tolerance: u8,
+    /// Minimum fraction of matching pixels required to pass.
     pub match_threshold: f64,
+    /// Whether to generate a red/green diff image in the result.
     pub generate_diff: bool,
 }
 
@@ -20,17 +24,25 @@ impl Default for CompareConfig {
     }
 }
 
+/// Result of comparing two images.
 #[derive(Clone, Debug)]
 pub struct CompareResult {
+    /// Fraction of pixels that matched within tolerance.
     pub matched_ratio: f64,
+    /// Number of pixels that did not match.
     pub mismatched_pixels: u32,
+    /// Whether the comparison satisfied the configured threshold.
     pub passed: bool,
+    /// Optional red/green diff image for mismatches.
     pub diff_image: Option<Image>,
 }
 
+/// Configuration for asserting an image against a stored baseline.
 #[derive(Clone, Debug)]
 pub struct SnapshotConfig {
+    /// Pixel comparison settings.
     pub compare: CompareConfig,
+    /// Whether to write a diff artifact when the assertion fails.
     pub write_diff: bool,
 }
 
@@ -43,16 +55,23 @@ impl Default for SnapshotConfig {
     }
 }
 
+/// Paths to artifacts emitted by a failed snapshot assertion.
 #[derive(Clone, Debug, Default)]
 pub struct SnapshotArtifacts {
+    /// Path to the captured actual image.
     pub actual_path: PathBuf,
+    /// Path to the generated diff image, when available.
     pub diff_path: Option<PathBuf>,
 }
 
+/// Errors returned by snapshot assertions.
 #[derive(Debug)]
 pub enum SnapshotError {
+    /// Filesystem I/O failed.
     Io(io::Error),
+    /// The requested baseline image does not exist.
     MissingBaseline(PathBuf),
+    /// The actual image did not match the baseline.
     Mismatch {
         baseline: PathBuf,
         artifacts: SnapshotArtifacts,
@@ -88,6 +107,7 @@ impl From<io::Error> for SnapshotError {
     }
 }
 
+/// Compares two RGBA images using the supplied tolerance and threshold settings.
 #[must_use]
 pub fn compare_images(actual: &Image, expected: &Image, config: &CompareConfig) -> CompareResult {
     if !actual.is_valid_rgba() || !expected.is_valid_rgba() {
@@ -160,6 +180,7 @@ pub fn compare_images(actual: &Image, expected: &Image, config: &CompareConfig) 
     }
 }
 
+/// Writes an image to `path` as a PNG file.
 pub fn save_png(image: &Image, path: &Path) -> io::Result<()> {
     let file = std::fs::File::create(path)?;
     let mut encoder = png::Encoder::new(io::BufWriter::new(file), image.width, image.height);
@@ -171,6 +192,7 @@ pub fn save_png(image: &Image, path: &Path) -> io::Result<()> {
         .map_err(io::Error::other)
 }
 
+/// Loads a PNG file and normalizes it to RGBA8 pixel data.
 pub fn load_png(path: &Path) -> io::Result<Image> {
     let file = std::fs::File::open(path)?;
     let decoder = png::Decoder::new(io::BufReader::new(file));
@@ -187,6 +209,10 @@ pub fn load_png(path: &Path) -> io::Result<Image> {
     Ok(decode_png_to_rgba(info, data)?)
 }
 
+/// Asserts that `actual` matches the PNG baseline at `baseline_path`.
+///
+/// On failure, writes artifacts into `artifact_dir` and returns the mismatch
+/// details together with the artifact paths.
 pub fn assert_snapshot_matches(
     actual: &Image,
     baseline_path: &Path,

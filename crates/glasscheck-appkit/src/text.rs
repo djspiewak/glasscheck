@@ -12,16 +12,21 @@ mod imp {
     use crate::capture::capture_view_image;
     use crate::window::AppKitWindowHost;
 
+    /// Errors returned by the AppKit text harness.
     #[derive(Debug)]
     pub enum AppKitTextError {
+        /// Capturing pixels from AppKit failed.
         CaptureFailed,
+        /// A specific font name was combined with family/weight/italic options.
         ConflictingFontOptions {
             font_name: String,
             font_family: Option<String>,
             weight: Option<u16>,
             italic: bool,
         },
+        /// The requested font could not be resolved by AppKit.
         FontUnavailable(String),
+        /// The reference window did not produce a content view.
         WindowContentMissing,
     }
 
@@ -46,12 +51,14 @@ mod imp {
 
     impl std::error::Error for AppKitTextError {}
 
+    /// AppKit implementation of the `TextRenderer` trait.
     pub struct AppKitTextHarness<'a> {
         host: &'a AppKitWindowHost,
         mtm: MainThreadMarker,
     }
 
     impl<'a> AppKitTextHarness<'a> {
+        /// Creates a text harness backed by `host`.
         #[must_use]
         pub fn new(host: &'a AppKitWindowHost, mtm: MainThreadMarker) -> Self {
             Self { host, mtm }

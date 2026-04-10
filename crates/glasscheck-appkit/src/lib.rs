@@ -1,3 +1,8 @@
+//! AppKit backend for in-process functional testing of native macOS UIs.
+//!
+//! These APIs integrate the portable `glasscheck-core` assertions with AppKit
+//! windows, views, input synthesis, capture, and text rendering.
+
 mod capture;
 mod harness;
 mod input;

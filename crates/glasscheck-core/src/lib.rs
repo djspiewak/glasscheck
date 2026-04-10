@@ -1,3 +1,9 @@
+//! Core primitives for stable functional testing of native Rust UIs.
+//!
+//! This crate provides portable geometry, image comparison, semantic query,
+//! text assertion, and polling utilities. Platform-specific crates can build
+//! on these APIs to offer in-process UI testing without external automation.
+
 mod assertions;
 mod geometry;
 mod image;

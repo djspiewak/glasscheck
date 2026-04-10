@@ -1,31 +1,48 @@
 use crate::Rect;
 
+/// A semantic role attached to an instrumented UI node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Role {
+    /// A top-level window.
     Window,
+    /// A generic container view.
     Container,
+    /// A clickable button-like control.
     Button,
+    /// A text-editing control.
     TextInput,
+    /// A static text label.
     Label,
+    /// A caller-defined semantic role.
     Custom(&'static str),
 }
 
+/// Semantic metadata captured for a UI node under test.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeMetadata {
+    /// Stable semantic identifier for the node.
     pub id: Option<String>,
+    /// Semantic role for the node.
     pub role: Option<Role>,
+    /// Human-readable label for the node.
     pub label: Option<String>,
+    /// Bounds of the node in root coordinates.
     pub rect: Rect,
 }
 
+/// A semantic selector used to find instrumented nodes.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selector {
+    /// Required node identifier.
     pub id: Option<String>,
+    /// Required node role.
     pub role: Option<Role>,
+    /// Required node label.
     pub label: Option<String>,
 }
 
 impl Selector {
+    /// Creates a selector that matches a node by semantic ID.
     #[must_use]
     pub fn by_id(id: impl Into<String>) -> Self {
         Self {
@@ -35,6 +52,7 @@ impl Selector {
         }
     }
 
+    /// Creates a selector that matches a node by semantic role.
     #[must_use]
     pub fn by_role(role: Role) -> Self {
         Self {
@@ -44,6 +62,7 @@ impl Selector {
         }
     }
 
+    /// Creates a selector that matches a node by label.
     #[must_use]
     pub fn by_label(label: impl Into<String>) -> Self {
         Self {
@@ -53,6 +72,7 @@ impl Selector {
         }
     }
 
+    /// Returns `true` when all populated selector fields match `node`.
     #[must_use]
     pub fn matches(&self, node: &NodeMetadata) -> bool {
         self.id
@@ -69,9 +89,12 @@ impl Selector {
     }
 }
 
+/// Errors returned when resolving selectors against a query tree.
 #[derive(Debug)]
 pub enum QueryError {
+    /// No nodes matched the selector.
     NotFound(Selector),
+    /// More than one node matched a selector that expected a single result.
     MultipleMatches { selector: Selector, count: usize },
 }
 
@@ -88,22 +111,26 @@ impl std::fmt::Display for QueryError {
 
 impl std::error::Error for QueryError {}
 
+/// A flat semantic view of the UI nodes available for querying.
 #[derive(Clone, Debug, Default)]
 pub struct QueryRoot {
     nodes: Vec<NodeMetadata>,
 }
 
 impl QueryRoot {
+    /// Creates a query root from collected node metadata.
     #[must_use]
     pub fn new(nodes: Vec<NodeMetadata>) -> Self {
         Self { nodes }
     }
 
+    /// Returns all nodes in the query root.
     #[must_use]
     pub fn all(&self) -> &[NodeMetadata] {
         &self.nodes
     }
 
+    /// Finds exactly one node matching `selector`.
     pub fn find(&self, selector: &Selector) -> Result<&NodeMetadata, QueryError> {
         let matches: Vec<_> = self
             .nodes
@@ -120,6 +147,7 @@ impl QueryRoot {
         }
     }
 
+    /// Returns all nodes matching `selector`.
     #[must_use]
     pub fn find_all(&self, selector: &Selector) -> Vec<&NodeMetadata> {
         self.nodes

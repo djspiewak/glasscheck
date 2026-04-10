@@ -4,9 +4,12 @@ use std::time::{Duration, Instant};
 
 use crate::Image;
 
+/// Polling configuration for asynchronous UI assertions.
 #[derive(Clone, Copy, Debug)]
 pub struct PollOptions {
+    /// Maximum amount of time to wait before failing.
     pub timeout: Duration,
+    /// Delay between polling attempts.
     pub interval: Duration,
 }
 
@@ -19,9 +22,12 @@ impl Default for PollOptions {
     }
 }
 
+/// Errors returned by polling helpers.
 #[derive(Debug)]
 pub enum PollError {
+    /// The condition did not succeed before the timeout elapsed.
     Timeout { elapsed: Duration, attempts: usize },
+    /// A capture source could not provide an image.
     CaptureFailed(&'static str),
 }
 
@@ -42,6 +48,9 @@ impl std::fmt::Display for PollError {
 
 impl std::error::Error for PollError {}
 
+/// Repeatedly evaluates `predicate` until it returns `true` or times out.
+///
+/// Returns the number of attempts performed.
 pub fn wait_for_condition<F>(options: PollOptions, mut predicate: F) -> Result<usize, PollError>
 where
     F: FnMut() -> bool,
@@ -64,6 +73,9 @@ where
     }
 }
 
+/// Captures images until the output remains unchanged for `stable_frames`.
+///
+/// Returns the stable image once the requirement is met.
 pub fn wait_for_image_stability<F>(
     options: PollOptions,
     stable_frames: usize,
@@ -109,8 +121,10 @@ where
 }
 
 #[allow(dead_code)]
+/// Optional artifact container for wait-related debugging output.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WaitArtifacts {
+    /// Paths to captured frames.
     pub frames: Vec<PathBuf>,
 }
 

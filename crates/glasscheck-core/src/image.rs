@@ -1,13 +1,18 @@
 use crate::{Point, Rect, Size};
 
+/// An RGBA8 image used for capture and assertion workflows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Image {
+    /// Image width in pixels.
     pub width: u32,
+    /// Image height in pixels.
     pub height: u32,
+    /// Pixel data in row-major RGBA8 order.
     pub data: Vec<u8>,
 }
 
 impl Image {
+    /// Creates an RGBA8 image, panicking if the buffer length is invalid.
     #[must_use]
     pub fn new(width: u32, height: u32, data: Vec<u8>) -> Self {
         assert_eq!(
@@ -22,11 +27,13 @@ impl Image {
         }
     }
 
+    /// Returns `true` when the backing buffer exactly matches RGBA8 dimensions.
     #[must_use]
     pub fn is_valid_rgba(&self) -> bool {
         self.data.len() == self.width as usize * self.height as usize * 4
     }
 
+    /// Returns the pixel at `(x, y)` if it lies inside the image bounds.
     #[must_use]
     pub fn pixel_at(&self, x: u32, y: u32) -> Option<[u8; 4]> {
         if x >= self.width || y >= self.height {
@@ -46,6 +53,7 @@ impl Image {
         ])
     }
 
+    /// Crops the image to `rect`, clamping out-of-bounds coordinates.
     #[must_use]
     pub fn crop(&self, rect: Rect) -> Self {
         let start_x = rect.origin.x.max(0.0).floor() as u32;
@@ -72,6 +80,7 @@ impl Image {
         Self::new(width, height, data)
     }
 
+    /// Computes the average RGBA value over `rect`.
     #[must_use]
     pub fn average_rgba(&self, rect: Rect) -> [f64; 4] {
         let region = self.crop(rect);
@@ -97,6 +106,7 @@ impl Image {
         ]
     }
 
+    /// Returns the fraction of pixels whose luminance exceeds `threshold`.
     #[must_use]
     pub fn bright_pixel_fraction(&self, threshold: f64) -> f64 {
         if self.width == 0 || self.height == 0 {
@@ -118,11 +128,13 @@ impl Image {
         bright as f64 / f64::from(self.width * self.height)
     }
 
+    /// Returns the image size in view-coordinate form.
     #[must_use]
     pub fn size(&self) -> Size {
         Size::new(f64::from(self.width), f64::from(self.height))
     }
 
+    /// Returns the center point of the image.
     #[must_use]
     pub fn center(&self) -> Point {
         Point::new(f64::from(self.width) / 2.0, f64::from(self.height) / 2.0)
