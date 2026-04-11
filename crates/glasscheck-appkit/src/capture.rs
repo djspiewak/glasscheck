@@ -6,7 +6,9 @@ mod imp {
     use glasscheck_core::{Image, Point, Rect};
     use objc2::{AnyThread, ClassType};
     use objc2_app_kit::{NSBitmapImageRep, NSClipView, NSSplitView, NSView, NSWindow};
-    use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+    use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+
+    use crate::screen::offscreen_window_frame_rect;
 
     const MIN_CAPTURE_DIM: f64 = 50.0;
     const DEFAULT_CAPTURE_FRAME: NSRect =
@@ -37,8 +39,16 @@ mod imp {
     fn ensure_window_has_frame(window: &NSWindow) {
         let frame = window.frame();
         if frame.size.width < MIN_CAPTURE_DIM || frame.size.height < MIN_CAPTURE_DIM {
-            window.setMinSize(DEFAULT_CAPTURE_FRAME.size);
-            window.setFrame_display(DEFAULT_CAPTURE_FRAME, true);
+            let mtm = MainThreadMarker::new()
+                .expect("capture-time window repair should run on the main thread");
+            let repaired = offscreen_window_frame_rect(
+                mtm,
+                window.styleMask(),
+                DEFAULT_CAPTURE_FRAME.size.width,
+                DEFAULT_CAPTURE_FRAME.size.height,
+            );
+            window.setMinSize(repaired.size);
+            window.setFrame_display(repaired, true);
             if let Some(content) = window.contentView() {
                 force_split_view_layout(&content);
             }

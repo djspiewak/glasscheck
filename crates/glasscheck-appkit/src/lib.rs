@@ -6,6 +6,7 @@
 mod capture;
 mod harness;
 mod input;
+mod screen;
 mod text;
 mod window;
 

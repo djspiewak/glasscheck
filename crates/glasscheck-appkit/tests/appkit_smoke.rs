@@ -12,8 +12,8 @@ use glasscheck_core::{
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSBezierPath, NSClipView, NSColor, NSEvent, NSFont, NSFontManager, NSFontTraitMask,
-    NSGradient, NSTextView, NSView,
+    NSBezierPath, NSClipView, NSColor, NSEvent, NSFont, NSFontManager, NSFontTraitMask, NSGradient,
+    NSScreen, NSTextView, NSView,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
 
@@ -24,9 +24,17 @@ fn main() {
     run("capture_returns_non_empty_image", || {
         capture_returns_non_empty_image(harness)
     });
+    run(
+        "window_creation_starts_offscreen_for_all_connected_displays",
+        || window_creation_starts_offscreen_for_all_connected_displays(harness),
+    );
     run("query_reports_registered_view_geometry", || {
         query_reports_registered_view_geometry(harness)
     });
+    run(
+        "capture_resize_keeps_window_offscreen_for_all_connected_displays",
+        || capture_resize_keeps_window_offscreen_for_all_connected_displays(harness),
+    );
     run("direct_text_input_changes_rendered_content", || {
         direct_text_input_changes_rendered_content(harness)
     });
@@ -131,6 +139,33 @@ fn capture_returns_non_empty_image(harness: AppKitHarness) {
     let image = host.capture().expect("window capture should succeed");
     assert!(image.width > 0);
     assert!(image.height > 0);
+}
+
+fn window_creation_starts_offscreen_for_all_connected_displays(harness: AppKitHarness) {
+    let host = harness.create_window(240.0, 120.0);
+    harness.settle(2);
+
+    if let Some(displays) = connected_display_frames(harness.main_thread_marker()) {
+        assert_frame_is_offscreen_for_displays(host.window().frame(), &displays);
+    }
+}
+
+fn capture_resize_keeps_window_offscreen_for_all_connected_displays(harness: AppKitHarness) {
+    let host = harness.create_window(10.0, 10.0);
+    let view = make_view(harness.main_thread_marker(), NSSize::new(10.0, 10.0));
+    host.set_content_view(&view);
+    harness.settle(2);
+
+    let _ = host
+        .capture()
+        .expect("capture should repair undersized windows before rendering");
+
+    let frame = host.window().frame();
+    assert!(frame.size.width >= 800.0);
+    assert!(frame.size.height >= 600.0);
+    if let Some(displays) = connected_display_frames(harness.main_thread_marker()) {
+        assert_frame_is_offscreen_for_displays(frame, &displays);
+    }
 }
 
 fn query_reports_registered_view_geometry(harness: AppKitHarness) {
@@ -892,8 +927,7 @@ fn click_hotspot_reveals_rounded_gradient_and_anchored_text(harness: AppKitHarne
 
     let expectation = AnchoredTextExpectation::new(
         "Connected",
-        RegionSpec::node(NodePredicate::id_eq("gradient-card"))
-            .subregion(title_region_bounds()),
+        RegionSpec::node(NodePredicate::id_eq("gradient-card")).subregion(title_region_bounds()),
     )
     .with_font_name("Helvetica-BoldOblique")
     .with_point_size(18.0)
@@ -1119,6 +1153,39 @@ fn wait_until_flushes_runloop_between_attempts(harness: AppKitHarness) {
         .expect("eventual condition should succeed");
 
     assert!(attempts >= 2);
+}
+
+fn connected_display_frames(mtm: MainThreadMarker) -> Option<Vec<NSRect>> {
+    let displays: Vec<NSRect> = NSScreen::screens(mtm)
+        .iter()
+        .map(|screen| screen.frame())
+        .collect();
+    if displays.is_empty() {
+        eprintln!(
+            "headless context detected; skipping live display intersection assertion because NSScreen::screens returned no displays"
+        );
+        return None;
+    }
+    Some(displays)
+}
+
+fn assert_frame_is_offscreen_for_displays(frame: NSRect, displays: &[NSRect]) {
+    assert!(
+        !displays
+            .iter()
+            .copied()
+            .any(|display| rects_intersect(frame, display)),
+        "window frame {:?} should not intersect any connected display {:?}",
+        frame,
+        displays
+    );
+}
+
+fn rects_intersect(lhs: NSRect, rhs: NSRect) -> bool {
+    lhs.origin.x < rhs.origin.x + rhs.size.width
+        && rhs.origin.x < lhs.origin.x + lhs.size.width
+        && lhs.origin.y < rhs.origin.y + rhs.size.height
+        && rhs.origin.y < lhs.origin.y + lhs.size.height
 }
 
 fn make_view(mtm: MainThreadMarker, size: NSSize) -> Retained<NSView> {

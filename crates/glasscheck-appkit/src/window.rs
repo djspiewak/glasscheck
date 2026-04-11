@@ -6,11 +6,12 @@ mod imp {
     use objc2::rc::Retained;
     use objc2::MainThreadOnly;
     use objc2_app_kit::{NSBackingStoreType, NSView, NSWindow, NSWindowStyleMask};
-    use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
+    use objc2_foundation::{MainThreadMarker, NSString};
     use std::cell::RefCell;
 
     use crate::capture::{capture_view_image, crop_image_in_view_coordinates};
     use crate::input::AppKitInputDriver;
+    use crate::screen::offscreen_window_content_rect;
     use crate::text::AppKitTextHarness;
 
     /// Semantic metadata registered for a view exposed to `QueryRoot`.
@@ -39,7 +40,7 @@ mod imp {
         /// Creates a window host with a new `NSWindow`.
         #[must_use]
         pub fn new(mtm: MainThreadMarker, width: f64, height: f64) -> Self {
-            let rect = NSRect::new(NSPoint::new(100.0, 100.0), NSSize::new(width, height));
+            let rect = offscreen_window_content_rect(mtm, width, height);
             let style = NSWindowStyleMask::Titled
                 | NSWindowStyleMask::Closable
                 | NSWindowStyleMask::Resizable;
