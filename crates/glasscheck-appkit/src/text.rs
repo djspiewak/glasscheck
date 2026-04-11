@@ -287,8 +287,8 @@ mod imp {
             validate_font_expectation, AppKitTextError,
         };
         use glasscheck_core::{Image, Point, Rect, Size, TextExpectation};
-        use objc2_foundation::NSPoint;
         use objc2_app_kit::NSFontTraitMask;
+        use objc2_foundation::NSPoint;
 
         #[test]
         fn utf16_len_counts_non_bmp_scalar_values_as_two_code_units() {

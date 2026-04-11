@@ -75,10 +75,9 @@ fn main() {
         "rendered_text_assertion_reports_negative_origin_regression",
         || rendered_text_assertion_reports_negative_origin_regression(harness),
     );
-    run(
-        "capture_region_matches_negative_origin_region",
-        || capture_region_matches_negative_origin_region(harness),
-    );
+    run("capture_region_matches_negative_origin_region", || {
+        capture_region_matches_negative_origin_region(harness)
+    });
     run(
         "click_hotspot_reveals_rounded_gradient_and_anchored_text",
         || click_hotspot_reveals_rounded_gradient_and_anchored_text(harness),
@@ -1034,7 +1033,10 @@ fn repeated_hotspot_clicks_leave_gradient_scene_stable(harness: AppKitHarness) {
             generate_diff: false,
         },
     );
-    assert!(result.passed, "repeated hotspot clicks should leave the activated scene stable");
+    assert!(
+        result.passed,
+        "repeated hotspot clicks should leave the activated scene stable"
+    );
 }
 
 fn interactive_gradient_scene_reports_text_content_regression(harness: AppKitHarness) {
@@ -1335,10 +1337,7 @@ impl CountingClickView {
     }
 }
 
-fn register_gradient_scene(
-    host: &glasscheck_appkit::AppKitWindowHost,
-    scene: &GradientScene,
-) {
+fn register_gradient_scene(host: &glasscheck_appkit::AppKitWindowHost, scene: &GradientScene) {
     host.register_view(
         &scene.card_anchor,
         InstrumentedView {

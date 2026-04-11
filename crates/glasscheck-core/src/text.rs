@@ -639,7 +639,11 @@ fn composite_over_background(image: &Image, background: RgbaColor) -> Image {
 #[cfg(test)]
 fn composite_over_background_image(image: &Image, background: &Image) -> Image {
     let mut data = Vec::with_capacity(image.data.len());
-    for (pixel, background) in image.data.chunks_exact(4).zip(background.data.chunks_exact(4)) {
+    for (pixel, background) in image
+        .data
+        .chunks_exact(4)
+        .zip(background.data.chunks_exact(4))
+    {
         let alpha = f64::from(pixel[3]) / 255.0;
         let inverse = 1.0 - alpha;
         data.push(composite_channel(pixel[0], background[0], alpha, inverse));
@@ -704,11 +708,7 @@ fn compare_text_against_transparent_reference(
     }
 }
 
-fn transparent_reference_pixel_matches(
-    actual: &[u8],
-    expected: &[u8],
-    tolerance: i16,
-) -> bool {
+fn transparent_reference_pixel_matches(actual: &[u8], expected: &[u8], tolerance: i16) -> bool {
     if (i16::from(actual[3]) - 255).abs() > tolerance {
         return false;
     }
@@ -752,11 +752,7 @@ fn interpolate_color(start: RgbaColor, end: RgbaColor, t: f64) -> RgbaColor {
     )
 }
 
-fn content_bounds(
-    image: &Image,
-    background: RgbaColor,
-    tolerance: u8,
-) -> Option<Rect> {
+fn content_bounds(image: &Image, background: RgbaColor, tolerance: u8) -> Option<Rect> {
     let mut min_x = image.width;
     let mut min_y = image.height;
     let mut max_x = 0u32;
@@ -1033,8 +1029,8 @@ mod tests {
         let mut expected = transparent_reference(3, 3);
         paint_rect(&mut expected.data, 3, 1, 1, 1, 1, [200, 60, 80, 128]);
         let actual = composite_over_background_image(&expected, &background);
-        let expectation = TextExpectation::new("Hi", rect())
-            .with_foreground(RgbaColor::new(200, 60, 80, 255));
+        let expectation =
+            TextExpectation::new("Hi", rect()).with_foreground(RgbaColor::new(200, 60, 80, 255));
 
         let result = compare_rendered_text(
             &actual,
@@ -1052,8 +1048,8 @@ mod tests {
         paint_rect(&mut expected.data, 3, 1, 1, 1, 1, [200, 60, 80, 128]);
         let mut actual = composite_over_background_image(&expected, &background);
         paint_rect(&mut actual.data, 3, 1, 1, 1, 1, [220, 200, 210, 255]);
-        let expectation = TextExpectation::new("Hi", rect())
-            .with_foreground(RgbaColor::new(200, 60, 80, 255));
+        let expectation =
+            TextExpectation::new("Hi", rect()).with_foreground(RgbaColor::new(200, 60, 80, 255));
 
         let result = compare_rendered_text(
             &actual,
@@ -1078,8 +1074,8 @@ mod tests {
         paint_rect(&mut expected.data, 3, 1, 1, 1, 1, [255, 40, 40, 128]);
         let mut actual = composite_over_background_image(&expected, &background);
         paint_rect(&mut actual.data, 3, 1, 1, 1, 1, [120, 180, 120, 255]);
-        let expectation = TextExpectation::new("Hi", rect())
-            .with_foreground(RgbaColor::new(255, 40, 40, 255));
+        let expectation =
+            TextExpectation::new("Hi", rect()).with_foreground(RgbaColor::new(255, 40, 40, 255));
 
         let result = compare_rendered_text(
             &actual,
@@ -1232,8 +1228,8 @@ mod tests {
                 255,
             ],
         );
-        let expectation = TextExpectation::new("Hi", rect())
-            .with_foreground(RgbaColor::new(0, 0, 0, 255));
+        let expectation =
+            TextExpectation::new("Hi", rect()).with_foreground(RgbaColor::new(0, 0, 0, 255));
 
         let result = compare_rendered_text(
             &actual,
@@ -1257,17 +1253,9 @@ mod tests {
         let mut expected = transparent_reference(3, 3);
         paint_rect(&mut expected.data, 3, 1, 1, 1, 1, [0, 0, 0, 128]);
         let mut actual = composite_over_background_image(&expected, &background);
-        paint_rect(
-            &mut actual.data,
-            3,
-            1,
-            1,
-            1,
-            1,
-            [140, 140, 140, 255],
-        );
-        let expectation = TextExpectation::new("Hi", rect())
-            .with_foreground(RgbaColor::new(0, 0, 0, 255));
+        paint_rect(&mut actual.data, 3, 1, 1, 1, 1, [140, 140, 140, 255]);
+        let expectation =
+            TextExpectation::new("Hi", rect()).with_foreground(RgbaColor::new(0, 0, 0, 255));
 
         let result = compare_rendered_text(
             &actual,
@@ -1338,26 +1326,31 @@ mod tests {
 
     #[test]
     fn compare_rendered_text_rejects_region_size_changes_even_when_content_matches() {
-        let actual = Image::new(4, 4, vec![
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-        ]);
-        let expected = Image::new(6, 6, vec![
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255,
-            255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255,
-            255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-            255, 255, 255, 255, 255, 255, 255, 255,
-        ]);
+        let actual = Image::new(
+            4,
+            4,
+            vec![
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255,
+                255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            ],
+        );
+        let expected = Image::new(
+            6,
+            6,
+            vec![
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255,
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0,
+                0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            ],
+        );
         let expectation = TextExpectation::new("Sized", rect())
             .with_background(RgbaColor::new(255, 255, 255, 255));
 
@@ -1404,16 +1397,14 @@ mod tests {
                     2,
                     2,
                     vec![
-                        10, 20, 30, 255, 120, 140, 160, 255, 255, 255, 255, 255, 40, 50, 60,
-                        255,
+                        10, 20, 30, 255, 120, 140, 160, 255, 255, 255, 255, 255, 40, 50, 60, 255,
                     ],
                 ),
                 expected: Image::new(
                     2,
                     2,
                     vec![
-                        255, 255, 255, 0, 255, 255, 255, 96, 255, 255, 255, 255, 255, 255, 255,
-                        0,
+                        255, 255, 255, 0, 255, 255, 255, 96, 255, 255, 255, 255, 255, 255, 255, 0,
                     ],
                 ),
             },
@@ -1545,7 +1536,10 @@ mod tests {
                     .diff_path
                     .as_ref()
                     .is_some_and(|path| path.exists()));
-                let diff_path = artifacts.diff_path.as_ref().expect("diff path should exist");
+                let diff_path = artifacts
+                    .diff_path
+                    .as_ref()
+                    .expect("diff path should exist");
                 let diff = load_png(diff_path).expect("diff artifact should load");
                 assert_eq!(actual.width, diff.width);
                 assert_eq!(actual.height, diff.height);
