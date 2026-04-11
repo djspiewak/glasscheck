@@ -2,9 +2,9 @@
 
 use glasscheck_appkit::{AppKitHarness, InstrumentedView};
 use glasscheck_core::{
-    assert_text_renders, compare_images, AnchoredTextExpectation, CompareConfig, NodePredicate,
-    Point, PollOptions, Rect, RegionResolveError, RegionSpec, RgbaColor, Role, Selector, Size,
-    TextAssertionConfig, TextExpectation, TextMatch,
+    assert_text_renders, compare_images, load_png, AnchoredTextExpectation, CompareConfig,
+    NodePredicate, Point, PollOptions, Rect, RegionResolveError, RegionSpec, RgbaColor, Role,
+    Selector, Size, TextAssertionConfig, TextAssertionError, TextExpectation, TextMatch,
 };
 use objc2::rc::Retained;
 use objc2::MainThreadOnly;
@@ -35,14 +35,17 @@ fn main() {
     run("rendered_text_assertion_matches_live_text", || {
         rendered_text_assertion_matches_live_text(harness)
     });
+    run("rendered_text_assertion_reports_visual_regression", || {
+        rendered_text_assertion_reports_visual_regression(harness)
+    });
     run("anchored_text_assertion_matches_semantic_region", || {
         anchored_text_assertion_matches_semantic_region(harness)
     });
+    run("anchored_text_assertion_reports_visual_regression", || {
+        anchored_text_assertion_reports_visual_regression(harness)
+    });
     run("anchored_text_assertion_reports_ambiguous_match", || {
         anchored_text_assertion_reports_ambiguous_match(harness)
-    });
-    run("rendered_text_assertion_honors_non_zero_origin", || {
-        rendered_text_assertion_honors_non_zero_origin(harness)
     });
     run(
         "rendered_text_assertion_supports_family_weight_and_italic",
@@ -55,6 +58,14 @@ fn main() {
     run(
         "rendered_text_assertion_matches_negative_origin_region",
         || rendered_text_assertion_matches_negative_origin_region(harness),
+    );
+    run(
+        "rendered_text_assertion_reports_negative_origin_regression",
+        || rendered_text_assertion_reports_negative_origin_regression(harness),
+    );
+    run(
+        "capture_region_matches_negative_origin_region",
+        || capture_region_matches_negative_origin_region(harness),
     );
     run("wait_until_flushes_runloop_between_attempts", || {
         wait_until_flushes_runloop_between_attempts(harness)
@@ -267,6 +278,79 @@ fn rendered_text_assertion_matches_live_text(harness: AppKitHarness) {
     let _ = std::fs::remove_dir_all(artifact_dir);
 }
 
+fn rendered_text_assertion_reports_visual_regression(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 160.0);
+    let view = make_text_view(harness.main_thread_marker(), NSSize::new(320.0, 160.0));
+    let font = NSFont::systemFontOfSize(18.0);
+    view.setFont(Some(&font));
+    if let Some(text_container) = unsafe { view.textContainer() } {
+        text_container.setLineFragmentPadding(0.0);
+    }
+    let background = NSColor::whiteColor();
+    view.setBackgroundColor(&background);
+    let foreground = NSColor::blackColor();
+    view.setTextColor(Some(&foreground));
+    host.set_content_view(&view);
+
+    host.input().replace_text(&view, "Functional UI");
+    harness.settle(2);
+
+    let expectation = TextExpectation::new(
+        "XXXXXXXXXXXX",
+        Rect::new(Point::new(0.0, 0.0), Size::new(320.0, 160.0)),
+    )
+    .with_point_size(18.0)
+    .with_foreground(RgbaColor::new(255, 0, 0, 255))
+    .with_background(RgbaColor::new(255, 255, 255, 255));
+
+    let artifact_dir = unique_temp_dir("rendered-text-regression");
+    let error = assert_text_renders(
+        &host.text_renderer(harness.main_thread_marker()),
+        &expectation,
+        &artifact_dir,
+        &TextAssertionConfig {
+            compare: CompareConfig {
+                channel_tolerance: 24,
+                match_threshold: 0.97,
+                generate_diff: true,
+            },
+            write_diff: true,
+        },
+    )
+    .unwrap_err();
+
+    match error {
+        TextAssertionError::Mismatch {
+            expectation: failed_expectation,
+            artifacts,
+            result,
+        } => {
+            assert_eq!(failed_expectation.content, "XXXXXXXXXXXX");
+            assert!(!result.passed);
+            assert!(result.mismatched_pixels > 0);
+            assert!(artifacts.actual_path.exists());
+            assert!(artifacts.expected_path.exists());
+            let actual = load_png(&artifacts.actual_path).expect("actual artifact should load");
+            let expected =
+                load_png(&artifacts.expected_path).expect("expected artifact should load");
+            assert_eq!(actual.width, expected.width);
+            assert_eq!(actual.height, expected.height);
+            assert!(artifacts
+                .diff_path
+                .as_ref()
+                .is_none_or(|path| path.exists()));
+            if let Some(diff_path) = artifacts.diff_path.as_ref() {
+                let diff = load_png(diff_path).expect("diff artifact should load");
+                assert_eq!(actual.width, diff.width);
+                assert_eq!(actual.height, diff.height);
+            }
+        }
+        other => panic!("expected mismatch error, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(artifact_dir);
+}
+
 fn anchored_text_assertion_reports_ambiguous_match(harness: AppKitHarness) {
     let host = harness.create_window(320.0, 160.0);
     let container = make_view(harness.main_thread_marker(), NSSize::new(320.0, 160.0));
@@ -369,51 +453,77 @@ fn anchored_text_assertion_matches_semantic_region(harness: AppKitHarness) {
     let _ = std::fs::remove_dir_all(artifact_dir);
 }
 
-fn rendered_text_assertion_honors_non_zero_origin(harness: AppKitHarness) {
-    let host = harness.create_window(240.0, 120.0);
-    let view = make_text_view(harness.main_thread_marker(), NSSize::new(160.0, 80.0));
-    let font_name = NSString::from_str("Menlo-Regular");
-    let font = NSFont::fontWithName_size(&font_name, 24.0)
-        .expect("Menlo-Regular font should be available on macOS");
+fn anchored_text_assertion_reports_visual_regression(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 160.0);
+    let view = make_text_view(harness.main_thread_marker(), NSSize::new(320.0, 160.0));
+    let font = NSFont::systemFontOfSize(18.0);
     view.setFont(Some(&font));
     if let Some(text_container) = unsafe { view.textContainer() } {
         text_container.setLineFragmentPadding(0.0);
     }
-    view.setDrawsBackground(true);
     let background = NSColor::whiteColor();
     view.setBackgroundColor(&background);
     let foreground = NSColor::blackColor();
     view.setTextColor(Some(&foreground));
-    view.setFrameOrigin(NSPoint::new(20.0, 20.0));
     host.set_content_view(&view);
+    host.register_view(
+        &view,
+        InstrumentedView {
+            id: Some("editor".into()),
+            role: Some(Role::TextInput),
+            label: Some("Editor Canvas".into()),
+        },
+    );
 
-    host.input().replace_text(&view, "I");
+    host.input().replace_text(&view, "Functional UI");
     harness.settle(2);
 
-    let expectation = TextExpectation::new(
-        "I",
-        Rect::new(Point::new(20.0, 20.0), Size::new(60.0, 60.0)),
+    let expectation = AnchoredTextExpectation::new(
+        "XXXXXXXXXXXX",
+        RegionSpec::node(NodePredicate::and(vec![
+            NodePredicate::role_eq(Role::TextInput),
+            NodePredicate::label(TextMatch::contains("Canvas")),
+        ])),
     )
-    .with_font_name("Menlo-Regular")
-    .with_point_size(24.0)
-    .with_foreground(RgbaColor::new(0, 0, 0, 255))
+    .with_point_size(18.0)
+    .with_foreground(RgbaColor::new(255, 0, 0, 255))
     .with_background(RgbaColor::new(255, 255, 255, 255));
 
-    let artifact_dir = unique_temp_dir("rendered-text-offset");
-    assert_text_renders(
-        &host.text_renderer(harness.main_thread_marker()),
-        &expectation,
-        &artifact_dir,
-        &TextAssertionConfig {
-            compare: CompareConfig {
-                channel_tolerance: 24,
-                match_threshold: 0.96,
-                generate_diff: true,
+    let artifact_dir = unique_temp_dir("anchored-rendered-text-regression");
+    let error = host
+        .text_renderer(harness.main_thread_marker())
+        .assert_text_renders_anchored(
+            &expectation,
+            &artifact_dir,
+            &TextAssertionConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 24,
+                    match_threshold: 0.97,
+                    generate_diff: true,
+                },
+                write_diff: true,
             },
-            write_diff: true,
-        },
-    )
-    .expect("rendered text with non-zero origin should match the AppKit reference rendering");
+        )
+        .unwrap_err();
+
+    match error {
+        glasscheck_appkit::AppKitAnchoredTextError::Assert(TextAssertionError::Mismatch {
+            expectation: failed_expectation,
+            artifacts,
+            result,
+        }) => {
+            assert_eq!(failed_expectation.content, "XXXXXXXXXXXX");
+            assert!(!result.passed);
+            assert!(result.mismatched_pixels > 0);
+            assert!(artifacts.actual_path.exists());
+            assert!(artifacts.expected_path.exists());
+            assert!(artifacts
+                .diff_path
+                .as_ref()
+                .is_none_or(|path| path.exists()));
+        }
+        other => panic!("expected mismatch error, got {other:?}"),
+    }
 
     let _ = std::fs::remove_dir_all(artifact_dir);
 }
@@ -536,6 +646,14 @@ fn rendered_text_assertion_matches_negative_origin_region(harness: AppKitHarness
     view.setFrameOrigin(NSPoint::new(-20.0, -12.0));
     container.addSubview(&view);
     host.set_content_view(&container);
+    host.register_view(
+        &view,
+        InstrumentedView {
+            id: Some("neg-origin".into()),
+            role: Some(Role::TextInput),
+            label: Some("Negative Origin".into()),
+        },
+    );
 
     host.input().replace_text(&view, "I");
     harness.settle(2);
@@ -566,6 +684,145 @@ fn rendered_text_assertion_matches_negative_origin_region(harness: AppKitHarness
     .expect("negative-origin text regions should match the visible AppKit rendering");
 
     let _ = std::fs::remove_dir_all(artifact_dir);
+}
+
+fn rendered_text_assertion_reports_negative_origin_regression(harness: AppKitHarness) {
+    let host = harness.create_window(120.0, 120.0);
+    let container = make_view(harness.main_thread_marker(), NSSize::new(120.0, 120.0));
+    let view = make_text_view(harness.main_thread_marker(), NSSize::new(80.0, 80.0));
+    let font_name = NSString::from_str("Menlo-Regular");
+    let font = NSFont::fontWithName_size(&font_name, 24.0)
+        .expect("Menlo-Regular font should be available on macOS");
+    view.setFont(Some(&font));
+    if let Some(text_container) = unsafe { view.textContainer() } {
+        text_container.setLineFragmentPadding(0.0);
+    }
+    view.setDrawsBackground(true);
+    let background = NSColor::whiteColor();
+    view.setBackgroundColor(&background);
+    let foreground = NSColor::blackColor();
+    view.setTextColor(Some(&foreground));
+    view.setFrameOrigin(NSPoint::new(-20.0, -12.0));
+    container.addSubview(&view);
+    host.set_content_view(&container);
+    host.register_view(
+        &view,
+        InstrumentedView {
+            id: Some("neg-origin".into()),
+            role: Some(Role::TextInput),
+            label: Some("Negative Origin".into()),
+        },
+    );
+
+    host.input().replace_text(&view, "I");
+    harness.settle(2);
+
+    let expectation = TextExpectation::new(
+        "\n    I",
+        Rect::new(Point::new(-20.0, -12.0), Size::new(80.0, 80.0)),
+    )
+    .with_font_name("Menlo-Regular")
+    .with_point_size(24.0)
+    .with_foreground(RgbaColor::new(255, 0, 0, 255))
+    .with_background(RgbaColor::new(255, 255, 255, 255));
+
+    let artifact_dir = unique_temp_dir("rendered-text-negative-origin");
+    let error = assert_text_renders(
+        &host.text_renderer(harness.main_thread_marker()),
+        &expectation,
+        &artifact_dir,
+        &TextAssertionConfig {
+            compare: CompareConfig {
+                channel_tolerance: 24,
+                match_threshold: 0.96,
+                generate_diff: true,
+            },
+            write_diff: true,
+        },
+    )
+    .unwrap_err();
+
+    match error {
+        TextAssertionError::Mismatch {
+            expectation: failed_expectation,
+            artifacts,
+            result,
+        } => {
+            assert_eq!(failed_expectation.content, "\n    I");
+            assert!(!result.passed);
+            assert!(result.mismatched_pixels > 0);
+            assert!(artifacts.actual_path.exists());
+            assert!(artifacts.expected_path.exists());
+            assert!(artifacts
+                .diff_path
+                .as_ref()
+                .is_none_or(|path| path.exists()));
+        }
+        other => panic!("expected mismatch error, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(artifact_dir);
+}
+
+fn capture_region_matches_negative_origin_region(harness: AppKitHarness) {
+    let host = harness.create_window(120.0, 120.0);
+    let container = make_view(harness.main_thread_marker(), NSSize::new(120.0, 120.0));
+    let view = make_text_view(harness.main_thread_marker(), NSSize::new(80.0, 80.0));
+    let font_name = NSString::from_str("Menlo-Regular");
+    let font = NSFont::fontWithName_size(&font_name, 24.0)
+        .expect("Menlo-Regular font should be available on macOS");
+    view.setFont(Some(&font));
+    if let Some(text_container) = unsafe { view.textContainer() } {
+        text_container.setLineFragmentPadding(0.0);
+    }
+    view.setDrawsBackground(true);
+    let background = NSColor::whiteColor();
+    view.setBackgroundColor(&background);
+    let foreground = NSColor::blackColor();
+    view.setTextColor(Some(&foreground));
+    view.setFrameOrigin(NSPoint::new(-20.0, -12.0));
+    container.addSubview(&view);
+    host.set_content_view(&container);
+    host.register_view(
+        &view,
+        InstrumentedView {
+            id: Some("neg-origin".into()),
+            role: Some(Role::TextInput),
+            label: Some("Negative Origin".into()),
+        },
+    );
+
+    host.input().replace_text(&view, "I");
+    harness.settle(2);
+
+    let window = host.capture().expect("window capture should succeed");
+    let rect = host
+        .resolve_region(&RegionSpec::node(NodePredicate::label(TextMatch::exact(
+            "Negative Origin",
+        ))))
+        .expect("negative-origin region should resolve");
+    let region = host
+        .capture_region(&RegionSpec::node(NodePredicate::label(TextMatch::exact(
+            "Negative Origin",
+        ))))
+        .expect("negative-origin region capture should succeed");
+    let expected = window.crop(Rect::new(
+        Point::new(
+            rect.origin.x,
+            (f64::from(window.height) - rect.origin.y - rect.size.height).max(0.0),
+        ),
+        rect.size,
+    ));
+    let result = compare_images(
+        &region,
+        &expected,
+        &CompareConfig {
+            channel_tolerance: 0,
+            match_threshold: 1.0,
+            generate_diff: false,
+        },
+    );
+    assert!(result.passed);
 }
 
 fn wait_until_flushes_runloop_between_attempts(harness: AppKitHarness) {

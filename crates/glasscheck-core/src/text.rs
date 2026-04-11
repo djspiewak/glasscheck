@@ -1,7 +1,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::{compare_images, CompareConfig, CompareResult, Image, Rect, RegionSpec};
+use crate::{compare_images, CompareConfig, CompareResult, Image, Point, Rect, RegionSpec, Size};
 
 /// An RGBA color used for text expectations and compositing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -453,11 +453,7 @@ pub fn compare_rendered_text(
     expectation: &TextExpectation,
     config: &TextAssertionConfig,
 ) -> CompareResult {
-    let background = expectation
-        .background
-        .unwrap_or_else(|| sample_background_color(actual));
-    let composited_expected = composite_over_background(expected, background);
-    compare_images(actual, &composited_expected, &config.compare)
+    prepare_rendered_text_comparison(actual, expected, expectation, config).result
 }
 
 /// Asserts that a backend renders and captures text consistently for `expectation`.
@@ -481,20 +477,25 @@ where
         .capture_text_region(expectation)
         .map_err(TextAssertionError::Capture)?;
 
-    let background = expectation
-        .background
-        .unwrap_or_else(|| sample_background_color(&actual));
-    let composited_expected = composite_over_background(&expected, background);
-    let result = compare_images(&actual, &composited_expected, &config.compare);
+    let comparison = prepare_rendered_text_comparison(&actual, &expected, expectation, config);
+    let result = comparison.result;
     if result.passed {
         return Ok(());
     }
 
     std::fs::create_dir_all(artifact_dir)?;
+    let actual_for_artifact = comparison
+        .comparison_bounds
+        .map(|bounds| actual.crop(bounds))
+        .unwrap_or_else(|| actual.clone());
+    let expected_for_artifact = comparison
+        .comparison_bounds
+        .map(|bounds| comparison.composited_expected.crop(bounds))
+        .unwrap_or_else(|| comparison.composited_expected.clone());
     let actual_path = artifact_dir.join("actual.png");
-    crate::save_png(&actual, &actual_path)?;
+    crate::save_png(&actual_for_artifact, &actual_path)?;
     let expected_path = artifact_dir.join("expected.png");
-    crate::save_png(&composited_expected, &expected_path)?;
+    crate::save_png(&expected_for_artifact, &expected_path)?;
     let diff_path = if config.write_diff {
         let path = artifact_dir.join("diff.png");
         if let Some(image) = result.diff_image.as_ref() {
@@ -516,6 +517,51 @@ where
         },
         result,
     })
+}
+
+struct RenderedTextComparison {
+    composited_expected: Image,
+    comparison_bounds: Option<Rect>,
+    result: CompareResult,
+}
+
+fn prepare_rendered_text_comparison(
+    actual: &Image,
+    expected: &Image,
+    expectation: &TextExpectation,
+    config: &TextAssertionConfig,
+) -> RenderedTextComparison {
+    let background = expectation
+        .background
+        .unwrap_or_else(|| sample_background_color(actual));
+    let composited_expected = composite_over_background(expected, background);
+    if actual.width != composited_expected.width || actual.height != composited_expected.height {
+        let result = compare_images(actual, &composited_expected, &config.compare);
+        return RenderedTextComparison {
+            composited_expected,
+            comparison_bounds: None,
+            result,
+        };
+    }
+    let comparison_bounds = comparison_bounds(
+        actual,
+        &composited_expected,
+        background,
+        config.compare.channel_tolerance,
+    );
+    let focused_actual = comparison_bounds
+        .map(|bounds| actual.crop(bounds))
+        .unwrap_or_else(|| actual.clone());
+    let focused_expected = comparison_bounds
+        .map(|bounds| composited_expected.crop(bounds))
+        .unwrap_or_else(|| composited_expected.clone());
+    let result = compare_images(&focused_actual, &focused_expected, &config.compare);
+
+    RenderedTextComparison {
+        composited_expected,
+        comparison_bounds,
+        result,
+    }
 }
 
 fn sample_background_color(image: &Image) -> RgbaColor {
@@ -572,6 +618,80 @@ fn composite_over_background(image: &Image, background: RgbaColor) -> Image {
     Image::new(image.width, image.height, data)
 }
 
+fn content_bounds(
+    image: &Image,
+    background: RgbaColor,
+    tolerance: u8,
+) -> Option<Rect> {
+    let mut min_x = image.width;
+    let mut min_y = image.height;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut found = false;
+
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let pixel = image
+                .pixel_at(x, y)
+                .expect("iterated coordinates should stay within image bounds");
+
+            if is_background_pixel(pixel, background, tolerance) {
+                continue;
+            }
+
+            found = true;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+
+    found.then(|| {
+        Rect::new(
+            Point::new(f64::from(min_x), f64::from(min_y)),
+            Size::new(f64::from(max_x - min_x + 1), f64::from(max_y - min_y + 1)),
+        )
+    })
+}
+
+fn comparison_bounds(
+    actual: &Image,
+    expected: &Image,
+    background: RgbaColor,
+    tolerance: u8,
+) -> Option<Rect> {
+    union_bounds(
+        content_bounds(actual, background, tolerance),
+        content_bounds(expected, background, tolerance),
+    )
+}
+
+fn is_background_pixel(pixel: [u8; 4], background: RgbaColor, tolerance: u8) -> bool {
+    let tolerance = u16::from(tolerance);
+    [background.red, background.green, background.blue, 255]
+        .iter()
+        .zip(pixel.iter())
+        .all(|(expected, actual)| u16::from(*expected).abs_diff(u16::from(*actual)) <= tolerance)
+}
+
+fn union_bounds(left: Option<Rect>, right: Option<Rect>) -> Option<Rect> {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            let min_x = left.origin.x.min(right.origin.x);
+            let min_y = left.origin.y.min(right.origin.y);
+            let max_x = (left.origin.x + left.size.width).max(right.origin.x + right.size.width);
+            let max_y = (left.origin.y + left.size.height).max(right.origin.y + right.size.height);
+            Some(Rect::new(
+                Point::new(min_x, min_y),
+                Size::new(max_x - min_x, max_y - min_y),
+            ))
+        }
+        (Some(bounds), None) | (None, Some(bounds)) => Some(bounds),
+        (None, None) => None,
+    }
+}
+
 fn composite_channel(foreground: u8, background: u8, alpha: f64, inverse: f64) -> u8 {
     (f64::from(foreground) * alpha + f64::from(background) * inverse).round() as u8
 }
@@ -579,7 +699,7 @@ fn composite_channel(foreground: u8, background: u8, alpha: f64, inverse: f64) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Point, Size};
+    use crate::{load_png, Point, Size};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -705,6 +825,114 @@ mod tests {
     }
 
     #[test]
+    fn compare_rendered_text_rejects_content_displacement() {
+        let mut actual = vec![255; 20 * 20 * 4];
+        let mut expected = vec![255; 20 * 20 * 4];
+        for alpha in actual.iter_mut().skip(3).step_by(4) {
+            *alpha = 255;
+        }
+        for alpha in expected.iter_mut().skip(3).step_by(4) {
+            *alpha = 255;
+        }
+
+        paint_rect(&mut actual, 20, 10, 9, 2, 2, [0, 0, 0, 255]);
+        paint_rect(&mut expected, 20, 9, 9, 2, 2, [0, 0, 0, 255]);
+
+        let expectation = TextExpectation::new("Shifted", rect())
+            .with_background(RgbaColor::new(255, 255, 255, 255));
+        let result = compare_rendered_text(
+            &Image::new(20, 20, actual),
+            &Image::new(20, 20, expected),
+            &expectation,
+            &TextAssertionConfig::default(),
+        );
+        assert!(!result.passed);
+        assert_eq!(result.mismatched_pixels, 4);
+    }
+
+    #[test]
+    fn compare_rendered_text_ignores_blank_padding_around_matching_content() {
+        let mut actual = vec![255; 20 * 20 * 4];
+        let mut expected = vec![255; 20 * 20 * 4];
+        for alpha in actual.iter_mut().skip(3).step_by(4) {
+            *alpha = 255;
+        }
+        for alpha in expected.iter_mut().skip(3).step_by(4) {
+            *alpha = 255;
+        }
+
+        paint_rect(&mut actual, 20, 10, 9, 2, 2, [0, 0, 0, 255]);
+        paint_rect(&mut expected, 20, 10, 9, 2, 2, [0, 0, 0, 255]);
+
+        let expectation = TextExpectation::new("Shifted", rect())
+            .with_background(RgbaColor::new(255, 255, 255, 255));
+        let result = compare_rendered_text(
+            &Image::new(20, 20, actual),
+            &Image::new(20, 20, expected),
+            &expectation,
+            &TextAssertionConfig::default(),
+        );
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_rejects_region_size_changes_even_when_content_matches() {
+        let actual = Image::new(4, 4, vec![
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        ]);
+        let expected = Image::new(6, 6, vec![
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+        ]);
+        let expectation = TextExpectation::new("Sized", rect())
+            .with_background(RgbaColor::new(255, 255, 255, 255));
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig::default(),
+        );
+        assert!(!result.passed);
+        assert_eq!(result.mismatched_pixels, u32::MAX);
+    }
+
+    #[test]
+    fn assert_text_renders_passes_when_images_match() {
+        let artifact_dir = unique_temp_dir();
+        let expectation = TextExpectation::new("Hello", rect());
+        assert_text_renders(
+            &StubRenderer {
+                actual: image(7),
+                expected: image(7),
+            },
+            &expectation,
+            &artifact_dir,
+            &TextAssertionConfig::default(),
+        )
+        .expect("matching text render should pass");
+
+        assert!(!artifact_dir.join("actual.png").exists());
+        assert!(!artifact_dir.join("expected.png").exists());
+        assert!(!artifact_dir.join("diff.png").exists());
+
+        let _ = std::fs::remove_dir_all(artifact_dir);
+    }
+
+    #[test]
     fn assert_text_renders_writes_expected_actual_and_diff_artifacts() {
         let artifact_dir = unique_temp_dir();
         let expectation = TextExpectation::new("Hello", rect());
@@ -720,13 +948,28 @@ mod tests {
         .unwrap_err();
 
         match error {
-            TextAssertionError::Mismatch { artifacts, .. } => {
-                assert!(artifacts.actual_path.exists());
-                assert!(artifacts.expected_path.exists());
+            TextAssertionError::Mismatch {
+                expectation: failed_expectation,
+                artifacts,
+                result,
+            } => {
+                assert_eq!(failed_expectation.content, "Hello");
+                assert!(!result.passed);
+                assert_eq!(result.mismatched_pixels, 2);
+                assert_eq!(result.matched_ratio, 0.0);
+                let actual = load_png(&artifacts.actual_path).expect("actual artifact should load");
+                let expected =
+                    load_png(&artifacts.expected_path).expect("expected artifact should load");
+                assert_eq!(actual.width, expected.width);
+                assert_eq!(actual.height, expected.height);
                 assert!(artifacts
                     .diff_path
                     .as_ref()
                     .is_some_and(|path| path.exists()));
+                let diff_path = artifacts.diff_path.as_ref().expect("diff path should exist");
+                let diff = load_png(diff_path).expect("diff artifact should load");
+                assert_eq!(actual.width, diff.width);
+                assert_eq!(actual.height, diff.height);
             }
             other => panic!("expected mismatch error, got {other:?}"),
         }
@@ -749,5 +992,22 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).expect("temporary directory should be creatable");
         path
+    }
+
+    fn paint_rect(
+        image: &mut [u8],
+        width: usize,
+        origin_x: usize,
+        origin_y: usize,
+        rect_width: usize,
+        rect_height: usize,
+        pixel: [u8; 4],
+    ) {
+        for y in origin_y..origin_y + rect_height {
+            for x in origin_x..origin_x + rect_width {
+                let base = (y * width + x) * 4;
+                image[base..base + 4].copy_from_slice(&pixel);
+            }
+        }
     }
 }

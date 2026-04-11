@@ -186,7 +186,7 @@ mod imp {
 
     fn text_frame(rect: Rect) -> NSRect {
         NSRect::new(
-            NSPoint::new(rect.origin.x.max(0.0), rect.origin.y.max(0.0)),
+            NSPoint::new(rect.origin.x, rect.origin.y),
             NSSize::new(rect.size.width.max(1.0), rect.size.height.max(1.0)),
         )
     }
@@ -282,10 +282,11 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::{
-            crop_in_view_coordinates, font_manager_weight, font_traits, utf16_len,
+            crop_in_view_coordinates, font_manager_weight, font_traits, text_frame, utf16_len,
             validate_font_expectation, AppKitTextError,
         };
         use glasscheck_core::{Image, Point, Rect, Size, TextExpectation};
+        use objc2_foundation::NSPoint;
         use objc2_app_kit::NSFontTraitMask;
 
         #[test]
@@ -345,6 +346,14 @@ mod imp {
             assert_eq!(cropped.width, 1);
             assert_eq!(cropped.height, 1);
             assert_eq!(cropped.data, vec![70, 70, 70, 255]);
+        }
+
+        #[test]
+        fn text_frame_preserves_negative_origin() {
+            let frame = text_frame(Rect::new(Point::new(-20.0, -12.0), Size::new(80.0, 80.0)));
+            assert_eq!(frame.origin, NSPoint::new(-20.0, -12.0));
+            assert_eq!(frame.size.width, 80.0);
+            assert_eq!(frame.size.height, 80.0);
         }
 
         #[test]

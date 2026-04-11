@@ -321,6 +321,15 @@ mod tests {
     }
 
     #[test]
+    fn compare_passes_for_exact_match() {
+        let result = compare_images(&image(42), &image(42), &CompareConfig::default());
+        assert!(result.passed);
+        assert_eq!(result.mismatched_pixels, 0);
+        assert_eq!(result.matched_ratio, 1.0);
+        assert!(result.diff_image.is_none());
+    }
+
+    #[test]
     fn compare_rejects_malformed_images() {
         let valid = image(0);
         let malformed = Image {
@@ -370,6 +379,71 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    #[test]
+    fn assert_snapshot_matches_reports_visual_regression_and_writes_artifacts() {
+        let baseline_path = unique_temp_png_path();
+        save_png(&image(0), &baseline_path).expect("baseline PNG should be writable");
+
+        let artifact_dir = unique_temp_artifact_dir("snapshot-regression");
+        let error = assert_snapshot_matches(
+            &image(255),
+            &baseline_path,
+            &artifact_dir,
+            &SnapshotConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 0,
+                    match_threshold: 1.0,
+                    generate_diff: true,
+                },
+                write_diff: true,
+            },
+        )
+        .unwrap_err();
+
+        match error {
+            SnapshotError::Mismatch {
+                baseline,
+                artifacts,
+                result,
+            } => {
+                assert_eq!(baseline, baseline_path);
+                assert!(!result.passed);
+                assert_eq!(result.mismatched_pixels, 2);
+                assert_eq!(result.matched_ratio, 0.0);
+                assert!(artifacts.actual_path.exists());
+                assert!(artifacts
+                    .diff_path
+                    .as_ref()
+                    .is_some_and(|path| path.exists()));
+            }
+            other => panic!("expected mismatch error, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(baseline_path);
+        let _ = std::fs::remove_dir_all(artifact_dir);
+    }
+
+    #[test]
+    fn assert_snapshot_matches_passes_for_matching_baseline() {
+        let baseline_path = unique_temp_png_path();
+        save_png(&image(64), &baseline_path).expect("baseline PNG should be writable");
+
+        let artifact_dir = unique_temp_artifact_dir("snapshot-match");
+        assert_snapshot_matches(
+            &image(64),
+            &baseline_path,
+            &artifact_dir,
+            &SnapshotConfig::default(),
+        )
+        .expect("matching baseline should pass");
+
+        assert!(!artifact_dir.join("actual.png").exists());
+        assert!(!artifact_dir.join("diff.png").exists());
+
+        let _ = std::fs::remove_file(baseline_path);
+        let _ = std::fs::remove_dir_all(artifact_dir);
+    }
+
     fn write_png(
         color_type: png::ColorType,
         bit_depth: png::BitDepth,
@@ -403,5 +477,22 @@ mod tests {
             nanos,
             count
         ))
+    }
+
+    fn unique_temp_artifact_dir(prefix: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "glasscheck-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            count
+        ));
+        std::fs::create_dir_all(&path).expect("temporary directory should be creatable");
+        path
     }
 }
