@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use crate::Image;
+use crate::{Image, SceneSnapshot};
 
 /// Polling configuration for asynchronous UI assertions.
 #[derive(Clone, Copy, Debug)]
@@ -120,6 +120,50 @@ where
     }
 }
 
+/// Captures scene snapshots until the scene remains unchanged for `stable_polls`.
+pub fn wait_for_scene_stability<F>(
+    options: PollOptions,
+    stable_polls: usize,
+    mut capture: F,
+) -> Result<SceneSnapshot, PollError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+{
+    let start = Instant::now();
+    let mut attempts = 0usize;
+    let required = stable_polls.max(1);
+    let mut run_length = 0usize;
+    let mut previous: Option<SceneSnapshot> = None;
+
+    loop {
+        attempts += 1;
+        let current = capture().ok_or(PollError::CaptureFailed("scene source returned None"))?;
+        if required == 1 || run_length + 1 >= required && previous.as_ref() == Some(&current) {
+            return Ok(current);
+        }
+
+        if let Some(previous) = previous.as_ref() {
+            if previous == &current {
+                run_length += 1;
+            } else {
+                run_length = 1;
+            }
+        } else {
+            run_length = 1;
+        }
+
+        previous = Some(current);
+
+        if start.elapsed() >= options.timeout {
+            return Err(PollError::Timeout {
+                elapsed: start.elapsed(),
+                attempts,
+            });
+        }
+        sleep(options.interval);
+    }
+}
+
 #[allow(dead_code)]
 /// Optional artifact container for wait-related debugging output.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -134,6 +178,15 @@ mod tests {
 
     fn image(value: u8) -> Image {
         Image::new(1, 1, vec![value, value, value, 255])
+    }
+
+    fn scene(value: i64) -> SceneSnapshot {
+        SceneSnapshot::new(vec![crate::SemanticNode::new(
+            format!("node-{value}"),
+            crate::Role::Container,
+            crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(1.0, 1.0)),
+        )
+        .with_property("value", crate::PropertyValue::Integer(value))])
     }
 
     #[test]
@@ -213,6 +266,41 @@ mod tests {
             || {
                 next += 1;
                 Some(if next % 2 == 0 { image(2) } else { image(1) })
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, PollError::Timeout { .. }));
+    }
+
+    #[test]
+    fn wait_for_scene_stability_detects_stable_tail() {
+        let mut scenes = vec![scene(1), scene(2), scene(2)].into_iter();
+        let stable = wait_for_scene_stability(
+            PollOptions {
+                timeout: Duration::from_millis(50),
+                interval: Duration::from_millis(1),
+            },
+            2,
+            || scenes.next(),
+        )
+        .unwrap();
+
+        assert_eq!(stable, scene(2));
+    }
+
+    #[test]
+    fn wait_for_scene_stability_times_out_when_scene_keeps_changing() {
+        let mut next = 0i64;
+        let error = wait_for_scene_stability(
+            PollOptions {
+                timeout: Duration::from_millis(5),
+                interval: Duration::from_millis(1),
+            },
+            2,
+            || {
+                next += 1;
+                Some(scene(next))
             },
         )
         .unwrap_err();

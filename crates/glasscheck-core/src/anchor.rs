@@ -1,107 +1,8 @@
-use crate::{NodeMetadata, QueryRoot, Rect};
-
-/// Text matching semantics for semantic node predicates.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TextMatch {
-    /// Match a string exactly.
-    Exact(String),
-    /// Match when the candidate contains the substring.
-    Contains(String),
-    /// Match when the candidate starts with the prefix.
-    StartsWith(String),
-}
-
-impl TextMatch {
-    /// Creates an exact text matcher.
-    #[must_use]
-    pub fn exact(value: impl Into<String>) -> Self {
-        Self::Exact(value.into())
-    }
-
-    /// Creates a substring matcher.
-    #[must_use]
-    pub fn contains(value: impl Into<String>) -> Self {
-        Self::Contains(value.into())
-    }
-
-    /// Creates a prefix matcher.
-    #[must_use]
-    pub fn starts_with(value: impl Into<String>) -> Self {
-        Self::StartsWith(value.into())
-    }
-
-    /// Returns `true` when `candidate` satisfies this matcher.
-    #[must_use]
-    pub fn matches(&self, candidate: &str) -> bool {
-        match self {
-            Self::Exact(expected) => candidate == expected,
-            Self::Contains(expected) => candidate.contains(expected),
-            Self::StartsWith(expected) => candidate.starts_with(expected),
-        }
-    }
-}
-
-/// Composable predicate for semantic node lookup.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NodePredicate {
-    /// Match an exact semantic identifier.
-    IdEq(String),
-    /// Match an exact semantic role.
-    RoleEq(crate::Role),
-    /// Match a label with the supplied text semantics.
-    Label(TextMatch),
-    /// Conjunction of multiple predicates.
-    And(Vec<NodePredicate>),
-    /// Disjunction of multiple predicates.
-    Or(Vec<NodePredicate>),
-}
-
-impl NodePredicate {
-    /// Creates an exact semantic-ID predicate.
-    #[must_use]
-    pub fn id_eq(id: impl Into<String>) -> Self {
-        Self::IdEq(id.into())
-    }
-
-    /// Creates an exact semantic-role predicate.
-    #[must_use]
-    pub fn role_eq(role: crate::Role) -> Self {
-        Self::RoleEq(role)
-    }
-
-    /// Creates a label predicate.
-    #[must_use]
-    pub fn label(matcher: TextMatch) -> Self {
-        Self::Label(matcher)
-    }
-
-    /// Combines predicates with conjunction semantics.
-    #[must_use]
-    pub fn and(predicates: Vec<NodePredicate>) -> Self {
-        Self::And(predicates)
-    }
-
-    /// Combines predicates with disjunction semantics.
-    #[must_use]
-    pub fn or(predicates: Vec<NodePredicate>) -> Self {
-        Self::Or(predicates)
-    }
-
-    /// Returns `true` when `node` satisfies the predicate.
-    #[must_use]
-    pub fn matches(&self, node: &NodeMetadata) -> bool {
-        match self {
-            Self::IdEq(id) => node.id.as_ref() == Some(id),
-            Self::RoleEq(role) => node.role.as_ref() == Some(role),
-            Self::Label(matcher) => node
-                .label
-                .as_deref()
-                .is_some_and(|label| matcher.matches(label)),
-            Self::And(predicates) => predicates.iter().all(|predicate| predicate.matches(node)),
-            Self::Or(predicates) => predicates.iter().any(|predicate| predicate.matches(node)),
-        }
-    }
-}
+use crate::{
+    query::{predicate_is_metadata_supported, predicate_matches_metadata},
+    NodeHandle, NodeMetadata, NodePredicate, Point, QueryError, QueryRoot, Rect, SceneSnapshot,
+    Size,
+};
 
 /// Bounds expressed relative to an anchor's resolved rectangle.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -148,6 +49,8 @@ pub enum Anchor {
     Root,
     /// Anchor to the unique node matching the predicate.
     Node(NodePredicate),
+    /// Anchor to a stable handle resolved earlier in the same scene snapshot.
+    Handle(NodeHandle),
     /// Anchor to a previously described region.
     Region(Box<RegionSpec>),
 }
@@ -180,6 +83,12 @@ impl RegionSpec {
         Self::new(Anchor::Node(predicate), RelativeBounds::full())
     }
 
+    /// Creates a region covering the full bounds of a stable node handle.
+    #[must_use]
+    pub fn handle(handle: NodeHandle) -> Self {
+        Self::new(Anchor::Handle(handle), RelativeBounds::full())
+    }
+
     /// Creates a subregion relative to this region.
     #[must_use]
     pub fn subregion(self, bounds: RelativeBounds) -> Self {
@@ -190,13 +99,21 @@ impl RegionSpec {
 /// Errors returned when resolving semantic regions.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RegionResolveError {
-    /// The node anchor matched no nodes.
+    /// The region predicate matched no nodes.
     NotFound(NodePredicate),
-    /// The node anchor matched more than one node.
+    /// The region predicate matched more than one node.
     MultipleMatches {
         predicate: NodePredicate,
         count: usize,
     },
+    /// The host is detached from a real window and cannot synthesize input.
+    DetachedRootView,
+    /// The host cannot synthesize input for the resolved node.
+    InputUnavailable,
+    /// The host cannot capture pixels for the resolved region.
+    CaptureUnavailable,
+    /// The stable node handle was invalid for the scene snapshot.
+    InvalidHandle(NodeHandle),
     /// Relative bounds are not finite or fall outside the normalized range.
     InvalidBounds(RelativeBounds),
 }
@@ -208,6 +125,10 @@ impl std::fmt::Display for RegionResolveError {
             Self::MultipleMatches { count, .. } => {
                 write!(f, "region predicate matched {} nodes", count)
             }
+            Self::DetachedRootView => write!(f, "detached root-view hosts cannot synthesize input"),
+            Self::InputUnavailable => write!(f, "input synthesis is unavailable for this host"),
+            Self::CaptureUnavailable => write!(f, "region capture is unavailable for this host"),
+            Self::InvalidHandle(handle) => write!(f, "invalid node handle {}", handle.index()),
             Self::InvalidBounds(bounds) => write!(
                 f,
                 "invalid relative bounds ({}, {}, {}, {})",
@@ -225,30 +146,61 @@ impl QueryRoot {
         &self,
         predicate: &NodePredicate,
     ) -> Result<&NodeMetadata, RegionResolveError> {
-        let matches: Vec<_> = self
-            .all()
-            .iter()
-            .filter(|node| predicate.matches(node))
-            .collect();
-        match matches.as_slice() {
-            [] => Err(RegionResolveError::NotFound(predicate.clone())),
-            [node] => Ok(node),
-            _ => Err(RegionResolveError::MultipleMatches {
-                predicate: predicate.clone(),
-                count: matches.len(),
-            }),
+        if self.is_compatibility_root() {
+            if !predicate_is_metadata_supported(predicate) {
+                return Err(RegionResolveError::NotFound(predicate.clone()));
+            }
+            let matches = compatibility_find_all(self.all(), predicate);
+            return match matches.as_slice() {
+                [] => Err(RegionResolveError::NotFound(predicate.clone())),
+                [node] => Ok(node),
+                _ => Err(RegionResolveError::MultipleMatches {
+                    predicate: predicate.clone(),
+                    count: matches.len(),
+                }),
+            };
         }
+
+        let handle = self
+            .backing_scene()
+            .find(predicate)
+            .map_err(map_query_error)?;
+        Ok(self
+            .all()
+            .get(handle.index())
+            .expect("scene and compatibility metadata stay aligned"))
     }
 
     /// Returns all nodes matching `predicate`.
     #[must_use]
     pub fn find_all_by_predicate(&self, predicate: &NodePredicate) -> Vec<&NodeMetadata> {
-        self.all()
-            .iter()
-            .filter(|node| predicate.matches(node))
+        if self.is_compatibility_root() {
+            if !predicate_is_metadata_supported(predicate) {
+                return Vec::new();
+            }
+            return compatibility_find_all(self.all(), predicate);
+        }
+        self.backing_scene()
+            .find_all(predicate)
+            .into_iter()
+            .filter_map(|handle| self.all().get(handle.index()))
             .collect()
     }
 
+    /// Resolves `region` to an absolute rectangle inside `root_bounds`.
+    pub fn resolve_region(
+        &self,
+        root_bounds: Rect,
+        region: &RegionSpec,
+    ) -> Result<Rect, RegionResolveError> {
+        if self.is_compatibility_root() {
+            return resolve_region_from_metadata(self.all(), root_bounds, region);
+        }
+        self.backing_scene().resolve_region(root_bounds, region)
+    }
+}
+
+impl SceneSnapshot {
     /// Resolves `region` to an absolute rectangle inside `root_bounds`.
     pub fn resolve_region(
         &self,
@@ -260,27 +212,53 @@ impl QueryRoot {
 }
 
 fn resolve_region(
-    root: &QueryRoot,
+    scene: &SceneSnapshot,
     root_bounds: Rect,
     region: &RegionSpec,
 ) -> Result<Rect, RegionResolveError> {
     validate_relative_bounds(region.bounds)?;
     let anchor_rect = match &region.anchor {
         Anchor::Root => root_bounds,
-        Anchor::Node(predicate) => root.find_by_predicate(predicate)?.rect,
-        Anchor::Region(parent) => resolve_region(root, root_bounds, parent)?,
+        Anchor::Node(predicate) => {
+            let handle = scene.find(predicate).map_err(map_query_error)?;
+            scene
+                .node(handle)
+                .map(|node| node.rect)
+                .ok_or(RegionResolveError::InvalidHandle(handle))?
+        }
+        Anchor::Handle(handle) => scene
+            .node(*handle)
+            .map(|node| node.rect)
+            .ok_or(RegionResolveError::InvalidHandle(*handle))?,
+        Anchor::Region(parent) => resolve_region(scene, root_bounds, parent)?,
     };
 
     Ok(Rect::new(
-        crate::Point::new(
+        Point::new(
             anchor_rect.origin.x + anchor_rect.size.width * region.bounds.x,
             anchor_rect.origin.y + anchor_rect.size.height * region.bounds.y,
         ),
-        crate::Size::new(
+        Size::new(
             anchor_rect.size.width * region.bounds.width,
             anchor_rect.size.height * region.bounds.height,
         ),
     ))
+}
+
+fn map_query_error(error: QueryError) -> RegionResolveError {
+    match error {
+        QueryError::NotFoundPredicate(predicate) => RegionResolveError::NotFound(predicate),
+        QueryError::MultiplePredicateMatches { predicate, count } => {
+            RegionResolveError::MultipleMatches { predicate, count }
+        }
+        QueryError::NotFound(selector) => {
+            RegionResolveError::NotFound(NodePredicate::id_eq(selector.id.unwrap_or_default()))
+        }
+        QueryError::MultipleMatches { selector, count } => RegionResolveError::MultipleMatches {
+            predicate: NodePredicate::id_eq(selector.id.unwrap_or_default()),
+            count,
+        },
+    }
 }
 
 fn validate_relative_bounds(bounds: RelativeBounds) -> Result<(), RegionResolveError> {
@@ -297,10 +275,69 @@ fn validate_relative_bounds(bounds: RelativeBounds) -> Result<(), RegionResolveE
     Ok(())
 }
 
+fn compatibility_find_all<'a>(
+    nodes: &'a [NodeMetadata],
+    predicate: &NodePredicate,
+) -> Vec<&'a NodeMetadata> {
+    nodes
+        .iter()
+        .filter(|node| predicate_matches_metadata(predicate, node))
+        .collect()
+}
+
+fn resolve_region_from_metadata(
+    nodes: &[NodeMetadata],
+    root_bounds: Rect,
+    region: &RegionSpec,
+) -> Result<Rect, RegionResolveError> {
+    validate_relative_bounds(region.bounds)?;
+    let anchor_rect = match &region.anchor {
+        Anchor::Root => root_bounds,
+        Anchor::Node(predicate) => {
+            if !predicate_is_metadata_supported(predicate) {
+                return Err(RegionResolveError::NotFound(predicate.clone()));
+            }
+            let matches = compatibility_find_all(nodes, predicate);
+            match matches.as_slice() {
+                [] => return Err(RegionResolveError::NotFound(predicate.clone())),
+                [node] => node.rect,
+                _ => {
+                    return Err(RegionResolveError::MultipleMatches {
+                        predicate: predicate.clone(),
+                        count: matches.len(),
+                    })
+                }
+            }
+        }
+        Anchor::Handle(handle) => nodes
+            .get(handle.index())
+            .map(|node| node.rect)
+            .ok_or(RegionResolveError::InvalidHandle(*handle))?,
+        Anchor::Region(parent) => resolve_region_from_metadata(nodes, root_bounds, parent)?,
+    };
+
+    Ok(Rect::new(
+        Point::new(
+            anchor_rect.origin.x + anchor_rect.size.width * region.bounds.x,
+            anchor_rect.origin.y + anchor_rect.size.height * region.bounds.y,
+        ),
+        Size::new(
+            anchor_rect.size.width * region.bounds.width,
+            anchor_rect.size.height * region.bounds.height,
+        ),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Point, Role, Size};
+    use crate::{
+        scene::Role, Point, PropertyValue, Rect, SceneSnapshot, SemanticNode, Size, TextMatch,
+    };
+
+    fn rect() -> Rect {
+        Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0))
+    }
 
     fn root() -> QueryRoot {
         QueryRoot::new(vec![
@@ -317,24 +354,6 @@ mod tests {
                 rect: Rect::new(Point::new(130.0, 20.0), Size::new(80.0, 30.0)),
             },
         ])
-    }
-
-    #[test]
-    fn text_match_variants_work() {
-        assert!(TextMatch::exact("Run").matches("Run"));
-        assert!(TextMatch::contains("Tes").matches("Run Tests"));
-        assert!(TextMatch::starts_with("Run").matches("Run Tests"));
-    }
-
-    #[test]
-    fn predicate_composition_matches_expected_node() {
-        let predicate = NodePredicate::and(vec![
-            NodePredicate::role_eq(Role::Button),
-            NodePredicate::label(TextMatch::contains("Test")),
-        ]);
-        let root = root();
-        let node = root.find_by_predicate(&predicate).unwrap();
-        assert_eq!(node.id.as_deref(), Some("run"));
     }
 
     #[test]
@@ -363,5 +382,140 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, RegionResolveError::InvalidBounds(_)));
+    }
+
+    #[test]
+    fn handle_anchor_resolves_scene_node() {
+        let scene = SceneSnapshot::new(vec![crate::SemanticNode::new(
+            "card",
+            Role::Container,
+            Rect::new(Point::new(25.0, 40.0), Size::new(80.0, 30.0)),
+        )
+        .with_property("session_id", PropertyValue::Integer(7))]);
+        let handle = scene
+            .find(&NodePredicate::property_eq(
+                "session_id",
+                PropertyValue::Integer(7),
+            ))
+            .unwrap();
+        let rect = scene
+            .resolve_region(
+                Rect::new(Point::new(0.0, 0.0), Size::new(200.0, 200.0)),
+                &RegionSpec::handle(handle),
+            )
+            .unwrap();
+        assert_eq!(
+            rect,
+            Rect::new(Point::new(25.0, 40.0), Size::new(80.0, 30.0))
+        );
+    }
+
+    #[test]
+    fn rich_predicates_are_preserved_for_scene_backed_roots() {
+        let mut label = SemanticNode::new("label", Role::Label, rect())
+            .with_parent("panel", 0)
+            .with_label("Inspector")
+            .with_state("expanded", PropertyValue::Bool(false));
+        label.value = Some("Inspector Value".into());
+        let scene = SceneSnapshot::new(vec![
+            SemanticNode::new("root", Role::Container, rect())
+                .with_class("workspace")
+                .with_tag("app")
+                .with_property("theme", PropertyValue::string("dark")),
+            SemanticNode::new("panel", Role::Container, rect())
+                .with_parent("root", 0)
+                .with_class("panel")
+                .with_tag("primary")
+                .with_property("session_id", PropertyValue::Integer(7))
+                .with_state("selected", PropertyValue::Bool(true)),
+            label,
+        ]);
+        let root = QueryRoot::from_scene(scene);
+
+        assert_eq!(
+            root.find_by_predicate(&NodePredicate::property_eq(
+                "session_id",
+                PropertyValue::Integer(7)
+            ))
+            .unwrap()
+            .id
+            .as_deref(),
+            Some("panel")
+        );
+        assert_eq!(
+            root.find_by_predicate(&NodePredicate::ClassEq("workspace".into()))
+                .unwrap()
+                .id
+                .as_deref(),
+            Some("root")
+        );
+        assert_eq!(
+            root.find_by_predicate(&NodePredicate::TagEq("primary".into()))
+                .unwrap()
+                .id
+                .as_deref(),
+            Some("panel")
+        );
+        assert_eq!(
+            root.find_by_predicate(&NodePredicate::Value(TextMatch::exact("Inspector Value")))
+                .unwrap()
+                .id
+                .as_deref(),
+            Some("label")
+        );
+        assert_eq!(
+            root.find_by_predicate(&NodePredicate::StateEq(
+                "expanded".into(),
+                PropertyValue::Bool(false)
+            ))
+            .unwrap()
+            .id
+            .as_deref(),
+            Some("label")
+        );
+        assert_eq!(
+            root.find_by_predicate(&NodePredicate::parent(NodePredicate::id_eq("panel")))
+                .unwrap()
+                .id
+                .as_deref(),
+            Some("label")
+        );
+        assert_eq!(
+            root.find_by_predicate(&NodePredicate::ancestor(NodePredicate::id_eq("panel")))
+                .unwrap()
+                .id
+                .as_deref(),
+            Some("label")
+        );
+
+        let descendants =
+            root.find_all_by_predicate(&NodePredicate::ancestor(NodePredicate::id_eq("root")));
+        assert_eq!(descendants.len(), 2);
+        assert_eq!(descendants[0].id.as_deref(), Some("panel"));
+        assert_eq!(descendants[1].id.as_deref(), Some("label"));
+    }
+
+    #[test]
+    fn rich_predicates_fail_when_not_present_in_scene_backed_roots() {
+        let scene = SceneSnapshot::new(vec![
+            SemanticNode::new("root", Role::Container, rect()),
+            SemanticNode::new("panel", Role::Container, rect()).with_parent("root", 0),
+        ]);
+        let root = QueryRoot::from_scene(scene);
+
+        assert!(matches!(
+            root.find_by_predicate(&NodePredicate::property_eq(
+                "session_id",
+                PropertyValue::Integer(7)
+            )),
+            Err(RegionResolveError::NotFound(_))
+        ));
+        assert!(matches!(
+            root.find_by_predicate(&NodePredicate::Value(TextMatch::contains("missing"))),
+            Err(RegionResolveError::NotFound(_))
+        ));
+        assert!(root
+            .find_all_by_predicate(&NodePredicate::ancestor(NodePredicate::id_eq("missing")))
+            .is_empty());
     }
 }

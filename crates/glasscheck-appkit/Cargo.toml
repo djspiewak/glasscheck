@@ -10,7 +10,9 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
     "NSBezierPath",
+    "NSButton",
     "NSColor",
+    "NSControl",
     "NSFont",
     "NSFontManager",
     "NSGradient",
@@ -38,4 +40,8 @@ objc2-foundation = { version = "0.3", features = [
 
 [[test]]
 name = "appkit_smoke"
+harness = false
+
+[[test]]
+name = "appkit_contracts"
 harness = false
