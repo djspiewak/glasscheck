@@ -23,6 +23,7 @@ mod imp {
             INIT_APP.call_once(|| {
                 let app = NSApplication::sharedApplication(mtm);
                 app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+                app.activateIgnoringOtherApps(true);
             });
 
             Self { mtm }

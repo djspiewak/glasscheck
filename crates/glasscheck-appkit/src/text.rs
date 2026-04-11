@@ -167,6 +167,7 @@ mod imp {
         if let Some(text_container) = unsafe { view.textContainer() } {
             text_container.setLineFragmentPadding(0.0);
         }
+        view.setTextContainerInset(NSSize::new(0.0, 0.0));
         let font = font(mtm, expectation)?;
         view.setFont(Some(&font));
         let text_color = color(expectation.foreground);

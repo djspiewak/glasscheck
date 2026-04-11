@@ -118,7 +118,8 @@ pub struct TextExpectation {
     pub italic: bool,
     /// Expected foreground text color.
     pub foreground: RgbaColor,
-    /// Optional background color. When absent, the background is sampled.
+    /// Optional background color. When absent, the reference is compared
+    /// against a background estimated from the live capture.
     pub background: Option<RgbaColor>,
 }
 
@@ -234,7 +235,8 @@ pub struct AnchoredTextExpectation {
     pub italic: bool,
     /// Expected foreground text color.
     pub foreground: RgbaColor,
-    /// Optional background color. When absent, the background is sampled.
+    /// Optional background color. When absent, the reference is compared
+    /// against a background estimated from the live capture.
     pub background: Option<RgbaColor>,
 }
 
@@ -444,8 +446,9 @@ impl<E> From<io::Error> for TextAssertionError<E> {
 
 /// Compares captured text pixels against a rendered reference for `expectation`.
 ///
-/// When no background color is provided, the background is inferred from the
-/// border pixels of `actual` before compositing the reference image.
+/// When no background color is provided, transparent reference pixels are
+/// treated as valid over any opaque concrete background that could produce the
+/// captured result after alpha compositing.
 #[must_use]
 pub fn compare_rendered_text(
     actual: &Image,
@@ -531,9 +534,60 @@ fn prepare_rendered_text_comparison(
     expectation: &TextExpectation,
     config: &TextAssertionConfig,
 ) -> RenderedTextComparison {
+    if expectation.background.is_none() {
+        if !actual.is_valid_rgba() || !expected.is_valid_rgba() {
+            let result = CompareResult {
+                matched_ratio: 0.0,
+                mismatched_pixels: u32::MAX,
+                passed: false,
+                diff_image: None,
+            };
+            return RenderedTextComparison {
+                composited_expected: expected.clone(),
+                comparison_bounds: None,
+                result,
+            };
+        }
+
+        if actual.width != expected.width || actual.height != expected.height {
+            let result = CompareResult {
+                matched_ratio: 0.0,
+                mismatched_pixels: u32::MAX,
+                passed: false,
+                diff_image: None,
+            };
+            return RenderedTextComparison {
+                composited_expected: expected.clone(),
+                comparison_bounds: None,
+                result,
+            };
+        }
+
+        if actual.width == 0 || actual.height == 0 {
+            let result = CompareResult {
+                matched_ratio: 1.0,
+                mismatched_pixels: 0,
+                passed: true,
+                diff_image: None,
+            };
+            return RenderedTextComparison {
+                composited_expected: expected.clone(),
+                comparison_bounds: None,
+                result,
+            };
+        }
+
+        let result = compare_text_against_transparent_reference(actual, expected, &config.compare);
+        return RenderedTextComparison {
+            composited_expected: expected.clone(),
+            comparison_bounds: None,
+            result,
+        };
+    }
+
     let background = expectation
         .background
-        .unwrap_or_else(|| sample_background_color(actual));
+        .expect("background should be present for flat-background text comparison");
     let composited_expected = composite_over_background(expected, background);
     if actual.width != composited_expected.width || actual.height != composited_expected.height {
         let result = compare_images(actual, &composited_expected, &config.compare);
@@ -564,42 +618,6 @@ fn prepare_rendered_text_comparison(
     }
 }
 
-fn sample_background_color(image: &Image) -> RgbaColor {
-    let width = image.width as usize;
-    let height = image.height as usize;
-    if width == 0 || height == 0 {
-        return RgbaColor::new(255, 255, 255, 255);
-    }
-
-    let mut sum = [0u64; 4];
-    let mut count = 0u64;
-    for y in 0..height {
-        for x in 0..width {
-            if x != 0 && y != 0 && x + 1 != width && y + 1 != height {
-                continue;
-            }
-            if let Some(pixel) = image.pixel_at(x as u32, y as u32) {
-                sum[0] += u64::from(pixel[0]);
-                sum[1] += u64::from(pixel[1]);
-                sum[2] += u64::from(pixel[2]);
-                sum[3] += u64::from(pixel[3]);
-                count += 1;
-            }
-        }
-    }
-
-    if count == 0 {
-        return RgbaColor::new(255, 255, 255, 255);
-    }
-
-    RgbaColor::new(
-        (sum[0] / count) as u8,
-        (sum[1] / count) as u8,
-        (sum[2] / count) as u8,
-        (sum[3] / count) as u8,
-    )
-}
-
 fn composite_over_background(image: &Image, background: RgbaColor) -> Image {
     let mut data = Vec::with_capacity(image.data.len());
     for pixel in image.data.chunks_exact(4) {
@@ -616,6 +634,122 @@ fn composite_over_background(image: &Image, background: RgbaColor) -> Image {
         data.push(255);
     }
     Image::new(image.width, image.height, data)
+}
+
+#[cfg(test)]
+fn composite_over_background_image(image: &Image, background: &Image) -> Image {
+    let mut data = Vec::with_capacity(image.data.len());
+    for (pixel, background) in image.data.chunks_exact(4).zip(background.data.chunks_exact(4)) {
+        let alpha = f64::from(pixel[3]) / 255.0;
+        let inverse = 1.0 - alpha;
+        data.push(composite_channel(pixel[0], background[0], alpha, inverse));
+        data.push(composite_channel(pixel[1], background[1], alpha, inverse));
+        data.push(composite_channel(pixel[2], background[2], alpha, inverse));
+        data.push(255);
+    }
+    Image::new(image.width, image.height, data)
+}
+
+fn compare_text_against_transparent_reference(
+    actual: &Image,
+    expected: &Image,
+    config: &CompareConfig,
+) -> CompareResult {
+    let total_pixels = u64::from(actual.width) * u64::from(actual.height);
+    if total_pixels == 0 {
+        return CompareResult {
+            matched_ratio: 1.0,
+            mismatched_pixels: 0,
+            passed: true,
+            diff_image: None,
+        };
+    }
+
+    let tolerance = i16::from(config.channel_tolerance);
+    let mut mismatched = 0u64;
+    let mut diff = config
+        .generate_diff
+        .then(|| Vec::with_capacity(actual.data.len()));
+
+    for (actual_pixel, expected_pixel) in actual
+        .data
+        .chunks_exact(4)
+        .zip(expected.data.chunks_exact(4))
+    {
+        let is_match = transparent_reference_pixel_matches(actual_pixel, expected_pixel, tolerance);
+
+        if !is_match {
+            mismatched += 1;
+        }
+
+        if let Some(buffer) = diff.as_mut() {
+            if is_match {
+                buffer.extend_from_slice(&[0, 255, 0, 255]);
+            } else {
+                buffer.extend_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+    }
+
+    let matched_ratio = (total_pixels - mismatched) as f64 / total_pixels as f64;
+    CompareResult {
+        matched_ratio,
+        mismatched_pixels: mismatched.min(u64::from(u32::MAX)) as u32,
+        passed: matched_ratio >= config.match_threshold,
+        diff_image: if mismatched == 0 {
+            None
+        } else {
+            diff.map(|data| Image::new(actual.width, actual.height, data))
+        },
+    }
+}
+
+fn transparent_reference_pixel_matches(
+    actual: &[u8],
+    expected: &[u8],
+    tolerance: i16,
+) -> bool {
+    if (i16::from(actual[3]) - 255).abs() > tolerance {
+        return false;
+    }
+
+    let alpha = expected[3];
+    channel_matches_transparent_reference(actual[0], expected[0], alpha, tolerance)
+        && channel_matches_transparent_reference(actual[1], expected[1], alpha, tolerance)
+        && channel_matches_transparent_reference(actual[2], expected[2], alpha, tolerance)
+}
+
+fn channel_matches_transparent_reference(
+    actual: u8,
+    foreground: u8,
+    alpha: u8,
+    tolerance: i16,
+) -> bool {
+    if alpha == 0 {
+        return true;
+    }
+
+    let alpha = f64::from(alpha) / 255.0;
+    let inverse = 1.0 - alpha;
+    let minimum = i16::from(composite_channel(foreground, 0, alpha, inverse));
+    let maximum = i16::from(composite_channel(foreground, 255, alpha, inverse));
+    let actual = i16::from(actual);
+    actual >= minimum - tolerance && actual <= maximum + tolerance
+}
+
+#[cfg(test)]
+fn interpolate_color(start: RgbaColor, end: RgbaColor, t: f64) -> RgbaColor {
+    let lerp = |a: u8, b: u8| -> u8 {
+        (f64::from(a) + (f64::from(b) - f64::from(a)) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    RgbaColor::new(
+        lerp(start.red, end.red),
+        lerp(start.green, end.green),
+        lerp(start.blue, end.blue),
+        lerp(start.alpha, end.alpha),
+    )
 }
 
 fn content_bounds(
@@ -743,6 +877,36 @@ mod tests {
         )
     }
 
+    fn gradient_background(width: u32, height: u32) -> Image {
+        let top_left = RgbaColor::new(10, 20, 30, 255);
+        let top_right = RgbaColor::new(40, 50, 60, 255);
+        let bottom_left = RgbaColor::new(70, 80, 90, 255);
+        let bottom_right = RgbaColor::new(100, 110, 120, 255);
+        let width_denom = f64::from(width.saturating_sub(1).max(1));
+        let height_denom = f64::from(height.saturating_sub(1).max(1));
+        let mut data = Vec::with_capacity(width as usize * height as usize * 4);
+
+        for y in 0..height {
+            let vertical = f64::from(y) / height_denom;
+            let left = interpolate_color(top_left, bottom_left, vertical);
+            let right = interpolate_color(top_right, bottom_right, vertical);
+            for x in 0..width {
+                let horizontal = f64::from(x) / width_denom;
+                let pixel = interpolate_color(left, right, horizontal);
+                data.push(pixel.red);
+                data.push(pixel.green);
+                data.push(pixel.blue);
+                data.push(255);
+            }
+        }
+
+        Image::new(width, height, data)
+    }
+
+    fn transparent_reference(width: u32, height: u32) -> Image {
+        Image::new(width, height, vec![0; width as usize * height as usize * 4])
+    }
+
     #[test]
     fn expectation_builder_overrides_defaults() {
         let expectation = TextExpectation::new("Hello", rect())
@@ -796,23 +960,8 @@ mod tests {
 
     #[test]
     fn compare_rendered_text_composites_transparent_reference_with_sampled_background() {
-        let actual = Image::new(
-            3,
-            3,
-            vec![
-                255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0,
-                0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-                255, 255,
-            ],
-        );
-        let expected = Image::new(
-            3,
-            3,
-            vec![
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0,
-            ],
-        );
+        let actual = gradient_background(2, 2);
+        let expected = transparent_reference(2, 2);
         let expectation = TextExpectation::new("Hi", rect());
 
         let result = compare_rendered_text(
@@ -822,6 +971,318 @@ mod tests {
             &TextAssertionConfig::default(),
         );
         assert!(result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_allows_transparent_pixels_over_variable_background() {
+        let actual = gradient_background(2, 2);
+        let expected = transparent_reference(2, 2);
+        let expectation = TextExpectation::new("Hi", rect());
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig::default(),
+        );
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_allows_partial_alpha_edges_over_variable_background() {
+        let background = gradient_background(3, 3);
+        let mut expected = transparent_reference(3, 3);
+        paint_rect(&mut expected.data, 3, 1, 1, 1, 1, [255, 255, 255, 128]);
+        let actual = composite_over_background_image(&expected, &background);
+        let expectation = TextExpectation::new("Hi", rect());
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig::default(),
+        );
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_rejects_alpha_reference_when_pixel_is_too_dark() {
+        let actual = Image::new(1, 1, vec![40, 40, 40, 255]);
+        let expected = Image::new(1, 1, vec![255, 255, 255, 128]);
+        let expectation = TextExpectation::new("Hi", rect());
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 0,
+                    match_threshold: 1.0,
+                    generate_diff: true,
+                },
+                write_diff: true,
+            },
+        );
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_allows_non_white_transparent_foreground_on_valid_backgrounds() {
+        let background = gradient_background(3, 3);
+        let mut expected = transparent_reference(3, 3);
+        paint_rect(&mut expected.data, 3, 1, 1, 1, 1, [200, 60, 80, 128]);
+        let actual = composite_over_background_image(&expected, &background);
+        let expectation = TextExpectation::new("Hi", rect())
+            .with_foreground(RgbaColor::new(200, 60, 80, 255));
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig::default(),
+        );
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_rejects_alpha_reference_when_non_white_pixel_is_too_bright() {
+        let background = gradient_background(3, 3);
+        let mut expected = transparent_reference(3, 3);
+        paint_rect(&mut expected.data, 3, 1, 1, 1, 1, [200, 60, 80, 128]);
+        let mut actual = composite_over_background_image(&expected, &background);
+        paint_rect(&mut actual.data, 3, 1, 1, 1, 1, [220, 200, 210, 255]);
+        let expectation = TextExpectation::new("Hi", rect())
+            .with_foreground(RgbaColor::new(200, 60, 80, 255));
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 0,
+                    match_threshold: 1.0,
+                    generate_diff: true,
+                },
+                write_diff: true,
+            },
+        );
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_rejects_alpha_reference_when_channel_mix_is_invalid() {
+        let background = gradient_background(3, 3);
+        let mut expected = transparent_reference(3, 3);
+        paint_rect(&mut expected.data, 3, 1, 1, 1, 1, [255, 40, 40, 128]);
+        let mut actual = composite_over_background_image(&expected, &background);
+        paint_rect(&mut actual.data, 3, 1, 1, 1, 1, [120, 180, 120, 255]);
+        let expectation = TextExpectation::new("Hi", rect())
+            .with_foreground(RgbaColor::new(255, 40, 40, 255));
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 0,
+                    match_threshold: 1.0,
+                    generate_diff: true,
+                },
+                write_diff: true,
+            },
+        );
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_rejects_transparent_actual_alpha_even_when_rgb_matches() {
+        let actual = Image::new(1, 1, vec![255, 255, 255, 0]);
+        let expected = Image::new(1, 1, vec![255, 255, 255, 128]);
+        let expectation = TextExpectation::new("Hi", rect());
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig::default(),
+        );
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_rejects_alpha_reference_with_invalid_rgba_buffers() {
+        let actual = Image {
+            width: 1,
+            height: 1,
+            data: vec![255, 255, 255],
+        };
+        let expected = Image::new(1, 1, vec![255, 255, 255, 0]);
+        let expectation = TextExpectation::new("Hi", rect());
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig::default(),
+        );
+        assert!(!result.passed);
+        assert_eq!(result.mismatched_pixels, u32::MAX);
+    }
+
+    #[test]
+    fn compare_rendered_text_rejects_alpha_reference_region_size_changes() {
+        let actual = Image::new(1, 1, vec![255, 255, 255, 255]);
+        let expected = Image {
+            width: 2,
+            height: 1,
+            data: vec![255, 255, 255, 0, 255, 255, 255, 255],
+        };
+        let expectation = TextExpectation::new("Hi", rect());
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig::default(),
+        );
+        assert!(!result.passed);
+        assert_eq!(result.mismatched_pixels, u32::MAX);
+    }
+
+    #[test]
+    fn compare_rendered_text_rejects_transparent_reference_content_displacement() {
+        let actual = Image::new(
+            4,
+            1,
+            vec![
+                255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+            ],
+        );
+        let expected = Image::new(
+            4,
+            1,
+            vec![
+                0, 0, 0, 255, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0,
+            ],
+        );
+        let expectation = TextExpectation::new("Hi", rect());
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 0,
+                    match_threshold: 1.0,
+                    generate_diff: true,
+                },
+                write_diff: true,
+            },
+        );
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_allows_extra_content_in_fully_transparent_region() {
+        let background = gradient_background(3, 3);
+        let mut expected = transparent_reference(3, 3);
+        paint_rect(&mut expected.data, 3, 1, 1, 1, 1, [255, 255, 255, 128]);
+        let mut actual = composite_over_background_image(&expected, &background);
+        paint_rect(&mut actual.data, 3, 0, 1, 1, 1, [0, 0, 0, 255]);
+        let expectation = TextExpectation::new("Hi", rect());
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 4,
+                    match_threshold: 1.0,
+                    generate_diff: true,
+                },
+                write_diff: true,
+            },
+        );
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_accepts_alpha_reference_at_tolerance_boundary() {
+        let background = gradient_background(3, 3);
+        let mut expected = transparent_reference(3, 3);
+        paint_rect(&mut expected.data, 3, 1, 1, 1, 1, [0, 0, 0, 128]);
+        let mut actual = composite_over_background_image(&expected, &background);
+        let base = actual.pixel_at(1, 1).expect("center pixel should exist");
+        paint_rect(
+            &mut actual.data,
+            3,
+            1,
+            1,
+            1,
+            1,
+            [
+                base[0].saturating_add(4),
+                base[1].saturating_add(4),
+                base[2].saturating_add(4),
+                255,
+            ],
+        );
+        let expectation = TextExpectation::new("Hi", rect())
+            .with_foreground(RgbaColor::new(0, 0, 0, 255));
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 4,
+                    match_threshold: 1.0,
+                    generate_diff: true,
+                },
+                write_diff: true,
+            },
+        );
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn compare_rendered_text_rejects_alpha_reference_just_outside_tolerance_boundary() {
+        let background = gradient_background(3, 3);
+        let mut expected = transparent_reference(3, 3);
+        paint_rect(&mut expected.data, 3, 1, 1, 1, 1, [0, 0, 0, 128]);
+        let mut actual = composite_over_background_image(&expected, &background);
+        paint_rect(
+            &mut actual.data,
+            3,
+            1,
+            1,
+            1,
+            1,
+            [140, 140, 140, 255],
+        );
+        let expectation = TextExpectation::new("Hi", rect())
+            .with_foreground(RgbaColor::new(0, 0, 0, 255));
+
+        let result = compare_rendered_text(
+            &actual,
+            &expected,
+            &expectation,
+            &TextAssertionConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 4,
+                    match_threshold: 1.0,
+                    generate_diff: true,
+                },
+                write_diff: true,
+            },
+        );
+        assert!(!result.passed);
     }
 
     #[test]
@@ -928,6 +1389,124 @@ mod tests {
         assert!(!artifact_dir.join("actual.png").exists());
         assert!(!artifact_dir.join("expected.png").exists());
         assert!(!artifact_dir.join("diff.png").exists());
+
+        let _ = std::fs::remove_dir_all(artifact_dir);
+    }
+
+    #[test]
+    fn assert_text_renders_passes_for_transparent_reference_on_variable_background() {
+        let artifact_dir = unique_temp_dir();
+        let expectation = TextExpectation::new("Hello", rect())
+            .with_foreground(RgbaColor::new(255, 255, 255, 255));
+        assert_text_renders(
+            &StubRenderer {
+                actual: Image::new(
+                    2,
+                    2,
+                    vec![
+                        10, 20, 30, 255, 120, 140, 160, 255, 255, 255, 255, 255, 40, 50, 60,
+                        255,
+                    ],
+                ),
+                expected: Image::new(
+                    2,
+                    2,
+                    vec![
+                        255, 255, 255, 0, 255, 255, 255, 96, 255, 255, 255, 255, 255, 255, 255,
+                        0,
+                    ],
+                ),
+            },
+            &expectation,
+            &artifact_dir,
+            &TextAssertionConfig::default(),
+        )
+        .expect("transparent text render should pass over variable background");
+
+        assert!(!artifact_dir.join("actual.png").exists());
+        assert!(!artifact_dir.join("expected.png").exists());
+        assert!(!artifact_dir.join("diff.png").exists());
+
+        let _ = std::fs::remove_dir_all(artifact_dir);
+    }
+
+    #[test]
+    fn assert_text_renders_reports_transparent_reference_mismatch() {
+        let artifact_dir = unique_temp_dir();
+        let expectation = TextExpectation::new("Hello", rect())
+            .with_foreground(RgbaColor::new(255, 255, 255, 255));
+        let error = assert_text_renders(
+            &StubRenderer {
+                actual: Image::new(1, 1, vec![20, 20, 20, 255]),
+                expected: Image::new(1, 1, vec![255, 255, 255, 128]),
+            },
+            &expectation,
+            &artifact_dir,
+            &TextAssertionConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 0,
+                    match_threshold: 1.0,
+                    generate_diff: true,
+                },
+                write_diff: true,
+            },
+        )
+        .unwrap_err();
+
+        match error {
+            TextAssertionError::Mismatch {
+                expectation: failed_expectation,
+                artifacts,
+                result,
+            } => {
+                assert_eq!(failed_expectation.content, "Hello");
+                assert!(!result.passed);
+                assert!(result.mismatched_pixels > 0);
+                assert!(artifacts.actual_path.exists());
+                assert!(artifacts.expected_path.exists());
+                assert!(artifacts
+                    .diff_path
+                    .as_ref()
+                    .is_some_and(|path| path.exists()));
+            }
+            other => panic!("expected mismatch error, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(artifact_dir);
+    }
+
+    #[test]
+    fn assert_text_renders_omits_diff_when_disabled_for_transparent_reference_mismatch() {
+        let artifact_dir = unique_temp_dir();
+        let expectation = TextExpectation::new("Hello", rect())
+            .with_foreground(RgbaColor::new(255, 255, 255, 255));
+        let error = assert_text_renders(
+            &StubRenderer {
+                actual: Image::new(1, 1, vec![20, 20, 20, 255]),
+                expected: Image::new(1, 1, vec![255, 255, 255, 128]),
+            },
+            &expectation,
+            &artifact_dir,
+            &TextAssertionConfig {
+                compare: CompareConfig {
+                    channel_tolerance: 0,
+                    match_threshold: 1.0,
+                    generate_diff: true,
+                },
+                write_diff: false,
+            },
+        )
+        .unwrap_err();
+
+        match error {
+            TextAssertionError::Mismatch { artifacts, .. } => {
+                assert!(artifacts.actual_path.exists());
+                assert!(artifacts.expected_path.exists());
+                assert!(artifacts.diff_path.is_none());
+                assert!(!artifact_dir.join("diff.png").exists());
+            }
+            other => panic!("expected mismatch error, got {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(artifact_dir);
     }

@@ -1,15 +1,19 @@
 #![cfg(target_os = "macos")]
 
+use std::cell::Cell;
+
 use glasscheck_appkit::{AppKitHarness, InstrumentedView};
 use glasscheck_core::{
     assert_text_renders, compare_images, load_png, AnchoredTextExpectation, CompareConfig,
-    NodePredicate, Point, PollOptions, Rect, RegionResolveError, RegionSpec, RgbaColor, Role,
-    Selector, Size, TextAssertionConfig, TextAssertionError, TextExpectation, TextMatch,
+    NodePredicate, Point, PollOptions, Rect, RegionResolveError, RegionSpec, RelativeBounds,
+    RgbaColor, Role, Selector, Size, TextAssertionConfig, TextAssertionError, TextExpectation,
+    TextMatch,
 };
 use objc2::rc::Retained;
-use objc2::MainThreadOnly;
+use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSClipView, NSColor, NSFont, NSFontManager, NSFontTraitMask, NSTextView, NSView,
+    NSBezierPath, NSClipView, NSColor, NSEvent, NSFont, NSFontManager, NSFontTraitMask,
+    NSGradient, NSTextView, NSView,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
 
@@ -67,6 +71,33 @@ fn main() {
         "capture_region_matches_negative_origin_region",
         || capture_region_matches_negative_origin_region(harness),
     );
+    run(
+        "click_hotspot_reveals_rounded_gradient_and_anchored_text",
+        || click_hotspot_reveals_rounded_gradient_and_anchored_text(harness),
+    );
+    run(
+        "click_outside_hotspot_does_not_activate_gradient_scene",
+        || click_outside_hotspot_does_not_activate_gradient_scene(harness),
+    );
+    run(
+        "repeated_hotspot_clicks_leave_gradient_scene_stable",
+        || repeated_hotspot_clicks_leave_gradient_scene_stable(harness),
+    );
+    run(
+        "interactive_gradient_scene_reports_text_content_regression",
+        || interactive_gradient_scene_reports_text_content_regression(harness),
+    );
+    run(
+        "interactive_gradient_scene_reports_text_size_regression",
+        || interactive_gradient_scene_reports_text_size_regression(harness),
+    );
+    run(
+        "interactive_gradient_scene_reports_text_color_regression",
+        || interactive_gradient_scene_reports_text_color_regression(harness),
+    );
+    run("click_dispatches_single_mouse_down", || {
+        click_dispatches_single_mouse_down(harness)
+    });
     run("wait_until_flushes_runloop_between_attempts", || {
         wait_until_flushes_runloop_between_attempts(harness)
     });
@@ -95,7 +126,7 @@ fn capture_returns_non_empty_image(harness: AppKitHarness) {
     let host = harness.create_window(240.0, 120.0);
     let view = make_view(harness.main_thread_marker(), NSSize::new(240.0, 120.0));
     host.set_content_view(&view);
-    harness.settle(2);
+    harness.settle(4);
 
     let image = host.capture().expect("window capture should succeed");
     assert!(image.width > 0);
@@ -152,13 +183,13 @@ fn direct_text_input_changes_rendered_content(harness: AppKitHarness) {
         },
     );
 
-    harness.settle(2);
+    harness.settle(4);
     let before = host
         .capture_view(&view)
         .expect("empty text view should capture successfully");
 
     host.input().replace_text(&view, "Functional UI");
-    harness.settle(2);
+    harness.settle(4);
 
     let after = host
         .capture_view(&view)
@@ -193,7 +224,7 @@ fn capture_region_matches_registered_view_bounds(harness: AppKitHarness) {
         },
     );
     host.input().replace_text(&view, "Functional UI");
-    harness.settle(2);
+    harness.settle(4);
 
     let expected = host
         .capture_view(&view)
@@ -825,6 +856,253 @@ fn capture_region_matches_negative_origin_region(harness: AppKitHarness) {
     assert!(result.passed);
 }
 
+fn click_hotspot_reveals_rounded_gradient_and_anchored_text(harness: AppKitHarness) {
+    let host = harness.create_window(480.0, 320.0);
+    let scene = make_gradient_scene(harness.main_thread_marker());
+    host.set_content_view(&scene.root);
+    register_gradient_scene(&host, &scene);
+    harness.settle(2);
+
+    let before = host
+        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .expect("gradient card region should capture before click");
+
+    host.input().click(NSPoint::new(332.0, 70.0));
+    harness.settle(2);
+
+    let after = host
+        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .expect("gradient card region should capture after click");
+
+    assert_gradient_card_rendering(&after);
+
+    let result = compare_images(
+        &before,
+        &after,
+        &CompareConfig {
+            channel_tolerance: 0,
+            match_threshold: 1.0,
+            generate_diff: false,
+        },
+    );
+    assert!(
+        !result.passed,
+        "clicking the hotspot should change the rounded gradient card rendering"
+    );
+
+    let expectation = AnchoredTextExpectation::new(
+        "Connected",
+        RegionSpec::node(NodePredicate::id_eq("gradient-card"))
+            .subregion(title_region_bounds()),
+    )
+    .with_font_name("Helvetica-BoldOblique")
+    .with_point_size(18.0)
+    .with_foreground(RgbaColor::new(255, 255, 255, 255));
+
+    let artifact_dir = unique_temp_dir("interactive-gradient-scene");
+    host.text_renderer(harness.main_thread_marker())
+        .assert_text_renders_anchored(
+            &expectation,
+            &artifact_dir,
+            &interactive_gradient_scene_text_config(),
+        )
+        .expect("styled text should render relative to the gradient card after activation");
+
+    let _ = std::fs::remove_dir_all(artifact_dir);
+}
+
+fn click_outside_hotspot_does_not_activate_gradient_scene(harness: AppKitHarness) {
+    let host = harness.create_window(480.0, 320.0);
+    let scene = make_gradient_scene(harness.main_thread_marker());
+    host.set_content_view(&scene.root);
+    register_gradient_scene(&host, &scene);
+    harness.settle(2);
+
+    let before = host
+        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .expect("gradient card region should capture before click");
+
+    host.input().click(NSPoint::new(60.0, 60.0));
+    harness.settle(2);
+
+    let after = host
+        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .expect("gradient card region should capture after outside click");
+    let result = compare_images(
+        &before,
+        &after,
+        &CompareConfig {
+            channel_tolerance: 0,
+            match_threshold: 1.0,
+            generate_diff: false,
+        },
+    );
+    assert!(
+        result.passed,
+        "clicking outside the hotspot should not activate the gradient scene"
+    );
+
+    let artifact_dir = unique_temp_dir("interactive-gradient-scene-inactive");
+    let error = host
+        .text_renderer(harness.main_thread_marker())
+        .assert_text_renders_anchored(
+            &interactive_gradient_scene_expectation("Connected")
+                .with_font_name("Helvetica-BoldOblique")
+                .with_point_size(18.0)
+                .with_foreground(RgbaColor::new(255, 255, 255, 255)),
+            &artifact_dir,
+            &interactive_gradient_scene_text_config(),
+        )
+        .unwrap_err();
+
+    match error {
+        glasscheck_appkit::AppKitAnchoredTextError::Assert(TextAssertionError::Mismatch {
+            result,
+            artifacts,
+            ..
+        }) => {
+            assert!(!result.passed);
+            assert!(result.mismatched_pixels > 0);
+            assert!(artifacts.actual_path.exists());
+            assert!(artifacts.expected_path.exists());
+        }
+        other => panic!("expected mismatch error, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(artifact_dir);
+}
+
+fn repeated_hotspot_clicks_leave_gradient_scene_stable(harness: AppKitHarness) {
+    let host = harness.create_window(480.0, 320.0);
+    let scene = make_gradient_scene(harness.main_thread_marker());
+    host.set_content_view(&scene.root);
+    register_gradient_scene(&host, &scene);
+    harness.settle(2);
+
+    host.input().click(NSPoint::new(332.0, 70.0));
+    harness.settle(2);
+    let first = host
+        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .expect("gradient card region should capture after first click");
+
+    host.input().click(NSPoint::new(332.0, 70.0));
+    harness.settle(2);
+    let second = host
+        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .expect("gradient card region should capture after second click");
+
+    let result = compare_images(
+        &first,
+        &second,
+        &CompareConfig {
+            channel_tolerance: 0,
+            match_threshold: 1.0,
+            generate_diff: false,
+        },
+    );
+    assert!(result.passed, "repeated hotspot clicks should leave the activated scene stable");
+}
+
+fn interactive_gradient_scene_reports_text_content_regression(harness: AppKitHarness) {
+    let host = harness.create_window(480.0, 320.0);
+    let scene = make_gradient_scene(harness.main_thread_marker());
+    host.set_content_view(&scene.root);
+    register_gradient_scene(&host, &scene);
+    harness.settle(2);
+
+    host.input().click(NSPoint::new(332.0, 70.0));
+    harness.settle(2);
+
+    let artifact_dir = unique_temp_dir("interactive-gradient-scene-wrong-content");
+    let error = host
+        .text_renderer(harness.main_thread_marker())
+        .assert_text_renders_anchored(
+            &interactive_gradient_scene_expectation("XXXXXXXXXXXX")
+                .with_font_name("Helvetica-BoldOblique")
+                .with_point_size(18.0)
+                .with_foreground(RgbaColor::new(255, 255, 255, 255)),
+            &artifact_dir,
+            &interactive_gradient_scene_text_config(),
+        )
+        .unwrap_err();
+
+    assert_interactive_gradient_text_mismatch(error);
+    let _ = std::fs::remove_dir_all(artifact_dir);
+}
+
+fn interactive_gradient_scene_reports_text_size_regression(harness: AppKitHarness) {
+    let host = harness.create_window(480.0, 320.0);
+    let scene = make_gradient_scene(harness.main_thread_marker());
+    host.set_content_view(&scene.root);
+    register_gradient_scene(&host, &scene);
+    harness.settle(2);
+
+    host.input().click(NSPoint::new(332.0, 70.0));
+    harness.settle(2);
+
+    let artifact_dir = unique_temp_dir("interactive-gradient-scene-wrong-size");
+    let error = host
+        .text_renderer(harness.main_thread_marker())
+        .assert_text_renders_anchored(
+            &interactive_gradient_scene_expectation("Connected")
+                .with_font_name("Helvetica-BoldOblique")
+                .with_point_size(30.0)
+                .with_foreground(RgbaColor::new(255, 255, 255, 255)),
+            &artifact_dir,
+            &interactive_gradient_scene_text_config(),
+        )
+        .unwrap_err();
+
+    assert_interactive_gradient_text_mismatch(error);
+    let _ = std::fs::remove_dir_all(artifact_dir);
+}
+
+fn interactive_gradient_scene_reports_text_color_regression(harness: AppKitHarness) {
+    let host = harness.create_window(480.0, 320.0);
+    let scene = make_gradient_scene(harness.main_thread_marker());
+    host.set_content_view(&scene.root);
+    register_gradient_scene(&host, &scene);
+    harness.settle(2);
+
+    host.input().click(NSPoint::new(332.0, 70.0));
+    harness.settle(2);
+
+    let artifact_dir = unique_temp_dir("interactive-gradient-scene-wrong-color");
+    let error = host
+        .text_renderer(harness.main_thread_marker())
+        .assert_text_renders_anchored(
+            &interactive_gradient_scene_expectation("Connected")
+                .with_font_name("Helvetica-BoldOblique")
+                .with_point_size(18.0)
+                .with_foreground(RgbaColor::new(0, 0, 0, 255)),
+            &artifact_dir,
+            &interactive_gradient_scene_text_config(),
+        )
+        .unwrap_err();
+
+    assert_interactive_gradient_text_mismatch(error);
+    let _ = std::fs::remove_dir_all(artifact_dir);
+}
+
+fn click_dispatches_single_mouse_down(harness: AppKitHarness) {
+    let host = harness.create_window(200.0, 120.0);
+    let view = CountingClickView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, 120.0)),
+    );
+    host.set_content_view(&view);
+    harness.settle(2);
+
+    host.input().click(NSPoint::new(40.0, 40.0));
+    harness.settle(2);
+
+    assert_eq!(
+        view.ivars().mouse_downs.get(),
+        1,
+        "a synthesized click should deliver exactly one mouseDown"
+    );
+}
+
 fn wait_until_flushes_runloop_between_attempts(harness: AppKitHarness) {
     let mut ticks = 0usize;
     let attempts = harness
@@ -856,6 +1134,284 @@ fn make_text_view(mtm: MainThreadMarker, size: NSSize) -> Retained<NSTextView> {
 fn make_clip_view(mtm: MainThreadMarker, size: NSSize) -> Retained<NSClipView> {
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), size);
     NSClipView::initWithFrame(NSClipView::alloc(mtm), frame)
+}
+
+#[derive(Clone)]
+struct InteractiveGradientSceneIvars {
+    active: Cell<bool>,
+    title_view: Retained<NSTextView>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = InteractiveGradientSceneIvars]
+    struct InteractiveGradientSceneView;
+
+    impl InteractiveGradientSceneView {
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty_rect: NSRect) {
+            scene_background_color().setFill();
+            NSBezierPath::fillRect(self.bounds());
+
+            let hotspot = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                hotspot_rect(),
+                10.0,
+                10.0,
+            );
+            hotspot_outline_color().setStroke();
+            hotspot.setLineWidth(2.0);
+            hotspot.stroke();
+
+            if !self.ivars().active.get() {
+                return;
+            }
+
+            let card_rect = gradient_card_rect();
+            let card_path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                card_rect,
+                gradient_card_corner_radius(),
+                gradient_card_corner_radius(),
+            );
+
+            let gradient = NSGradient::initWithStartingColor_endingColor(
+                NSGradient::alloc(),
+                &gradient_start_color(),
+                &gradient_end_color(),
+            )
+            .expect("gradient colors should produce an NSGradient");
+            gradient.drawInBezierPath_angle(&card_path, -45.0);
+
+            let border = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                card_rect,
+                gradient_card_corner_radius(),
+                gradient_card_corner_radius(),
+            );
+            border_color().setStroke();
+            border.setLineWidth(1.0);
+            border.stroke();
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            let point = self.convertPoint_fromView(event.locationInWindow(), None);
+            if !self.mouse_inRect(point, hotspot_rect()) {
+                return;
+            }
+
+            if self.ivars().active.replace(true) {
+                return;
+            }
+
+            let title_view = &self.ivars().title_view;
+            title_view.setString(&NSString::from_str("Connected"));
+            title_view.setNeedsDisplay(true);
+            self.setNeedsDisplay(true);
+        }
+    }
+);
+
+impl InteractiveGradientSceneView {
+    fn new(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        title_view: Retained<NSTextView>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(InteractiveGradientSceneIvars {
+            active: Cell::new(false),
+            title_view,
+        });
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+struct GradientScene {
+    root: Retained<InteractiveGradientSceneView>,
+    card_anchor: Retained<NSView>,
+    title_view: Retained<NSTextView>,
+}
+
+#[derive(Clone, Default)]
+struct CountingClickIvars {
+    mouse_downs: Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = CountingClickIvars]
+    struct CountingClickView;
+
+    impl CountingClickView {
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
+            let next = self.ivars().mouse_downs.get() + 1;
+            self.ivars().mouse_downs.set(next);
+        }
+    }
+);
+
+impl CountingClickView {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(CountingClickIvars::default());
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+fn register_gradient_scene(
+    host: &glasscheck_appkit::AppKitWindowHost,
+    scene: &GradientScene,
+) {
+    host.register_view(
+        &scene.card_anchor,
+        InstrumentedView {
+            id: Some("gradient-card".into()),
+            role: Some(Role::Container),
+            label: Some("Gradient Card".into()),
+        },
+    );
+    host.register_view(
+        &scene.title_view,
+        InstrumentedView {
+            id: Some("gradient-title".into()),
+            role: Some(Role::Label),
+            label: Some("Gradient Title".into()),
+        },
+    );
+}
+
+fn interactive_gradient_scene_expectation(content: &str) -> AnchoredTextExpectation {
+    AnchoredTextExpectation::new(
+        content,
+        RegionSpec::node(NodePredicate::id_eq("gradient-card")).subregion(title_region_bounds()),
+    )
+}
+
+fn interactive_gradient_scene_text_config() -> TextAssertionConfig {
+    TextAssertionConfig {
+        compare: CompareConfig {
+            channel_tolerance: 24,
+            match_threshold: 0.93,
+            generate_diff: true,
+        },
+        write_diff: true,
+    }
+}
+
+fn assert_interactive_gradient_text_mismatch(error: glasscheck_appkit::AppKitAnchoredTextError) {
+    match error {
+        glasscheck_appkit::AppKitAnchoredTextError::Assert(TextAssertionError::Mismatch {
+            result,
+            artifacts,
+            ..
+        }) => {
+            assert!(!result.passed);
+            assert!(result.mismatched_pixels > 0);
+            assert!(artifacts.actual_path.exists());
+            assert!(artifacts.expected_path.exists());
+            assert!(artifacts
+                .diff_path
+                .as_ref()
+                .is_none_or(|path| path.exists()));
+        }
+        other => panic!("expected mismatch error, got {other:?}"),
+    }
+}
+
+fn make_gradient_scene(mtm: MainThreadMarker) -> GradientScene {
+    let card_anchor = make_view(mtm, NSSize::new(180.0, 120.0));
+    card_anchor.setFrameOrigin(gradient_card_rect().origin);
+
+    let title_view = make_text_view(mtm, NSSize::new(112.0, 26.0));
+    title_view.setFrameOrigin(NSPoint::new(46.0, 241.0));
+    title_view.setEditable(false);
+    title_view.setSelectable(false);
+    title_view.setDrawsBackground(false);
+    title_view.setString(&NSString::from_str(""));
+    let font_name = NSString::from_str("Helvetica-BoldOblique");
+    let font = NSFont::fontWithName_size(&font_name, 18.0)
+        .expect("Helvetica-BoldOblique should be available on macOS");
+    title_view.setFont(Some(&font));
+    let foreground = NSColor::whiteColor();
+    title_view.setTextColor(Some(&foreground));
+    if let Some(container) = unsafe { title_view.textContainer() } {
+        container.setLineFragmentPadding(0.0);
+    }
+    title_view.setTextContainerInset(NSSize::new(0.0, 0.0));
+
+    let root = InteractiveGradientSceneView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(480.0, 320.0)),
+        title_view.clone(),
+    );
+    root.addSubview(&card_anchor);
+    root.addSubview(&title_view);
+
+    GradientScene {
+        root,
+        card_anchor,
+        title_view,
+    }
+}
+
+fn gradient_card_rect() -> NSRect {
+    NSRect::new(NSPoint::new(24.0, 176.0), NSSize::new(180.0, 120.0))
+}
+
+fn gradient_card_corner_radius() -> f64 {
+    18.0
+}
+
+fn hotspot_rect() -> NSRect {
+    NSRect::new(NSPoint::new(284.0, 38.0), NSSize::new(96.0, 64.0))
+}
+
+fn title_region_bounds() -> RelativeBounds {
+    let card = gradient_card_rect();
+    let title = NSRect::new(NSPoint::new(46.0, 241.0), NSSize::new(112.0, 26.0));
+    RelativeBounds::new(
+        (title.origin.x - card.origin.x) / card.size.width,
+        (title.origin.y - card.origin.y) / card.size.height,
+        title.size.width / card.size.width,
+        title.size.height / card.size.height,
+    )
+}
+
+fn scene_background_color() -> Retained<NSColor> {
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.10, 0.12, 0.16, 1.0)
+}
+
+fn hotspot_outline_color() -> Retained<NSColor> {
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.88, 0.54, 0.29, 1.0)
+}
+
+fn gradient_start_color() -> Retained<NSColor> {
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.33, 0.83, 0.93, 1.0)
+}
+
+fn gradient_end_color() -> Retained<NSColor> {
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.09, 0.16, 0.48, 1.0)
+}
+
+fn border_color() -> Retained<NSColor> {
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.96, 0.99, 1.0, 0.85)
+}
+
+fn assert_gradient_card_rendering(image: &glasscheck_core::Image) {
+    let outside_corner = image
+        .pixel_at(2, 2)
+        .expect("top-left corner pixel should exist");
+    assert_eq!(outside_corner, [26, 31, 41, 255]);
 }
 
 fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {

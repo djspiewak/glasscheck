@@ -9,9 +9,11 @@ glasscheck-core = { path = "../glasscheck-core" }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
+    "NSBezierPath",
     "NSColor",
     "NSFont",
     "NSFontManager",
+    "NSGradient",
     "NSRunningApplication",
     "NSView",
     "NSWindow",
