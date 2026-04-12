@@ -27,6 +27,7 @@ mod imp {
         root_widget: RefCell<Option<Widget>>,
         registry: RefCell<Vec<RegisteredWidget>>,
         provider: RefCell<Option<Box<dyn SemanticProvider>>>,
+        owns_window: bool,
         detached_root_widget: bool,
         tracks_window_child: bool,
     }
@@ -39,12 +40,12 @@ mod imp {
                 .default_width(width.round() as i32)
                 .default_height(height.round() as i32)
                 .build();
-            present_window_offscreen(&window);
             Self {
                 window: Some(window),
                 root_widget: RefCell::new(None),
                 registry: RefCell::new(Vec::new()),
                 provider: RefCell::new(None),
+                owns_window: true,
                 detached_root_widget: false,
                 tracks_window_child: true,
             }
@@ -58,6 +59,7 @@ mod imp {
                 root_widget: RefCell::new(window.child()),
                 registry: RefCell::new(Vec::new()),
                 provider: RefCell::new(None),
+                owns_window: false,
                 detached_root_widget: false,
                 tracks_window_child: true,
             }
@@ -67,6 +69,7 @@ mod imp {
         #[must_use]
         pub fn from_root(widget: &impl IsA<Widget>, window: Option<&Window>) -> Self {
             let root = widget.as_ref().clone();
+            let owns_window = window.is_none();
             let attached_window = window
                 .cloned()
                 .or_else(|| Some(managed_window_for_root(widget)));
@@ -75,6 +78,7 @@ mod imp {
                 root_widget: RefCell::new(Some(root)),
                 registry: RefCell::new(Vec::new()),
                 provider: RefCell::new(None),
+                owns_window,
                 detached_root_widget: window.is_none(),
                 tracks_window_child: false,
             }
@@ -123,12 +127,14 @@ mod imp {
         /// Captures a specific widget subtree as an image.
         #[must_use]
         pub fn capture_subtree(&self, widget: &impl IsA<Widget>) -> Option<glasscheck_core::Image> {
-            capture_widget_image(widget.as_ref()).or_else(|| {
+            let cropped_from_root = || {
                 let root = self.root_widget()?;
                 let rect = rect_of_widget(widget.as_ref(), Some(&root))?;
                 let image = self.capture()?;
                 Some(crop_image_bottom_left(&image, rect))
-            })
+            };
+
+            cropped_from_root().or_else(|| capture_widget_image(widget.as_ref()))
         }
 
         /// Compatibility wrapper for the legacy name.
@@ -372,12 +378,26 @@ mod imp {
         }
     }
 
+    impl Drop for GtkWindowHost {
+        fn drop(&mut self) {
+            if self.owns_window {
+                if let Some(window) = self.window.take() {
+                    window.close();
+                }
+            }
+        }
+    }
+
     pub(crate) fn capture_widget_image(widget: &Widget) -> Option<glasscheck_core::Image> {
         let width = widget.allocated_width().max(1);
         let height = widget.allocated_height().max(1);
-        let paintable = gtk4::WidgetPaintable::new(Some(widget));
         let snapshot = gtk4::Snapshot::new();
-        paintable.snapshot(&snapshot, width as f64, height as f64);
+        if let Some(parent) = widget.parent() {
+            parent.snapshot_child(widget, &snapshot);
+        } else {
+            let paintable = gtk4::WidgetPaintable::new(Some(widget));
+            paintable.snapshot(&snapshot, width as f64, height as f64);
+        }
         let node = snapshot.to_node()?;
         let native = widget.native()?;
         let renderer = native.renderer()?;
