@@ -1,9 +1,9 @@
 #[cfg(target_os = "macos")]
 mod imp {
     use glasscheck_core::{
-        assert_anchored_text_renders, assert_text_renders, font_expectation_has_conflict,
-        AnchoredTextAssertionError, AnchoredTextExpectation, AnchoredTextHarness, Image, Rect,
-        TextAssertionConfig, TextAssertionError, TextExpectation, TextRenderer,
+        assert_anchored_text_renders, font_expectation_has_conflict, AnchoredTextAssertionError,
+        AnchoredTextExpectation, AnchoredTextHarness, Image, Rect, TextAssertionConfig,
+        TextExpectation, TextRenderer,
     };
     use objc2::rc::Retained;
     use objc2::MainThreadOnly;
@@ -57,7 +57,6 @@ mod imp {
     impl std::error::Error for AppKitTextError {}
 
     /// Errors returned by anchored AppKit text assertions.
-    #[derive(Debug)]
     pub type AppKitAnchoredTextError = AnchoredTextAssertionError<AppKitTextError>;
 
     /// AppKit implementation of the `TextRenderer` trait.
