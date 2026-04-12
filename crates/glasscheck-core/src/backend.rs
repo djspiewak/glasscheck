@@ -110,7 +110,10 @@ pub trait InputDriver {
     /// Native text widget type used by the backend.
     type NativeText;
 
-    /// Synthesizes a pointer click at `point` in root/window coordinates.
+    /// Performs the backend's best-effort click interaction at `point`.
+    ///
+    /// Backends may synthesize native pointer events, invoke an activation path,
+    /// or fall back to focus routing when full event synthesis is unavailable.
     fn click(&self, point: Point);
 
     /// Synthesizes a pointer click at the center of `rect`.
@@ -121,10 +124,13 @@ pub trait InputDriver {
         ));
     }
 
-    /// Synthesizes a pointer move at `point`.
+    /// Performs the backend's best-effort pointer-move interaction at `point`.
     fn move_mouse(&self, point: Point);
 
-    /// Synthesizes a key press and release.
+    /// Performs the backend's best-effort key interaction.
+    ///
+    /// Some backends may ignore unsupported modifier combinations or route text
+    /// input through native text APIs instead of low-level key events.
     fn key_press(&self, key: &str, modifiers: KeyModifiers);
 
     /// Inserts text directly into a native text widget.

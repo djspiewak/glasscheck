@@ -901,7 +901,7 @@ fn click_hotspot_reveals_rounded_gradient_and_anchored_text(harness: AppKitHarne
         .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
         .expect("gradient card region should capture before click");
 
-    host.input().click(NSPoint::new(332.0, 70.0));
+    host.input().click(Point::new(332.0, 70.0));
     harness.settle(2);
 
     let after = host
@@ -955,7 +955,7 @@ fn click_outside_hotspot_does_not_activate_gradient_scene(harness: AppKitHarness
         .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
         .expect("gradient card region should capture before click");
 
-    host.input().click(NSPoint::new(60.0, 60.0));
+    host.input().click(Point::new(60.0, 60.0));
     harness.settle(2);
 
     let after = host
@@ -1012,13 +1012,13 @@ fn repeated_hotspot_clicks_leave_gradient_scene_stable(harness: AppKitHarness) {
     register_gradient_scene(&host, &scene);
     harness.settle(2);
 
-    host.input().click(NSPoint::new(332.0, 70.0));
+    host.input().click(Point::new(332.0, 70.0));
     harness.settle(2);
     let first = host
         .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
         .expect("gradient card region should capture after first click");
 
-    host.input().click(NSPoint::new(332.0, 70.0));
+    host.input().click(Point::new(332.0, 70.0));
     harness.settle(2);
     let second = host
         .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
@@ -1046,7 +1046,7 @@ fn interactive_gradient_scene_reports_text_content_regression(harness: AppKitHar
     register_gradient_scene(&host, &scene);
     harness.settle(2);
 
-    host.input().click(NSPoint::new(332.0, 70.0));
+    host.input().click(Point::new(332.0, 70.0));
     harness.settle(2);
 
     let artifact_dir = unique_temp_dir("interactive-gradient-scene-wrong-content");
@@ -1073,7 +1073,7 @@ fn interactive_gradient_scene_reports_text_size_regression(harness: AppKitHarnes
     register_gradient_scene(&host, &scene);
     harness.settle(2);
 
-    host.input().click(NSPoint::new(332.0, 70.0));
+    host.input().click(Point::new(332.0, 70.0));
     harness.settle(2);
 
     let artifact_dir = unique_temp_dir("interactive-gradient-scene-wrong-size");
@@ -1100,7 +1100,7 @@ fn interactive_gradient_scene_reports_text_color_regression(harness: AppKitHarne
     register_gradient_scene(&host, &scene);
     harness.settle(2);
 
-    host.input().click(NSPoint::new(332.0, 70.0));
+    host.input().click(Point::new(332.0, 70.0));
     harness.settle(2);
 
     let artifact_dir = unique_temp_dir("interactive-gradient-scene-wrong-color");
@@ -1129,7 +1129,7 @@ fn click_dispatches_single_mouse_down(harness: AppKitHarness) {
     host.set_content_view(&view);
     harness.settle(2);
 
-    host.input().click(NSPoint::new(40.0, 40.0));
+    host.input().click(Point::new(40.0, 40.0));
     harness.settle(2);
 
     assert_eq!(

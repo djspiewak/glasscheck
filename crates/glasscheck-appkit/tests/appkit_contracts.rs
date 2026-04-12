@@ -521,7 +521,7 @@ fn move_mouse_targets_attached_window_even_when_another_window_is_key(harness: A
     other.window().makeKeyWindow();
     harness.settle(2);
 
-    target.input().move_mouse(NSPoint::new(40.0, 40.0));
+    target.input().move_mouse(Point::new(40.0, 40.0));
     harness.settle(2);
 
     assert_eq!(target_view.ivars().mouse_moves.get(), 1);
@@ -741,7 +741,7 @@ fn nested_child_click_routes_to_hit_tested_view(harness: AppKitHarness) {
     host.set_content_view(&parent);
     harness.settle(2);
 
-    host.input().click(NSPoint::new(40.0, 32.0));
+    host.input().click(Point::new(40.0, 32.0));
     harness.settle(2);
 
     let child_mouse_downs = child.ivars().mouse_downs.get();
@@ -813,7 +813,7 @@ fn stock_button_click_outside_does_not_invoke_action(harness: AppKitHarness) {
     host.set_content_view(&root);
     harness.settle(2);
 
-    host.input().click(NSPoint::new(190.0, 110.0));
+    host.input().click(Point::new(190.0, 110.0));
     harness.settle(2);
 
     assert_eq!(target.ivars().actions.get(), 0);

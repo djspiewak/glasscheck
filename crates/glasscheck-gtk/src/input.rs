@@ -1,6 +1,7 @@
 #[cfg(target_os = "linux")]
 mod imp {
     use glasscheck_core::{InputDriver, KeyModifiers, Point, TextRange};
+    use gtk4::gdk;
     use gtk4::prelude::*;
     use gtk4::{TextView, Widget, Window};
 
@@ -31,6 +32,12 @@ mod imp {
                 button.emit_clicked();
                 return;
             }
+            if activate_target_chain(&target) {
+                return;
+            }
+            if dispatch_click_to_gestures(&root, &target, x, y) {
+                return;
+            }
             target.grab_focus();
         }
 
@@ -47,12 +54,15 @@ mod imp {
         }
 
         /// Synthesizes a key press using backend-neutral modifiers.
-        pub fn key_press(&self, key: &str, _modifiers: KeyModifiers) {
+        pub fn key_press(&self, key: &str, modifiers: KeyModifiers) {
             self.activate_window();
             let Some(root) = self.window.child() else {
                 return;
             };
             if let Some(focus) = root.root().and_then(|root| root.focus()) {
+                if dispatch_key_to_controllers(&focus, key, modifiers) {
+                    return;
+                }
                 if let Ok(text) = focus.downcast::<TextView>() {
                     self.type_text_direct(&text, key);
                 }
@@ -119,6 +129,80 @@ mod imp {
     fn root_top_left_point(root: &Widget, point: Point) -> (f64, f64) {
         let height = root.allocated_height().max(1) as f64;
         (point.x, height - point.y)
+    }
+
+    fn activate_target_chain(target: &Widget) -> bool {
+        let mut current = Some(target.clone());
+        while let Some(widget) = current {
+            if widget.activate() {
+                return true;
+            }
+            current = widget.parent();
+        }
+        false
+    }
+
+    fn dispatch_click_to_gestures(root: &Widget, target: &Widget, x: f64, y: f64) -> bool {
+        let mut current = Some(target.clone());
+        let mut fired = false;
+        while let Some(widget) = current {
+            let Some((local_x, local_y)) = root.translate_coordinates(&widget, x, y) else {
+                current = widget.parent();
+                continue;
+            };
+            for object in widget.observe_controllers().snapshot() {
+                let Ok(controller) = object.downcast::<gtk4::GestureClick>() else {
+                    continue;
+                };
+                controller.emit_by_name::<()>("pressed", &[&1i32, &local_x, &local_y]);
+                controller.emit_by_name::<()>("released", &[&1i32, &local_x, &local_y]);
+                fired = true;
+            }
+            current = widget.parent();
+        }
+        fired
+    }
+
+    fn dispatch_key_to_controllers(widget: &Widget, key: &str, modifiers: KeyModifiers) -> bool {
+        let Some(keyval) = gdk::Key::from_name(key) else {
+            return false;
+        };
+        let state = modifier_state(modifiers);
+        let mut current = Some(widget.clone());
+        let mut handled = false;
+        while let Some(candidate) = current {
+            for object in candidate.observe_controllers().snapshot() {
+                let Ok(controller) = object.downcast::<gtk4::EventControllerKey>() else {
+                    continue;
+                };
+                let propagation =
+                    controller.emit_by_name::<bool>("key-pressed", &[&keyval, &0u32, &state]);
+                controller.emit_by_name::<()>("key-released", &[&keyval, &0u32, &state]);
+                handled = true;
+                if propagation {
+                    return true;
+                }
+            }
+            current = candidate.parent();
+        }
+        handled
+    }
+
+    fn modifier_state(modifiers: KeyModifiers) -> gdk::ModifierType {
+        let mut state = gdk::ModifierType::empty();
+        if modifiers.shift {
+            state |= gdk::ModifierType::SHIFT_MASK;
+        }
+        if modifiers.control {
+            state |= gdk::ModifierType::CONTROL_MASK;
+        }
+        if modifiers.alt {
+            state |= gdk::ModifierType::ALT_MASK;
+        }
+        if modifiers.meta {
+            state |= gdk::ModifierType::META_MASK | gdk::ModifierType::SUPER_MASK;
+        }
+        state
     }
 }
 

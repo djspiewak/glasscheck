@@ -170,12 +170,12 @@ mod imp {
             if self.detached_root_widget {
                 return Err(RegionResolveError::DetachedRootView);
             }
-            let scene = self.snapshot_scene();
+            let (scene, registered_indices) = self.snapshot_scene_with_registered_indices();
             let handle = scene.find(predicate).map_err(map_query_error)?;
             let node = scene
                 .node(handle)
                 .ok_or(RegionResolveError::InvalidHandle(handle))?;
-            if let Some(widget) = self.registered_widget_for_handle(handle) {
+            if let Some(widget) = self.registered_widget_for_handle(handle, &registered_indices) {
                 if let Ok(button) = widget.clone().downcast::<gtk4::Button>() {
                     button.emit_clicked();
                     return Ok(());
@@ -258,6 +258,10 @@ mod imp {
         /// Builds a merged scene snapshot from registered native widgets and virtual nodes.
         #[must_use]
         pub fn snapshot_scene(&self) -> SceneSnapshot {
+            self.snapshot_scene_with_registered_indices().0
+        }
+
+        fn snapshot_scene_with_registered_indices(&self) -> (SceneSnapshot, Vec<usize>) {
             let root_widget = self.root_widget();
             let registry = self.registry.borrow();
             let registered_ids = registry
@@ -271,6 +275,7 @@ mod imp {
                 })
                 .collect::<HashMap<usize, String>>();
 
+            let mut registered_indices = Vec::new();
             let mut nodes: Vec<SemanticNode> = registry
                 .iter()
                 .enumerate()
@@ -302,6 +307,7 @@ mod imp {
                     {
                         node.parent_id = Some(parent_id);
                     }
+                    registered_indices.push(index);
                     Some(node)
                 })
                 .collect();
@@ -317,7 +323,7 @@ mod imp {
                 ));
             }
 
-            SceneSnapshot::new(nodes)
+            (SceneSnapshot::new(nodes), registered_indices)
         }
 
         /// Builds a query root from the current scene snapshot.
@@ -370,10 +376,12 @@ mod imp {
         fn registered_widget_for_handle(
             &self,
             handle: glasscheck_core::NodeHandle,
+            registered_indices: &[usize],
         ) -> Option<Widget> {
+            let registry_index = *registered_indices.get(handle.index())?;
             self.registry
                 .borrow()
-                .get(handle.index())
+                .get(registry_index)
                 .map(|entry| entry.widget.clone())
         }
     }

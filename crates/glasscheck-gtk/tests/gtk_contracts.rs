@@ -1,8 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use glasscheck_core::{
-    NodePredicate, Point, PropertyValue, Rect, RegionResolveError, Role, SemanticNode,
-    SemanticProvider, Size, TextRange,
+    KeyModifiers, NodePredicate, Point, PropertyValue, Rect, RegionResolveError, Role,
+    SemanticNode, SemanticProvider, Size, TextRange,
 };
 use glasscheck_gtk::{GtkHarness, GtkWindowHost, InstrumentedWidget};
 use gtk4::prelude::*;
@@ -32,6 +32,17 @@ fn main() {
     );
     run("semantic_click_targets_registered_node", || {
         semantic_click_targets_registered_node(harness)
+    });
+    run(
+        "semantic_click_dispatches_gesture_click_for_non_button_targets",
+        || semantic_click_dispatches_gesture_click_for_non_button_targets(harness),
+    );
+    run(
+        "semantic_click_skips_unrealized_registrations_when_mapping_handles",
+        || semantic_click_skips_unrealized_registrations_when_mapping_handles(harness),
+    );
+    run("key_press_dispatches_modifiers_to_event_controller", || {
+        key_press_dispatches_modifiers_to_event_controller(harness)
     });
     run("text_range_rect_converts_to_root_coordinates", || {
         text_range_rect_converts_to_root_coordinates(harness)
@@ -212,6 +223,90 @@ fn semantic_click_targets_registered_node(harness: GtkHarness) {
     harness.settle(2);
 
     assert_eq!(activations.get(), 1);
+}
+
+fn semantic_click_skips_unrealized_registrations_when_mapping_handles(harness: GtkHarness) {
+    let host = harness.create_window(180.0, 120.0);
+    let root = fixed_root(180, 120);
+    let skipped = gtk4::Button::with_label("Skipped");
+    skipped.set_size_request(80, 30);
+    let target = gtk4::Button::with_label("Target");
+    target.set_size_request(80, 30);
+    let skipped_activations = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let seen_skipped = skipped_activations.clone();
+    skipped.connect_clicked(move |_| seen_skipped.set(seen_skipped.get() + 1));
+    let target_activations = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let seen_target = target_activations.clone();
+    target.connect_clicked(move |_| seen_target.set(seen_target.get() + 1));
+    root.put(&target, 20.0, 20.0);
+    host.set_root(&root);
+    host.register_node(&skipped, node("skipped", Role::Button, "Skipped"));
+    host.register_node(&target, node("target", Role::Button, "Target"));
+    harness.settle(4);
+
+    host.click_node(&NodePredicate::id_eq("target"))
+        .expect("semantic click should resolve the realized target widget");
+    harness.settle(2);
+
+    assert_eq!(skipped_activations.get(), 0);
+    assert_eq!(target_activations.get(), 1);
+}
+
+fn semantic_click_dispatches_gesture_click_for_non_button_targets(harness: GtkHarness) {
+    let host = harness.create_window(200.0, 140.0);
+    let root = fixed_root(200, 140);
+    let area = gtk4::DrawingArea::new();
+    area.set_size_request(90, 40);
+    let activations = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let seen = activations.clone();
+    let gesture = gtk4::GestureClick::new();
+    gesture.connect_released(move |_, _, _, _| seen.set(seen.get() + 1));
+    area.add_controller(gesture);
+    root.put(&area, 20.0, 20.0);
+    host.set_root(&root);
+    host.register_node(&area, node("gesture", Role::Button, "Gesture"));
+    harness.settle(4);
+
+    host.click_node(&NodePredicate::id_eq("gesture"))
+        .expect("semantic click should dispatch to gesture-driven targets");
+    harness.settle(2);
+
+    assert_eq!(activations.get(), 1);
+}
+
+fn key_press_dispatches_modifiers_to_event_controller(harness: GtkHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = fixed_root(220, 140);
+    let entry = gtk4::Entry::new();
+    entry.set_size_request(120, 36);
+    let states = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = states.clone();
+    let controller = gtk4::EventControllerKey::new();
+    controller.connect_key_pressed(move |_, key, _, modifiers| {
+        seen.borrow_mut()
+            .push((key.name().map(|name| name.to_string()), modifiers));
+        gtk4::glib::Propagation::Stop
+    });
+    entry.add_controller(controller);
+    root.put(&entry, 20.0, 20.0);
+    host.set_root(&root);
+    harness.settle(4);
+
+    entry.grab_focus();
+    harness.settle(2);
+    host.input().key_press(
+        "a",
+        KeyModifiers {
+            control: true,
+            ..KeyModifiers::default()
+        },
+    );
+    harness.settle(2);
+
+    let states = states.borrow();
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0].0.as_deref(), Some("a"));
+    assert!(states[0].1.contains(gtk4::gdk::ModifierType::CONTROL_MASK));
 }
 
 fn text_range_rect_converts_to_root_coordinates(harness: GtkHarness) {
