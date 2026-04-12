@@ -1,0 +1,8 @@
+[package]
+name = "glasscheck-gtk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glasscheck-core = { path = "../glasscheck-core" }

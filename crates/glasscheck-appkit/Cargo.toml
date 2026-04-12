@@ -4,8 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+native-smoke-tests = []
+native-contract-tests = []
+
 [dependencies]
 glasscheck-core = { path = "../glasscheck-core" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
@@ -41,7 +47,9 @@ objc2-foundation = { version = "0.3", features = [
 [[test]]
 name = "appkit_smoke"
 harness = false
+required-features = ["native-smoke-tests"]
 
 [[test]]
 name = "appkit_contracts"
 harness = false
+required-features = ["native-contract-tests"]

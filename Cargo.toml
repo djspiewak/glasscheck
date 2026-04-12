@@ -3,6 +3,7 @@ members = [
     "crates/glasscheck",
     "crates/glasscheck-core",
     "crates/glasscheck-appkit",
+    "crates/glasscheck-gtk",
 ]
 resolver = "2"
 

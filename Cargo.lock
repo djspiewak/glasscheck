@@ -79,6 +79,7 @@ version = "0.1.0"
 dependencies = [
  "glasscheck-appkit",
  "glasscheck-core",
+ "glasscheck-gtk",
 ]
 
 [[package]]
@@ -96,6 +97,13 @@ name = "glasscheck-core"
 version = "0.1.0"
 dependencies = [
  "png",
+]
+
+[[package]]
+name = "glasscheck-gtk"
+version = "0.1.0"
+dependencies = [
+ "glasscheck-core",
 ]
 
 [[package]]

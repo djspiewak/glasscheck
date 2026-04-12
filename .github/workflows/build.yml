@@ -16,6 +16,11 @@ jobs:
       matrix:
         include:
           - os: macos-latest
+            cargo_args: --workspace --features appkit
+            run_native_smoke: true
+          - os: ubuntu-latest
+            cargo_args: --workspace --features gtk
+            run_native_smoke: false
 
     steps:
       - name: Checkout
@@ -31,4 +36,12 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test ${{ matrix.cargo_args }}
+
+      - name: Run AppKit smoke test
+        if: ${{ matrix.run_native_smoke }}
+        run: cargo test -p glasscheck-appkit --features native-smoke-tests --test appkit_smoke
+
+      - name: Run AppKit contracts test
+        if: ${{ matrix.run_native_smoke }}
+        run: cargo test -p glasscheck-appkit --features native-contract-tests --test appkit_contracts

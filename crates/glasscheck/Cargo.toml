@@ -5,9 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["appkit"]
+default = []
 appkit = ["dep:glasscheck-appkit"]
+gtk = ["dep:glasscheck-gtk"]
 
 [dependencies]
 glasscheck-core = { path = "../glasscheck-core" }
 glasscheck-appkit = { path = "../glasscheck-appkit", optional = true }
+glasscheck-gtk = { path = "../glasscheck-gtk", optional = true }
