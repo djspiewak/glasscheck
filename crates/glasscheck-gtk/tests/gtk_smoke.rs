@@ -68,8 +68,7 @@ fn capture_returns_non_empty_image(harness: GtkHarness) {
     let host = harness.create_window(240.0, 120.0);
     let root = fixed_root(240, 120);
     host.set_root(&root);
-    harness.settle(4);
-
+    wait_for_window_capture(harness, &host, &root);
     let image = host.capture().expect("window capture should succeed");
     assert!(image.width > 0);
     assert!(image.height > 0);
@@ -157,7 +156,15 @@ fn direct_text_input_changes_rendered_content(harness: GtkHarness) {
     text_view.set_size_request(180, 48);
     root.put(&text_view, 24.0, 24.0);
     host.set_root(&root);
-    harness.settle(4);
+    harness
+        .wait_until(
+            PollOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(10),
+            },
+            || host.capture_subtree(&text_view).is_some(),
+        )
+        .expect("text view should become capturable before typing");
 
     let before = host
         .capture_subtree(&text_view)
@@ -166,7 +173,7 @@ fn direct_text_input_changes_rendered_content(harness: GtkHarness) {
     harness
         .wait_until(
             PollOptions {
-                timeout: Duration::from_millis(250),
+                timeout: Duration::from_secs(1),
                 interval: Duration::from_millis(10),
             },
             || host.capture_subtree(&text_view).is_some(),
@@ -203,7 +210,7 @@ fn capture_region_matches_registered_widget_bounds(harness: GtkHarness) {
             label: Some("Run".into()),
         },
     );
-    harness.settle(4);
+    wait_for_window_capture(harness, &host, &root);
 
     let region = host
         .capture_region(&RegionSpec::node(NodePredicate::id_eq("run")))
@@ -230,7 +237,7 @@ fn rendered_text_assertion_matches_live_text(harness: GtkHarness) {
     text_view.set_size_request(180, 48);
     root.put(&text_view, 24.0, 24.0);
     host.set_root(&root);
-    harness.settle(4);
+    wait_for_window_capture(harness, &host, &root);
 
     host.text_renderer()
         .assert_text_renders_anchored(
@@ -268,7 +275,7 @@ fn anchored_text_assertion_matches_semantic_region(harness: GtkHarness) {
             label: Some("Status".into()),
         },
     );
-    harness.settle(4);
+    wait_for_window_capture(harness, &host, &root);
 
     let expectation = AnchoredTextExpectation::new(
         "Connected",
@@ -364,12 +371,37 @@ fn wait_for_window_map(harness: GtkHarness, window: &gtk4::Window) {
     harness
         .wait_until(
             PollOptions {
-                timeout: Duration::from_millis(250),
+                timeout: Duration::from_secs(1),
                 interval: Duration::from_millis(10),
             },
             || window.surface().is_some_and(|surface| surface.is_mapped()),
         )
         .expect("GTK toplevel surface should become mapped");
+}
+
+fn wait_for_window_capture(
+    harness: GtkHarness,
+    host: &glasscheck_gtk::GtkWindowHost,
+    root: &impl IsA<gtk4::Widget>,
+) {
+    harness
+        .wait_until(
+            PollOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(10),
+            },
+            || root.as_ref().allocated_width() > 1 && root.as_ref().allocated_height() > 1,
+        )
+        .expect("root should receive a real allocation before capture");
+    harness
+        .wait_until(
+            PollOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(10),
+            },
+            || host.capture().is_some(),
+        )
+        .expect("window capture should become available");
 }
 
 fn connected_display_rects(display: &gdk::Display) -> Option<Vec<DisplayRect>> {
@@ -479,9 +511,27 @@ fn x11_window_frame(window: &gtk4::Window) -> Option<DisplayRect> {
             return None;
         }
 
+        let root = root.assume_init();
+        let mut root_x = 0;
+        let mut root_y = 0;
+        let mut child = 0;
+        if XTranslateCoordinates(
+            xdisplay,
+            xid,
+            root,
+            0,
+            0,
+            &mut root_x,
+            &mut root_y,
+            &mut child,
+        ) == 0
+        {
+            return None;
+        }
+
         Some(DisplayRect::new(
-            x.assume_init(),
-            y.assume_init(),
+            root_x,
+            root_y,
             width.assume_init() as i32,
             height.assume_init() as i32,
         ))
@@ -508,6 +558,16 @@ unsafe extern "C" {
         height_return: *mut std::os::raw::c_uint,
         border_width_return: *mut std::os::raw::c_uint,
         depth_return: *mut std::os::raw::c_uint,
+    ) -> std::os::raw::c_int;
+    fn XTranslateCoordinates(
+        display: *mut std::ffi::c_void,
+        src_w: std::os::raw::c_ulong,
+        dest_w: std::os::raw::c_ulong,
+        src_x: std::os::raw::c_int,
+        src_y: std::os::raw::c_int,
+        dest_x_return: *mut std::os::raw::c_int,
+        dest_y_return: *mut std::os::raw::c_int,
+        child_return: *mut std::os::raw::c_ulong,
     ) -> std::os::raw::c_int;
     fn XSync(display: *mut std::ffi::c_void, discard: std::os::raw::c_int) -> std::os::raw::c_int;
 }

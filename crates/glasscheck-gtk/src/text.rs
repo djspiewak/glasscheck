@@ -104,8 +104,7 @@ mod imp {
             window.set_child(Some(&fixed));
             install_reference_css(&window, expectation)?;
             present_window_offscreen(&window);
-            flush_main_context();
-
+            wait_for_capture(fixed.upcast_ref()).ok_or(GtkTextError::CaptureFailed)?;
             let image =
                 capture_widget_image(fixed.upcast_ref()).ok_or(GtkTextError::CaptureFailed)?;
             Ok(glasscheck_core::crop_image_bottom_left(
@@ -244,6 +243,21 @@ mod imp {
             context.iteration(false);
         }
         context.iteration(false);
+    }
+
+    fn wait_for_capture(widget: &gtk4::Widget) -> Option<()> {
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(1) {
+            flush_main_context();
+            if widget.allocated_width() > 1
+                && widget.allocated_height() > 1
+                && capture_widget_image(widget).is_some()
+            {
+                return Some(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        None
     }
 }
 

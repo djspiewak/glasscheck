@@ -379,7 +379,8 @@ mod imp {
         let snapshot = gtk4::Snapshot::new();
         paintable.snapshot(&snapshot, width as f64, height as f64);
         let node = snapshot.to_node()?;
-        let renderer = widget.native()?.renderer()?;
+        let native = widget.native()?;
+        let renderer = native.renderer()?;
         let texture = renderer.render_texture(
             &node,
             Some(&graphene::Rect::new(0.0, 0.0, width as f32, height as f32)),

@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 mod imp {
     use std::ffi::c_void;
-    use std::os::raw::{c_int, c_ulong};
+    use std::os::raw::{c_int, c_long, c_ulong};
 
     use gtk4::gdk;
     use gtk4::glib::translate::ToGlibPtr;
@@ -39,6 +39,17 @@ mod imp {
     }
 
     pub(crate) fn present_window_offscreen(window: &Window) {
+        if should_hide_during_initial_map(window) {
+            let original_opacity = window.opacity();
+            window.set_opacity(0.0);
+            apply_offscreen_position(window);
+            window.present();
+            wait_for_window_ready(window);
+            apply_offscreen_position(window);
+            window.set_opacity(original_opacity);
+            return;
+        }
+
         apply_offscreen_position(window);
         window.present();
         apply_offscreen_position(window);
@@ -88,11 +99,131 @@ mod imp {
             let xdisplay = gdk_x11_display_get_xdisplay(display.to_glib_none().0);
             let xid = gdk_x11_surface_get_xid(surface.to_glib_none().0);
             if !xdisplay.is_null() && xid != 0 {
-                XMoveWindow(xdisplay, xid, origin.x, origin.y);
+                let width = surface.width().max(window.default_width()).max(1);
+                let height = surface.height().max(window.default_height()).max(1);
+                let mut attributes = XSetWindowAttributes {
+                    background_pixmap: 0,
+                    background_pixel: 0,
+                    border_pixmap: 0,
+                    border_pixel: 0,
+                    bit_gravity: 0,
+                    win_gravity: 0,
+                    backing_store: 0,
+                    backing_planes: 0,
+                    backing_pixel: 0,
+                    save_under: 0,
+                    event_mask: 0,
+                    do_not_propagate_mask: 0,
+                    override_redirect: 1,
+                    colormap: 0,
+                    cursor: 0,
+                };
+                let mut hints = XSizeHints {
+                    flags: P_POSITION | P_SIZE,
+                    x: origin.x,
+                    y: origin.y,
+                    width,
+                    height,
+                    min_width: 0,
+                    min_height: 0,
+                    max_width: 0,
+                    max_height: 0,
+                    width_inc: 0,
+                    height_inc: 0,
+                    min_aspect: XAspect { x: 0, y: 0 },
+                    max_aspect: XAspect { x: 0, y: 0 },
+                    base_width: 0,
+                    base_height: 0,
+                    win_gravity: 0,
+                };
+                XChangeWindowAttributes(xdisplay, xid, CW_OVERRIDE_REDIRECT, &mut attributes);
+                XSetWMNormalHints(xdisplay, xid, &mut hints);
+                XMoveResizeWindow(
+                    xdisplay,
+                    xid,
+                    origin.x,
+                    origin.y,
+                    width as u32,
+                    height as u32,
+                );
                 XSync(xdisplay, 0);
             }
         }
     }
+
+    #[repr(C)]
+    struct XSetWindowAttributes {
+        background_pixmap: c_ulong,
+        background_pixel: c_ulong,
+        border_pixmap: c_ulong,
+        border_pixel: c_ulong,
+        bit_gravity: c_int,
+        win_gravity: c_int,
+        backing_store: c_int,
+        backing_planes: c_ulong,
+        backing_pixel: c_ulong,
+        save_under: c_int,
+        event_mask: c_long,
+        do_not_propagate_mask: c_long,
+        override_redirect: c_int,
+        colormap: c_ulong,
+        cursor: c_ulong,
+    }
+
+    fn should_hide_during_initial_map(window: &Window) -> bool {
+        gtk4::prelude::WidgetExt::display(window).backend().is_x11()
+    }
+
+    fn wait_for_window_ready(window: &Window) {
+        let started = std::time::Instant::now();
+        let context = glib::MainContext::default();
+        while started.elapsed() < std::time::Duration::from_secs(1) {
+            while context.pending() {
+                context.iteration(false);
+            }
+            context.iteration(false);
+
+            let child_ready = window
+                .child()
+                .is_some_and(|child| child.allocated_width() > 1 && child.allocated_height() > 1);
+            let surface_ready = window.surface().is_some_and(|surface| surface.is_mapped());
+            if child_ready && surface_ready {
+                break;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[repr(C)]
+    struct XAspect {
+        x: c_int,
+        y: c_int,
+    }
+
+    #[repr(C)]
+    struct XSizeHints {
+        flags: c_long,
+        x: c_int,
+        y: c_int,
+        width: c_int,
+        height: c_int,
+        min_width: c_int,
+        min_height: c_int,
+        max_width: c_int,
+        max_height: c_int,
+        width_inc: c_int,
+        height_inc: c_int,
+        min_aspect: XAspect,
+        max_aspect: XAspect,
+        base_width: c_int,
+        base_height: c_int,
+        win_gravity: c_int,
+    }
+
+    const P_POSITION: c_long = 1 << 2;
+    const P_SIZE: c_long = 1 << 3;
+    const CW_OVERRIDE_REDIRECT: c_ulong = 1 << 9;
 
     #[link(name = "gtk-4")]
     unsafe extern "C" {
@@ -102,7 +233,21 @@ mod imp {
 
     #[link(name = "X11")]
     unsafe extern "C" {
-        fn XMoveWindow(display: *mut c_void, w: c_ulong, x: c_int, y: c_int) -> c_int;
+        fn XChangeWindowAttributes(
+            display: *mut c_void,
+            w: c_ulong,
+            valuemask: c_ulong,
+            attributes: *mut XSetWindowAttributes,
+        ) -> c_int;
+        fn XMoveResizeWindow(
+            display: *mut c_void,
+            w: c_ulong,
+            x: c_int,
+            y: c_int,
+            width: u32,
+            height: u32,
+        ) -> c_int;
+        fn XSetWMNormalHints(display: *mut c_void, w: c_ulong, hints: *mut XSizeHints);
         fn XSync(display: *mut c_void, discard: c_int) -> c_int;
     }
 
