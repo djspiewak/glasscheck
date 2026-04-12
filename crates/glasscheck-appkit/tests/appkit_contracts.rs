@@ -1,12 +1,13 @@
 #![cfg(target_os = "macos")]
 
 use std::cell::Cell;
+use std::rc::Rc;
 
 use glasscheck_appkit::{AppKitHarness, AppKitWindowHost, InstrumentedView};
 use glasscheck_core::{
     assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
-    NodePredicate, Point, PropertyValue, QueryError, Rect, RegionResolveError, Role, SemanticNode,
-    SemanticProvider, Size,
+    NodePredicate, Point, PropertyValue, QueryError, Rect, RegionResolveError, RelativeBounds,
+    Role, SemanticNode, SemanticProvider, Size,
 };
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
@@ -52,9 +53,24 @@ fn main() {
     run("attached_window_reports_missing_node", || {
         attached_window_reports_missing_node(harness)
     });
-    run("query_root_preserves_unset_instrumented_metadata", || {
-        query_root_preserves_unset_instrumented_metadata(harness)
+    run("query_root_is_scene_backed", || {
+        query_root_is_scene_backed(harness)
     });
+    run("registered_views_leave_active_root_subtree_cleanly", || {
+        registered_views_leave_active_root_subtree_cleanly(harness)
+    });
+    run(
+        "attached_window_registry_drops_nodes_after_content_swap",
+        || attached_window_registry_drops_nodes_after_content_swap(harness),
+    );
+    run(
+        "native_snapshot_visibility_tracks_hidden_ancestors_and_clipping",
+        || native_snapshot_visibility_tracks_hidden_ancestors_and_clipping(harness),
+    );
+    run(
+        "provider_only_root_relative_region_uses_content_bounds",
+        || provider_only_root_relative_region_uses_content_bounds(harness),
+    );
     run("sidebar_row_alignment_assertion_passes", || {
         sidebar_row_alignment_assertion_passes(harness)
     });
@@ -88,6 +104,18 @@ fn main() {
         || provider_namespacing_preserves_existing_source_id_property(harness),
     );
     run(
+        "provider_namespacing_preserves_unique_native_parent_relationships",
+        || provider_namespacing_preserves_unique_native_parent_relationships(harness),
+    );
+    run(
+        "provider_namespacing_marks_ambiguous_native_parents",
+        || provider_namespacing_marks_ambiguous_native_parents(harness),
+    );
+    run(
+        "provider_parent_repair_marks_ambiguous_native_parents_without_namespacing",
+        || provider_parent_repair_marks_ambiguous_native_parents_without_namespacing(harness),
+    );
+    run(
         "duplicate_provider_ids_do_not_invent_parent_relationships",
         || duplicate_provider_ids_do_not_invent_parent_relationships(harness),
     );
@@ -98,9 +126,27 @@ fn main() {
     run("semantic_click_targets_registered_node", || {
         semantic_click_targets_registered_node(harness)
     });
+    run(
+        "provider_click_after_content_swap_does_not_dispatch_to_stale_registered_view",
+        || provider_click_after_content_swap_does_not_dispatch_to_stale_registered_view(harness),
+    );
+    run(
+        "semantic_click_on_registered_ancestor_routes_to_descendant_hit_view",
+        || semantic_click_on_registered_ancestor_routes_to_descendant_hit_view(harness),
+    );
     run("semantic_click_reports_missing_node", || {
         semantic_click_reports_missing_node(harness)
     });
+    run("semantic_click_uses_visible_hit_testable_point", || {
+        semantic_click_uses_visible_hit_testable_point(harness)
+    });
+    run("semantic_click_reports_unhittable_registered_node", || {
+        semantic_click_reports_unhittable_registered_node(harness)
+    });
+    run(
+        "semantic_click_reports_unhittable_registered_root_node",
+        || semantic_click_reports_unhittable_registered_root_node(harness),
+    );
     run(
         "provider_only_semantic_click_reports_unavailable_input",
         || provider_only_semantic_click_reports_unavailable_input(harness),
@@ -108,6 +154,18 @@ fn main() {
     run(
         "semantic_click_stress_does_not_duplicate_mouse_downs",
         || semantic_click_stress_does_not_duplicate_mouse_downs(harness),
+    );
+    run(
+        "semantic_click_rejects_registered_node_when_hit_test_returns_ancestor",
+        || semantic_click_rejects_registered_node_when_hit_test_returns_ancestor(harness),
+    );
+    run(
+        "semantic_click_rejects_registered_node_when_hit_test_is_unknown",
+        || semantic_click_rejects_registered_node_when_hit_test_is_unknown(harness),
+    );
+    run(
+        "attached_window_prunes_stale_registered_views_after_content_swap",
+        || attached_window_prunes_stale_registered_views_after_content_swap(harness),
     );
     run(
         "move_mouse_targets_attached_window_even_when_another_window_is_key",
@@ -128,6 +186,10 @@ fn main() {
     run(
         "registered_native_hierarchy_uses_nearest_registered_ancestor",
         || registered_native_hierarchy_uses_nearest_registered_ancestor(harness),
+    );
+    run(
+        "duplicate_native_ids_do_not_drop_ancestor_relationships",
+        || duplicate_native_ids_do_not_drop_ancestor_relationships(harness),
     );
     run("nested_child_click_routes_to_hit_tested_view", || {
         nested_child_click_routes_to_hit_tested_view(harness)
@@ -226,7 +288,7 @@ fn attached_window_reports_missing_node(harness: AppKitHarness) {
     assert!(matches!(error, QueryError::NotFoundPredicate(_)));
 }
 
-fn query_root_preserves_unset_instrumented_metadata(harness: AppKitHarness) {
+fn query_root_is_scene_backed(harness: AppKitHarness) {
     let host = harness.create_window(160.0, 120.0);
     let root = make_view(harness.main_thread_marker(), NSSize::new(160.0, 120.0));
     let child = make_view(harness.main_thread_marker(), NSSize::new(80.0, 24.0));
@@ -235,23 +297,170 @@ fn query_root_preserves_unset_instrumented_metadata(harness: AppKitHarness) {
     host.register_view(
         &child,
         InstrumentedView {
-            id: None,
-            role: None,
+            id: Some("native-child".into()),
+            role: Some(Role::ListItem),
             label: Some("Loose".into()),
+        },
+    );
+    host.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
+    harness.settle(2);
+
+    let query_root = host.query_root();
+    let provider = query_root
+        .find_by_predicate(&NodePredicate::property_eq(
+            "provider",
+            PropertyValue::Bool(true),
+        ))
+        .expect("scene-backed query root should include provider nodes");
+    let native = query_root
+        .find_by_predicate(&NodePredicate::id_eq("native-child"))
+        .expect("scene-backed query root should include registered native nodes");
+
+    assert!(query_root.scene().is_some());
+    assert_eq!(provider.id.as_deref(), Some("provider-node"));
+    assert_eq!(native.id.as_deref(), Some("native-child"));
+    assert!(query_root
+        .find_by_predicate(&NodePredicate::parent(NodePredicate::id_eq("native-child")))
+        .is_err());
+}
+
+fn registered_views_leave_active_root_subtree_cleanly(harness: AppKitHarness) {
+    let host = harness.create_window(180.0, 120.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
+    let child = make_view(harness.main_thread_marker(), NSSize::new(80.0, 24.0));
+    root.addSubview(&child);
+    host.set_content_view(&root);
+    host.register_view(
+        &child,
+        InstrumentedView {
+            id: Some("detached-child".into()),
+            role: Some(Role::Container),
+            label: Some("Detached".into()),
+        },
+    );
+    harness.settle(2);
+    assert!(host
+        .snapshot_scene()
+        .find(&NodePredicate::id_eq("detached-child"))
+        .is_ok());
+
+    child.removeFromSuperview();
+    harness.settle(2);
+
+    let error = host
+        .snapshot_scene()
+        .find(&NodePredicate::id_eq("detached-child"))
+        .unwrap_err();
+    assert!(matches!(error, QueryError::NotFoundPredicate(_)));
+}
+
+fn attached_window_registry_drops_nodes_after_content_swap(harness: AppKitHarness) {
+    let host = harness.create_window(180.0, 120.0);
+    let initial_root = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
+    let initial_child = make_view(harness.main_thread_marker(), NSSize::new(80.0, 24.0));
+    initial_root.addSubview(&initial_child);
+    host.set_content_view(&initial_root);
+    harness.settle(2);
+
+    let attached = AppKitWindowHost::from_window(host.window());
+    attached.register_view(
+        &initial_child,
+        InstrumentedView {
+            id: Some("stale-child".into()),
+            role: Some(Role::Container),
+            label: Some("Stale".into()),
+        },
+    );
+    assert!(attached
+        .snapshot_scene()
+        .find(&NodePredicate::id_eq("stale-child"))
+        .is_ok());
+
+    let replacement_root = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
+    host.set_content_view(&replacement_root);
+    harness.settle(2);
+
+    let error = attached
+        .snapshot_scene()
+        .find(&NodePredicate::id_eq("stale-child"))
+        .unwrap_err();
+    assert!(matches!(error, QueryError::NotFoundPredicate(_)));
+}
+
+fn native_snapshot_visibility_tracks_hidden_ancestors_and_clipping(harness: AppKitHarness) {
+    let host = harness.create_window(120.0, 120.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(120.0, 120.0));
+
+    let hidden_parent = make_view(harness.main_thread_marker(), NSSize::new(60.0, 60.0));
+    hidden_parent.setFrameOrigin(NSPoint::new(10.0, 10.0));
+    hidden_parent.setHidden(true);
+    let hidden_child = make_view(harness.main_thread_marker(), NSSize::new(30.0, 30.0));
+    hidden_child.setFrameOrigin(NSPoint::new(5.0, 5.0));
+    hidden_parent.addSubview(&hidden_child);
+    root.addSubview(&hidden_parent);
+
+    let clipping_parent = make_view(harness.main_thread_marker(), NSSize::new(40.0, 40.0));
+    clipping_parent.setFrameOrigin(NSPoint::new(10.0, 10.0));
+    let clipped_child = make_view(harness.main_thread_marker(), NSSize::new(30.0, 30.0));
+    clipped_child.setFrameOrigin(NSPoint::new(30.0, 30.0));
+    clipping_parent.addSubview(&clipped_child);
+    root.addSubview(&clipping_parent);
+
+    host.set_content_view(&root);
+    host.register_view(
+        &hidden_child,
+        InstrumentedView {
+            id: Some("hidden-child".into()),
+            role: Some(Role::Container),
+            label: Some("Hidden".into()),
+        },
+    );
+    host.register_view(
+        &clipped_child,
+        InstrumentedView {
+            id: Some("clipped-child".into()),
+            role: Some(Role::Container),
+            label: Some("Clipped".into()),
         },
     );
     harness.settle(2);
 
-    let query_root = host.query_root();
-    let node = &query_root.all()[0];
+    let scene = host.snapshot_scene();
+    let hidden = scene
+        .node(scene.find(&NodePredicate::id_eq("hidden-child")).unwrap())
+        .unwrap();
+    let clipped = scene
+        .node(scene.find(&NodePredicate::id_eq("clipped-child")).unwrap())
+        .unwrap();
 
-    assert_eq!(node.id, None);
-    assert_eq!(node.role, None);
-    assert_eq!(node.label.as_deref(), Some("Loose"));
-    assert!(matches!(
-        query_root.find_by_predicate(&NodePredicate::role_eq(Role::Container)),
-        Err(RegionResolveError::NotFound(_))
-    ));
+    assert!(!hidden.visible);
+    assert!(!hidden.hit_testable);
+    assert_eq!(
+        clipped.visible_rect,
+        Some(Rect::new(Point::new(40.0, 40.0), Size::new(10.0, 10.0),))
+    );
+}
+
+fn provider_only_root_relative_region_uses_content_bounds(harness: AppKitHarness) {
+    let host = harness.create_window(240.0, 160.0);
+    host.window().setContentView(None);
+    let attached = AppKitWindowHost::from_window(host.window());
+
+    let rect = attached
+        .resolve_region(
+            &glasscheck_core::RegionSpec::root()
+                .subregion(RelativeBounds::new(0.25, 0.5, 0.5, 0.25)),
+        )
+        .expect("root-relative regions should resolve without a content view");
+    let content = host.window().contentLayoutRect();
+
+    assert_eq!(
+        rect,
+        Rect::new(
+            Point::new(0.25 * content.size.width, 0.5 * content.size.height),
+            Size::new(0.5 * content.size.width, 0.25 * content.size.height),
+        )
+    );
 }
 
 fn provider_only_scene_without_content_view_is_usable(harness: AppKitHarness) {
@@ -727,6 +936,122 @@ fn registered_native_hierarchy_uses_nearest_registered_ancestor(harness: AppKitH
     assert_eq!(scene.node(children[0]).unwrap().id, "label");
 }
 
+fn duplicate_native_ids_do_not_drop_ancestor_relationships(harness: AppKitHarness) {
+    let host = harness.create_window(280.0, 180.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(280.0, 180.0));
+    let left = make_view(harness.main_thread_marker(), NSSize::new(100.0, 60.0));
+    left.setFrameOrigin(NSPoint::new(20.0, 20.0));
+    let right = make_view(harness.main_thread_marker(), NSSize::new(100.0, 60.0));
+    right.setFrameOrigin(NSPoint::new(140.0, 20.0));
+    let left_label = make_text_view(
+        harness.main_thread_marker(),
+        NSSize::new(60.0, 18.0),
+        "Left",
+    );
+    left_label.setFrameOrigin(NSPoint::new(8.0, 8.0));
+    let right_label = make_text_view(
+        harness.main_thread_marker(),
+        NSSize::new(60.0, 18.0),
+        "Right",
+    );
+    right_label.setFrameOrigin(NSPoint::new(8.0, 8.0));
+
+    left.addSubview(&left_label);
+    right.addSubview(&right_label);
+    root.addSubview(&left);
+    root.addSubview(&right);
+    host.set_content_view(&root);
+    host.register_view(
+        &root,
+        InstrumentedView {
+            id: Some("root".into()),
+            role: Some(Role::Container),
+            label: Some("Root".into()),
+        },
+    );
+    host.register_view(
+        &left,
+        InstrumentedView {
+            id: Some("duplicate-parent".into()),
+            role: Some(Role::Container),
+            label: Some("Left Parent".into()),
+        },
+    );
+    host.register_view(
+        &right,
+        InstrumentedView {
+            id: Some("duplicate-parent".into()),
+            role: Some(Role::Container),
+            label: Some("Right Parent".into()),
+        },
+    );
+    host.register_view(
+        &left_label,
+        InstrumentedView {
+            id: Some("left-label".into()),
+            role: Some(Role::Label),
+            label: Some("Left".into()),
+        },
+    );
+    host.register_view(
+        &right_label,
+        InstrumentedView {
+            id: Some("right-label".into()),
+            role: Some(Role::Label),
+            label: Some("Right".into()),
+        },
+    );
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let parents = scene.find_all(&NodePredicate::id_eq("duplicate-parent"));
+    assert_eq!(parents.len(), 0);
+
+    let disambiguated_parents = scene.find_all(&NodePredicate::id_eq("native::duplicate-parent"));
+    assert_eq!(disambiguated_parents.len(), 1);
+    assert_eq!(
+        scene
+            .find_all(&NodePredicate::id_eq("native::duplicate-parent#1"))
+            .len(),
+        1
+    );
+
+    let left_label = scene.find(&NodePredicate::id_eq("left-label")).unwrap();
+    let right_label = scene.find(&NodePredicate::id_eq("right-label")).unwrap();
+    assert_eq!(
+        scene.node(left_label).unwrap().parent_id.as_deref(),
+        Some("native::duplicate-parent")
+    );
+    assert_eq!(
+        scene.node(right_label).unwrap().parent_id.as_deref(),
+        Some("native::duplicate-parent#1")
+    );
+    assert_eq!(
+        scene
+            .find(&NodePredicate::ancestor(NodePredicate::id_eq(
+                "native::duplicate-parent"
+            )))
+            .unwrap()
+            .index(),
+        left_label.index()
+    );
+    assert_eq!(
+        scene
+            .find(&NodePredicate::ancestor(NodePredicate::id_eq(
+                "native::duplicate-parent#1"
+            )))
+            .unwrap()
+            .index(),
+        right_label.index()
+    );
+    let original_id_matches =
+        scene.find_all(&NodePredicate::property_eq(
+            "glasscheck:source_id",
+            PropertyValue::string("duplicate-parent"),
+        ));
+    assert_eq!(original_id_matches.len(), 2);
+}
+
 fn nested_child_click_routes_to_hit_tested_view(harness: AppKitHarness) {
     let host = harness.create_window(220.0, 140.0);
     let parent = ClickTrackingContainerView::new(
@@ -1023,6 +1348,85 @@ fn provider_namespacing_preserves_existing_source_id_property(harness: AppKitHar
     );
 }
 
+fn provider_namespacing_preserves_unique_native_parent_relationships(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 180.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 180.0));
+    let native = make_view(harness.main_thread_marker(), NSSize::new(120.0, 60.0));
+    root.addSubview(&native);
+    host.set_content_view(&root);
+    host.register_view(
+        &native,
+        InstrumentedView {
+            id: Some("battlefield".into()),
+            role: Some(Role::Container),
+            label: Some("Native Battlefield".into()),
+        },
+    );
+    host.set_semantic_provider(Box::new(CollidingProviderWithNativeChild));
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let provider_child = scene
+        .find(&NodePredicate::property_eq(
+            "glasscheck:source_id",
+            PropertyValue::string("battlefield/native-child"),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        scene.node(provider_child).unwrap().parent_id.as_deref(),
+        Some("battlefield")
+    );
+    assert_eq!(
+        scene
+            .node(provider_child)
+            .unwrap()
+            .properties
+            .get("glasscheck:ambiguous_parent_id"),
+        None
+    );
+}
+
+fn provider_namespacing_marks_ambiguous_native_parents(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 180.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 180.0));
+    let first = make_view(harness.main_thread_marker(), NSSize::new(120.0, 60.0));
+    let second = make_view(harness.main_thread_marker(), NSSize::new(120.0, 60.0));
+    root.addSubview(&first);
+    root.addSubview(&second);
+    host.set_content_view(&root);
+    for native in [&first, &second] {
+        host.register_view(
+            native,
+            InstrumentedView {
+                id: Some("battlefield".into()),
+                role: Some(Role::Container),
+                label: Some("Native Battlefield".into()),
+            },
+        );
+    }
+    host.set_semantic_provider(Box::new(CollidingProviderWithNativeChild));
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let provider_child = scene
+        .find(&NodePredicate::property_eq(
+            "glasscheck:source_id",
+            PropertyValue::string("battlefield/native-child"),
+        ))
+        .unwrap();
+
+    assert_eq!(scene.node(provider_child).unwrap().parent_id, None);
+    assert_eq!(
+        scene
+            .node(provider_child)
+            .unwrap()
+            .properties
+            .get("glasscheck:ambiguous_parent_id"),
+        Some(&PropertyValue::string("battlefield"))
+    );
+}
+
 fn duplicate_provider_ids_do_not_invent_parent_relationships(harness: AppKitHarness) {
     let host = harness.create_window(320.0, 180.0);
     let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 180.0));
@@ -1050,6 +1454,45 @@ fn duplicate_provider_ids_do_not_invent_parent_relationships(harness: AppKitHarn
         ))),
         Err(QueryError::NotFoundPredicate(_))
     ));
+}
+
+fn provider_parent_repair_marks_ambiguous_native_parents_without_namespacing(
+    harness: AppKitHarness,
+) {
+    let host = harness.create_window(320.0, 180.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 180.0));
+    let first = make_view(harness.main_thread_marker(), NSSize::new(120.0, 60.0));
+    let second = make_view(harness.main_thread_marker(), NSSize::new(120.0, 60.0));
+    root.addSubview(&first);
+    root.addSubview(&second);
+    host.set_content_view(&root);
+    for native in [&first, &second] {
+        host.register_view(
+            native,
+            InstrumentedView {
+                id: Some("battlefield".into()),
+                role: Some(Role::Container),
+                label: Some("Native Battlefield".into()),
+            },
+        );
+    }
+    host.set_semantic_provider(Box::new(UniqueProviderWithAmbiguousNativeParent));
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let provider_child = scene
+        .find(&NodePredicate::id_eq("provider-card/label"))
+        .unwrap();
+
+    assert_eq!(scene.node(provider_child).unwrap().parent_id, None);
+    assert_eq!(
+        scene
+            .node(provider_child)
+            .unwrap()
+            .properties
+            .get("glasscheck:ambiguous_parent_id"),
+        Some(&PropertyValue::string("battlefield"))
+    );
 }
 
 fn semantic_click_uses_matched_handle_when_native_ids_duplicate(harness: AppKitHarness) {
@@ -1136,6 +1579,84 @@ fn semantic_click_targets_registered_node(harness: AppKitHarness) {
     assert_eq!(view.ivars().mouse_downs.get(), 1);
 }
 
+fn provider_click_after_content_swap_does_not_dispatch_to_stale_registered_view(
+    harness: AppKitHarness,
+) {
+    let host = harness.create_window(220.0, 140.0);
+    let initial_root = make_view(harness.main_thread_marker(), NSSize::new(220.0, 140.0));
+    let target = ButtonActionTarget::new(harness.main_thread_marker());
+    let stale_button = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str("Stale"),
+            Some(target.as_ref()),
+            Some(sel!(buttonPressed:)),
+            harness.main_thread_marker(),
+        )
+    };
+    stale_button.setFrame(NSRect::new(
+        NSPoint::new(20.0, 20.0),
+        NSSize::new(120.0, 32.0),
+    ));
+    initial_root.addSubview(&stale_button);
+    host.set_content_view(&initial_root);
+    harness.settle(2);
+
+    let attached = AppKitWindowHost::from_window(host.window());
+    attached.register_view(
+        &stale_button,
+        InstrumentedView {
+            id: Some("stale-button".into()),
+            role: Some(Role::Button),
+            label: Some("Stale".into()),
+        },
+    );
+    attached.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
+    assert!(attached
+        .snapshot_scene()
+        .find(&NodePredicate::id_eq("stale-button"))
+        .is_ok());
+
+    let replacement_root = make_view(harness.main_thread_marker(), NSSize::new(220.0, 140.0));
+    host.set_content_view(&replacement_root);
+    harness.settle(2);
+
+    attached
+        .click_node(&NodePredicate::id_eq("provider-node"))
+        .unwrap();
+    harness.settle(2);
+
+    assert_eq!(target.ivars().actions.get(), 0);
+}
+
+fn semantic_click_on_registered_ancestor_routes_to_descendant_hit_view(harness: AppKitHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let parent = ClickTrackingContainerView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(220.0, 140.0)),
+    );
+    let child = ClickTrackingChildView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(50.0, 40.0), NSSize::new(120.0, 60.0)),
+    );
+    parent.addSubview(&child);
+    host.set_content_view(&parent);
+    host.register_view(
+        &parent,
+        InstrumentedView {
+            id: Some("container".into()),
+            role: Some(Role::Button),
+            label: Some("Container".into()),
+        },
+    );
+    harness.settle(2);
+
+    host.click_node(&NodePredicate::id_eq("container")).unwrap();
+    harness.settle(2);
+
+    assert_eq!(child.ivars().mouse_downs.get(), 1);
+    assert_eq!(parent.ivars().mouse_downs.get(), 0);
+}
+
 fn semantic_click_reports_missing_node(harness: AppKitHarness) {
     let host = harness.create_window(180.0, 120.0);
     let view = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
@@ -1144,6 +1665,227 @@ fn semantic_click_reports_missing_node(harness: AppKitHarness) {
         .click_node(&NodePredicate::id_eq("missing"))
         .unwrap_err();
     assert!(matches!(error, RegionResolveError::NotFound(_)));
+}
+
+fn semantic_click_uses_visible_hit_testable_point(harness: AppKitHarness) {
+    let host = harness.create_window(120.0, 120.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(120.0, 120.0));
+    let clipping_parent = make_view(harness.main_thread_marker(), NSSize::new(40.0, 40.0));
+    clipping_parent.setFrameOrigin(NSPoint::new(10.0, 10.0));
+    let target = PointTrackingClickView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(30.0, 30.0), NSSize::new(30.0, 30.0)),
+    );
+    clipping_parent.addSubview(&target);
+    root.addSubview(&clipping_parent);
+    host.set_content_view(&root);
+    host.register_view(
+        &target,
+        InstrumentedView {
+            id: Some("clipped-target".into()),
+            role: Some(Role::Button),
+            label: Some("Clipped Target".into()),
+        },
+    );
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let node = scene
+        .node(scene.find(&NodePredicate::id_eq("clipped-target")).unwrap())
+        .unwrap();
+    assert_eq!(
+        node.visible_rect,
+        Some(Rect::new(Point::new(40.0, 40.0), Size::new(10.0, 10.0)))
+    );
+    assert!(node.hit_testable);
+
+    host.click_node(&NodePredicate::id_eq("clipped-target"))
+        .unwrap();
+    harness.settle(2);
+
+    assert_eq!(target.ivars().mouse_downs.get(), 1);
+    assert_eq!(target.ivars().last_click_x.get(), 45.0);
+    assert_eq!(target.ivars().last_click_y.get(), 45.0);
+}
+
+fn semantic_click_reports_unhittable_registered_node(harness: AppKitHarness) {
+    let host = harness.create_window(180.0, 120.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
+    let target = CountingClickView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    let occluder = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
+    root.addSubview(&target);
+    root.addSubview(&occluder);
+    host.set_content_view(&root);
+    host.register_view(
+        &target,
+        InstrumentedView {
+            id: Some("covered-target".into()),
+            role: Some(Role::Button),
+            label: Some("Covered Target".into()),
+        },
+    );
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let node = scene
+        .node(scene.find(&NodePredicate::id_eq("covered-target")).unwrap())
+        .unwrap();
+    assert!(!node.hit_testable);
+
+    let error = host
+        .click_node(&NodePredicate::id_eq("covered-target"))
+        .unwrap_err();
+
+    assert!(matches!(error, RegionResolveError::InputUnavailable));
+    assert_eq!(target.ivars().mouse_downs.get(), 0);
+}
+
+fn semantic_click_reports_unhittable_registered_root_node(harness: AppKitHarness) {
+    let host = harness.create_window(180.0, 120.0);
+    let root = NullHitTrackingContainerView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    host.set_content_view(&root);
+    host.register_view(
+        &root,
+        InstrumentedView {
+            id: Some("unhittable-root".into()),
+            role: Some(Role::Button),
+            label: Some("Unhittable Root".into()),
+        },
+    );
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let node = scene
+        .node(
+            scene
+                .find(&NodePredicate::id_eq("unhittable-root"))
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(!node.hit_testable);
+
+    let error = host
+        .click_node(&NodePredicate::id_eq("unhittable-root"))
+        .unwrap_err();
+
+    assert!(matches!(error, RegionResolveError::InputUnavailable));
+    assert_eq!(root.ivars().mouse_downs.get(), 0);
+}
+
+fn semantic_click_rejects_registered_node_when_hit_test_returns_ancestor(harness: AppKitHarness) {
+    let host = harness.create_window(180.0, 120.0);
+    let root = AncestorHitTrackingContainerView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    let target = CountingClickView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(80.0, 40.0)),
+    );
+    root.addSubview(&target);
+    host.set_content_view(&root);
+    host.register_view(
+        &target,
+        InstrumentedView {
+            id: Some("ancestor-hit-target".into()),
+            role: Some(Role::Button),
+            label: Some("Ancestor Hit Target".into()),
+        },
+    );
+    harness.settle(2);
+
+    let error = host
+        .click_node(&NodePredicate::id_eq("ancestor-hit-target"))
+        .unwrap_err();
+
+    assert!(matches!(error, RegionResolveError::InputUnavailable));
+    assert_eq!(target.ivars().mouse_downs.get(), 0);
+    assert_eq!(root.ivars().mouse_downs.get(), 0);
+}
+
+fn semantic_click_rejects_registered_node_when_hit_test_is_unknown(harness: AppKitHarness) {
+    let host = harness.create_window(180.0, 120.0);
+    let root = NullHitTrackingContainerView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    let target = CountingClickView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(80.0, 40.0)),
+    );
+    root.addSubview(&target);
+    host.set_content_view(&root);
+    host.register_view(
+        &target,
+        InstrumentedView {
+            id: Some("unknown-hit-target".into()),
+            role: Some(Role::Button),
+            label: Some("Unknown Hit Target".into()),
+        },
+    );
+    harness.settle(2);
+
+    let error = host
+        .click_node(&NodePredicate::id_eq("unknown-hit-target"))
+        .unwrap_err();
+
+    assert!(matches!(error, RegionResolveError::InputUnavailable));
+    assert_eq!(target.ivars().mouse_downs.get(), 0);
+    assert_eq!(root.ivars().mouse_downs.get(), 0);
+}
+
+fn attached_window_prunes_stale_registered_views_after_content_swap(harness: AppKitHarness) {
+    let host = harness.create_window(180.0, 120.0);
+    let releases = Rc::new(Cell::new(0));
+    let initial_root = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
+    let initial_child = ReleaseTrackingView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(80.0, 24.0)),
+        Rc::clone(&releases),
+    );
+    initial_root.addSubview(&initial_child);
+    host.set_content_view(&initial_root);
+    harness.settle(2);
+
+    let attached = AppKitWindowHost::from_window(host.window());
+    attached.register_view(
+        &initial_child,
+        InstrumentedView {
+            id: Some("stale-dealloc-child".into()),
+            role: Some(Role::Container),
+            label: Some("Stale".into()),
+        },
+    );
+    assert!(attached
+        .snapshot_scene()
+        .find(&NodePredicate::id_eq("stale-dealloc-child"))
+        .is_ok());
+
+    let replacement_root = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
+    host.set_content_view(&replacement_root);
+    drop(initial_child);
+    drop(initial_root);
+    let _ = attached.capture();
+    let releases_before_prune = releases.get();
+    harness.settle(2);
+
+    let error = attached
+        .snapshot_scene()
+        .find(&NodePredicate::id_eq("stale-dealloc-child"))
+        .unwrap_err();
+    assert!(matches!(error, QueryError::NotFoundPredicate(_)));
+    assert!(
+        releases.get() > releases_before_prune,
+        "releases_before_prune={} releases_after_prune={}",
+        releases_before_prune,
+        releases.get()
+    );
 }
 
 fn provider_only_semantic_click_reports_unavailable_input(harness: AppKitHarness) {
@@ -1161,13 +1903,24 @@ fn provider_only_semantic_click_reports_unavailable_input(harness: AppKitHarness
 
 fn semantic_click_stress_does_not_duplicate_mouse_downs(harness: AppKitHarness) {
     let host = harness.create_window(180.0, 120.0);
-    let view = CountingClickView::new(
-        harness.main_thread_marker(),
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
-    );
-    host.set_content_view(&view);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
+    let target = ButtonActionTarget::new(harness.main_thread_marker());
+    let button = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str("Click Target"),
+            Some(target.as_ref()),
+            Some(sel!(buttonPressed:)),
+            harness.main_thread_marker(),
+        )
+    };
+    button.setFrame(NSRect::new(
+        NSPoint::new(12.0, 10.0),
+        NSSize::new(156.0, 96.0),
+    ));
+    root.addSubview(&button);
+    host.set_content_view(&root);
     host.register_view(
-        &view,
+        &button,
         InstrumentedView {
             id: Some("click-target".into()),
             role: Some(Role::Button),
@@ -1182,7 +1935,7 @@ fn semantic_click_stress_does_not_duplicate_mouse_downs(harness: AppKitHarness) 
         harness.settle(1);
     }
 
-    assert_eq!(view.ivars().mouse_downs.get(), 25);
+    assert_eq!(target.ivars().actions.get(), 25);
 }
 
 fn make_view(mtm: MainThreadMarker, size: NSSize) -> Retained<NSView> {
@@ -1353,8 +2106,109 @@ impl CountingClickView {
 }
 
 #[derive(Default)]
+struct PointTrackingClickIvars {
+    mouse_downs: Cell<usize>,
+    last_click_x: Cell<f64>,
+    last_click_y: Cell<f64>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = PointTrackingClickIvars]
+    struct PointTrackingClickView;
+
+    impl PointTrackingClickView {
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            self.ivars().mouse_downs.set(self.ivars().mouse_downs.get() + 1);
+            let point = event.locationInWindow();
+            self.ivars().last_click_x.set(point.x);
+            self.ivars().last_click_y.set(point.y);
+        }
+    }
+);
+
+impl PointTrackingClickView {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(PointTrackingClickIvars::default());
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+#[derive(Default)]
 struct ClickTrackingIvars {
     mouse_downs: Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ClickTrackingIvars]
+    struct AncestorHitTrackingContainerView;
+
+    impl AncestorHitTrackingContainerView {
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> *mut NSView {
+            if self.mouse_inRect(point, self.bounds()) {
+                self as *const Self as *mut NSView
+            } else {
+                std::ptr::null_mut()
+            }
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
+            self.ivars()
+                .mouse_downs
+                .set(self.ivars().mouse_downs.get() + 1);
+        }
+    }
+);
+
+impl AncestorHitTrackingContainerView {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ClickTrackingIvars::default());
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ClickTrackingIvars]
+    struct NullHitTrackingContainerView;
+
+    impl NullHitTrackingContainerView {
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> *mut NSView {
+            std::ptr::null_mut()
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
+            self.ivars()
+                .mouse_downs
+                .set(self.ivars().mouse_downs.get() + 1);
+        }
+    }
+);
+
+impl NullHitTrackingContainerView {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ClickTrackingIvars::default());
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
 }
 
 define_class!(
@@ -1425,6 +2279,35 @@ impl ClickTrackingChildView {
     }
 }
 
+#[derive(Clone)]
+struct ReleaseTrackingIvars {
+    releases: Rc<Cell<usize>>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ReleaseTrackingIvars]
+    struct ReleaseTrackingView;
+
+    impl ReleaseTrackingView {
+        #[unsafe(method(release))]
+        fn release(&self) {
+            self.ivars()
+                .releases
+                .set(self.ivars().releases.get().saturating_add(1));
+            unsafe { msg_send![super(self), release] }
+        }
+    }
+);
+
+impl ReleaseTrackingView {
+    fn new(mtm: MainThreadMarker, frame: NSRect, releases: Rc<Cell<usize>>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ReleaseTrackingIvars { releases });
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
 struct ProviderOnlySceneProvider;
 
 impl SemanticProvider for ProviderOnlySceneProvider {
@@ -1434,7 +2317,8 @@ impl SemanticProvider for ProviderOnlySceneProvider {
             Role::Container,
             Rect::new(Point::new(12.0, 16.0), Size::new(64.0, 32.0)),
         )
-        .with_label("Provider Node")]
+        .with_label("Provider Node")
+        .with_property("provider", PropertyValue::Bool(true))]
     }
 }
 
@@ -1471,6 +2355,32 @@ impl SemanticProvider for CollidingProviderWithSourceId {
     }
 }
 
+struct CollidingProviderWithNativeChild;
+
+impl SemanticProvider for CollidingProviderWithNativeChild {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        vec![
+            SemanticNode::new(
+                "provider-duplicate",
+                Role::Container,
+                Rect::new(Point::new(0.0, 0.0), Size::new(80.0, 48.0)),
+            ),
+            SemanticNode::new(
+                "provider-duplicate",
+                Role::Container,
+                Rect::new(Point::new(96.0, 0.0), Size::new(80.0, 48.0)),
+            )
+            .with_property("variant", PropertyValue::string("duplicate")),
+            SemanticNode::new(
+                "battlefield/native-child",
+                Role::Label,
+                Rect::new(Point::new(36.0, 48.0), Size::new(60.0, 20.0)),
+            )
+            .with_parent("battlefield", 0),
+        ]
+    }
+}
+
 struct DuplicateParentProvider;
 
 impl SemanticProvider for DuplicateParentProvider {
@@ -1492,6 +2402,26 @@ impl SemanticProvider for DuplicateParentProvider {
                 Rect::new(Point::new(12.0, 12.0), Size::new(60.0, 20.0)),
             )
             .with_parent("parent", 0),
+        ]
+    }
+}
+
+struct UniqueProviderWithAmbiguousNativeParent;
+
+impl SemanticProvider for UniqueProviderWithAmbiguousNativeParent {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        vec![
+            SemanticNode::new(
+                "provider-card",
+                Role::Container,
+                Rect::new(Point::new(0.0, 0.0), Size::new(120.0, 60.0)),
+            ),
+            SemanticNode::new(
+                "provider-card/label",
+                Role::Label,
+                Rect::new(Point::new(12.0, 12.0), Size::new(60.0, 20.0)),
+            )
+            .with_parent("battlefield", 0),
         ]
     }
 }

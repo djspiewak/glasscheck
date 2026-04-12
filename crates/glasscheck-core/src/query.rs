@@ -5,7 +5,10 @@ use crate::{scene::PredicateContext, scene::Role, Rect, SceneSnapshot, SemanticN
 /// Compatibility metadata captured for a UI node under test.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeMetadata {
-    /// Stable semantic identifier for the node.
+    /// Semantic identifier captured for a specific snapshot.
+    ///
+    /// This is suitable for exact matching within the current snapshot, but it may change across
+    /// snapshots when IDs are disambiguated or namespaced during snapshot construction.
     pub id: Option<String>,
     /// Semantic role for the node.
     pub role: Option<Role>,
@@ -38,7 +41,7 @@ pub struct Selector {
 }
 
 impl Selector {
-    /// Creates a selector that matches a node by semantic ID.
+    /// Creates a selector that matches a node by the snapshot-local semantic ID.
     #[must_use]
     pub fn by_id(id: impl Into<String>) -> Self {
         Self {

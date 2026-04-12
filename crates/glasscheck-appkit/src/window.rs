@@ -19,10 +19,19 @@ mod imp {
     use crate::screen::offscreen_window_content_rect;
     use crate::text::AppKitTextHarness;
 
+    enum RegisteredViewClickRoute {
+        Target(Retained<NSView>),
+        Descendant(Retained<NSView>),
+        Blocked,
+    }
+
     /// Semantic metadata registered for a view exposed to querying APIs.
     #[derive(Clone, Debug)]
     pub struct InstrumentedView {
-        /// Stable semantic identifier.
+        /// Semantic identifier to expose in snapshots.
+        ///
+        /// Duplicate native identifiers are disambiguated when snapshots are built, so callers
+        /// should treat the resulting scene/query IDs as snapshot-local.
         pub id: Option<String>,
         /// Semantic role.
         pub role: Option<Role>,
@@ -30,9 +39,16 @@ mod imp {
         pub label: Option<String>,
     }
 
+    #[derive(Clone, Debug)]
     struct RegisteredView {
         view: Retained<NSView>,
         descriptor: InstrumentedView,
+    }
+
+    #[derive(Clone, Debug)]
+    struct RegisteredNodeId {
+        snapshot_id: String,
+        source_id: Option<String>,
     }
 
     /// AppKit window host used to build, capture, query, and drive a test scene.
@@ -97,7 +113,8 @@ mod imp {
         /// Attaches a host to an existing root view and optional parent window.
         ///
         /// When no window is supplied, the host installs the view into a managed offscreen
-        /// window so capture and input APIs remain usable.
+        /// window so capture and low-level input APIs remain usable. Semantic click APIs still
+        /// report `DetachedRootView` because the supplied root is not treated as window-rooted.
         #[must_use]
         pub fn from_root_view(view: &NSView, window: Option<&NSWindow>) -> Self {
             let root = unsafe {
@@ -206,11 +223,16 @@ mod imp {
             let node = scene
                 .node(handle)
                 .ok_or(RegionResolveError::InvalidHandle(handle))?;
-            let point = self.root_point_to_window_point(NSPoint::new(
-                node.rect.origin.x + node.rect.size.width / 2.0,
-                node.rect.origin.y + node.rect.size.height / 2.0,
-            ));
-            if let Some(view) = self.registered_view_for_handle(handle) {
+            let root_view = self.root_view();
+            let registered_view = self.registered_view_for_handle(handle, root_view.as_deref());
+            let (point, click_view) =
+                match self.click_target(root_view.as_deref(), registered_view.as_deref(), node) {
+                    Some((point, click_view)) => {
+                        (self.root_point_to_window_point(point), click_view)
+                    }
+                    None => return Err(RegionResolveError::InputUnavailable),
+                };
+            if let Some(view) = click_view.or(registered_view) {
                 if is_control_view(&view) {
                     unsafe {
                         let () = msg_send![&*view, performClick: std::ptr::null::<AnyObject>()];
@@ -220,7 +242,12 @@ mod imp {
                 }
                 return Ok(());
             }
-            if self.root_view().is_none() {
+            if self
+                .window
+                .as_deref()
+                .and_then(|window| window.contentView())
+                .is_none()
+            {
                 return Err(RegionResolveError::InputUnavailable);
             }
             self.input().click(point);
@@ -292,29 +319,16 @@ mod imp {
         #[must_use]
         pub fn snapshot_scene(&self) -> SceneSnapshot {
             let root_view = self.root_view();
-            let registry = self.registry.borrow();
-            let registered_ids = registry
-                .iter()
-                .enumerate()
-                .map(|(index, entry)| {
-                    let id = entry
-                        .descriptor
-                        .id
-                        .clone()
-                        .unwrap_or_else(|| format!("view-{index}"));
-                    let view_ptr = &*entry.view as *const NSView;
-                    (view_ptr, id)
-                })
-                .collect::<HashMap<*const NSView, String>>();
+            let registry = self.active_registered_views(root_view.as_deref());
+            let registered_ids = registered_node_ids(&registry);
 
             let mut nodes: Vec<SemanticNode> = registry
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
-                    let id = entry
-                        .descriptor
-                        .id
-                        .clone()
+                    let id = registered_ids
+                        .get(&(&*entry.view as *const NSView))
+                        .map(|registered| registered.snapshot_id.clone())
                         .unwrap_or_else(|| format!("view-{index}"));
                     let mut node = SemanticNode::new(
                         id,
@@ -325,10 +339,21 @@ mod imp {
                             .unwrap_or_else(|| infer_role(&entry.view)),
                         rect_in_root(&entry.view, root_view.as_deref()),
                     );
+                    if let Some(source_id) = registered_ids
+                        .get(&(&*entry.view as *const NSView))
+                        .and_then(|registered| registered.source_id.clone())
+                    {
+                        node.properties.insert(
+                            "glasscheck:source_id".into(),
+                            glasscheck_core::PropertyValue::String(source_id),
+                        );
+                    }
+                    let (visible, visible_rect, hit_testable) =
+                        native_visibility(&entry.view, root_view.as_deref());
                     node.label = entry.descriptor.label.clone();
-                    node.visible = !entry.view.isHidden();
-                    node.visible_rect = Some(node.rect);
-                    node.hit_testable = true;
+                    node.visible = visible;
+                    node.visible_rect = visible_rect;
+                    node.hit_testable = hit_testable;
                     if let Some(parent) = unsafe { entry.view.superview() } {
                         node.child_index = sibling_index(&entry.view, &parent);
                         node.z_index = node.child_index as i32;
@@ -344,35 +369,31 @@ mod imp {
                 .collect();
 
             if let Some(provider) = self.provider.borrow().as_ref() {
-                let native_ids = nodes
+                let native_id_counts =
+                    nodes
+                        .iter()
+                        .fold(BTreeMap::<String, usize>::new(), |mut counts, node| {
+                            *counts.entry(node.id.clone()).or_default() += 1;
+                            counts
+                        });
+                let native_ids = native_id_counts
                     .iter()
-                    .map(|node| node.id.clone())
+                    .map(|(id, _)| id.clone())
                     .collect::<BTreeSet<_>>();
                 nodes.extend(normalize_provider_nodes(
                     provider.snapshot_nodes(),
                     &native_ids,
+                    &native_id_counts,
                 ));
             }
 
             SceneSnapshot::new(nodes)
         }
 
-        /// Builds a compatibility `QueryRoot` from the current scene snapshot.
+        /// Builds a scene-backed compatibility `QueryRoot` from the current snapshot.
         #[must_use]
         pub fn query_root(&self) -> QueryRoot {
-            let root_view = self.root_view();
-            let nodes = self
-                .registry
-                .borrow()
-                .iter()
-                .map(|entry| glasscheck_core::NodeMetadata {
-                    id: entry.descriptor.id.clone(),
-                    role: entry.descriptor.role.clone(),
-                    label: entry.descriptor.label.clone(),
-                    rect: rect_in_root(&entry.view, root_view.as_deref()),
-                })
-                .collect();
-            QueryRoot::new(nodes)
+            QueryRoot::from_scene(self.snapshot_scene())
         }
 
         /// Resolves a semantic region against the current scene snapshot.
@@ -423,7 +444,7 @@ mod imp {
             let content = self
                 .root_view()
                 .map(|view| view.bounds())
-                .or_else(|| self.window.as_deref().map(NSWindow::frame))
+                .or_else(|| self.window.as_deref().map(window_root_local_bounds))
                 .expect("host should have either a root view or a window");
             Rect::new(
                 Point::new(content.origin.x, content.origin.y),
@@ -434,20 +455,105 @@ mod imp {
         fn registered_view_for_handle(
             &self,
             handle: glasscheck_core::NodeHandle,
+            root_view: Option<&NSView>,
         ) -> Option<Retained<NSView>> {
-            self.registry
-                .borrow()
-                .get(handle.index())
+            self.active_registered_view_at_handle(handle, root_view)
                 .map(|entry| unsafe {
                     Retained::retain(&*entry.view as *const NSView as *mut NSView)
                         .expect("registered view should retain successfully")
                 })
         }
 
+        fn active_registered_view_at_handle(
+            &self,
+            handle: glasscheck_core::NodeHandle,
+            root_view: Option<&NSView>,
+        ) -> Option<RegisteredView> {
+            self.active_registered_views(root_view)
+                .get(handle.index())
+                .cloned()
+        }
+
         fn root_point_to_window_point(&self, point: NSPoint) -> NSPoint {
             self.root_view()
                 .as_deref()
                 .map_or(point, |root| root.convertPoint_toView(point, None))
+        }
+
+        fn click_target(
+            &self,
+            root_view: Option<&NSView>,
+            target_view: Option<&NSView>,
+            node: &SemanticNode,
+        ) -> Option<(NSPoint, Option<Retained<NSView>>)> {
+            let target_rect = node.visible_rect.unwrap_or(node.rect);
+            if rect_is_empty_rect(target_rect) {
+                return None;
+            }
+            let point = NSPoint::new(
+                target_rect.origin.x + target_rect.size.width / 2.0,
+                target_rect.origin.y + target_rect.size.height / 2.0,
+            );
+            if let Some(target_view) = target_view {
+                match self.resolve_registered_click_route(
+                    root_view,
+                    target_view,
+                    target_rect,
+                    point,
+                ) {
+                    RegisteredViewClickRoute::Target(view) => return Some((point, Some(view))),
+                    RegisteredViewClickRoute::Descendant(view) => return Some((point, Some(view))),
+                    RegisteredViewClickRoute::Blocked => return None,
+                }
+            }
+            Some((point, None))
+        }
+
+        fn resolve_registered_click_route(
+            &self,
+            root_view: Option<&NSView>,
+            target_view: &NSView,
+            target_rect: Rect,
+            point: NSPoint,
+        ) -> RegisteredViewClickRoute {
+            match registered_view_hit_test(root_view, target_view, target_rect, point) {
+                Some(hit) if std::ptr::eq(&*hit, target_view) => {
+                    RegisteredViewClickRoute::Target(hit)
+                }
+                Some(hit) => RegisteredViewClickRoute::Descendant(hit),
+                None if (!self.tracks_window_content
+                    && root_view.is_some_and(|root_view| std::ptr::eq(root_view, target_view)))
+                    || (root_view.is_none() && unsafe { target_view.superview() }.is_none()) =>
+                {
+                    RegisteredViewClickRoute::Target(unsafe {
+                        Retained::retain(target_view as *const NSView as *mut NSView)
+                            .expect("registered view should retain successfully")
+                    })
+                }
+                None => RegisteredViewClickRoute::Blocked,
+            }
+        }
+
+        fn prune_stale_registered_views(&self, root_view: Option<&NSView>) {
+            self.registry
+                .borrow_mut()
+                .retain(|entry| registered_view_is_active(&entry.view, root_view));
+        }
+
+        fn active_registered_views(&self, root_view: Option<&NSView>) -> Vec<RegisteredView> {
+            self.prune_stale_registered_views(root_view);
+            self.registry
+                .borrow()
+                .iter()
+                .filter(|entry| registered_view_is_active(&entry.view, root_view))
+                .map(|entry| RegisteredView {
+                    view: unsafe {
+                        Retained::retain(&*entry.view as *const NSView as *mut NSView)
+                            .expect("registered view should retain successfully")
+                    },
+                    descriptor: entry.descriptor.clone(),
+                })
+                .collect()
         }
     }
 
@@ -459,6 +565,89 @@ mod imp {
             Role::Label
         } else {
             Role::Container
+        }
+    }
+
+    fn native_visibility(view: &NSView, root_view: Option<&NSView>) -> (bool, Option<Rect>, bool) {
+        if view.isHiddenOrHasHiddenAncestor() {
+            return (false, None, false);
+        }
+
+        let visible_rect = convert_visible_rect_to_root(view, root_view);
+        let visible = visible_rect.is_some();
+        let hit_testable = visible
+            && visible_rect
+                .as_ref()
+                .is_some_and(|rect| view_participates_in_hit_testing(view, root_view, *rect));
+        (visible, visible_rect, hit_testable)
+    }
+
+    fn convert_visible_rect_to_root(view: &NSView, root_view: Option<&NSView>) -> Option<Rect> {
+        let root_view = root_view?;
+        let mut visible_rect = rect_in_root(view, Some(root_view));
+        if rect_is_empty_rect(visible_rect) {
+            return None;
+        }
+
+        let mut current = unsafe { view.superview() };
+        while let Some(parent) = current {
+            let parent_rect = rect_in_root(&parent, Some(root_view));
+            visible_rect = intersect_rects(visible_rect, parent_rect)?;
+            if std::ptr::eq(&*parent, root_view) {
+                break;
+            }
+            current = unsafe { parent.superview() };
+        }
+
+        Some(visible_rect)
+    }
+
+    fn view_participates_in_hit_testing(
+        view: &NSView,
+        root_view: Option<&NSView>,
+        visible_rect: Rect,
+    ) -> bool {
+        let point = NSPoint::new(
+            visible_rect.origin.x + visible_rect.size.width / 2.0,
+            visible_rect.origin.y + visible_rect.size.height / 2.0,
+        );
+
+        let hit = match root_view {
+            Some(root_view) => root_view.hitTest(point),
+            None => view.hitTest(NSPoint::new(
+                visible_rect.size.width / 2.0,
+                visible_rect.size.height / 2.0,
+            )),
+        };
+
+        hit.as_deref()
+            .is_some_and(|hit| std::ptr::eq(hit, view) || is_descendant_of_view(hit, view))
+    }
+
+    fn registered_view_hit_test(
+        root_view: Option<&NSView>,
+        target_view: &NSView,
+        target_rect: Rect,
+        point: NSPoint,
+    ) -> Option<Retained<NSView>> {
+        let hit = match root_view {
+            Some(root_view) => root_view.hitTest(point),
+            None => target_view.hitTest(NSPoint::new(
+                point.x - target_rect.origin.x,
+                point.y - target_rect.origin.y,
+            )),
+        };
+
+        match hit.as_deref() {
+            Some(hit)
+                if std::ptr::eq(hit, target_view) || is_descendant_of_view(hit, target_view) =>
+            {
+                Some(unsafe {
+                    Retained::retain(hit as *const NSView as *mut NSView)
+                        .expect("hit-tested view should retain successfully")
+                })
+            }
+            Some(_) | None => None,
         }
     }
 
@@ -480,6 +669,38 @@ mod imp {
             .iter()
             .position(|candidate| std::ptr::eq(&**candidate, view))
             .unwrap_or(0)
+    }
+
+    fn rect_is_empty_rect(rect: Rect) -> bool {
+        rect.size.width <= 0.0 || rect.size.height <= 0.0
+    }
+
+    fn intersect_rects(left: Rect, right: Rect) -> Option<Rect> {
+        let x1 = left.origin.x.max(right.origin.x);
+        let y1 = left.origin.y.max(right.origin.y);
+        let x2 = (left.origin.x + left.size.width).min(right.origin.x + right.size.width);
+        let y2 = (left.origin.y + left.size.height).min(right.origin.y + right.size.height);
+        (x2 > x1 && y2 > y1).then_some(Rect::new(Point::new(x1, y1), Size::new(x2 - x1, y2 - y1)))
+    }
+
+    fn registered_view_is_active(view: &NSView, root_view: Option<&NSView>) -> bool {
+        root_view.is_some_and(|root| std::ptr::eq(view, root) || is_descendant_of_view(view, root))
+    }
+
+    fn is_descendant_of_view(view: &NSView, root_view: &NSView) -> bool {
+        let mut current = unsafe { view.superview() };
+        while let Some(parent) = current {
+            if std::ptr::eq(&*parent, root_view) {
+                return true;
+            }
+            current = unsafe { parent.superview() };
+        }
+        false
+    }
+
+    fn window_root_local_bounds(window: &NSWindow) -> NSRect {
+        let content = window.contentLayoutRect();
+        NSRect::new(NSPoint::new(0.0, 0.0), content.size)
     }
 
     fn managed_window_for_root_view(view: &NSView) -> Retained<NSWindow> {
@@ -505,15 +726,61 @@ mod imp {
         window
     }
 
+    fn registered_node_ids(
+        registry: &[RegisteredView],
+    ) -> HashMap<*const NSView, RegisteredNodeId> {
+        let mut stable_counts = HashMap::<String, usize>::new();
+        for (index, entry) in registry.iter().enumerate() {
+            let stable_id = entry
+                .descriptor
+                .id
+                .clone()
+                .unwrap_or_else(|| format!("view-{index}"));
+            *stable_counts.entry(stable_id).or_default() += 1;
+        }
+
+        let mut assigned_counts = HashMap::<String, usize>::new();
+        registry
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let stable_id = entry
+                    .descriptor
+                    .id
+                    .clone()
+                    .unwrap_or_else(|| format!("view-{index}"));
+                let occurrence = assigned_counts.entry(stable_id.clone()).or_default();
+                let snapshot_id = if stable_counts.get(&stable_id).copied().unwrap_or(0) == 1 {
+                    stable_id.clone()
+                } else if *occurrence == 0 {
+                    format!("native::{stable_id}")
+                } else {
+                    format!("native::{stable_id}#{occurrence}")
+                };
+                *occurrence += 1;
+                let source_id =
+                    (stable_counts.get(&stable_id).copied().unwrap_or(0) > 1).then(|| stable_id);
+
+                (
+                    &*entry.view as *const NSView,
+                    RegisteredNodeId {
+                        snapshot_id,
+                        source_id,
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn registered_ancestor_id(
         view: &NSView,
-        registered_ids: &HashMap<*const NSView, String>,
+        registered_ids: &HashMap<*const NSView, RegisteredNodeId>,
     ) -> Option<String> {
         let mut current = unsafe { view.superview() };
         while let Some(parent) = current {
             let parent_ptr = &*parent as *const NSView;
             if let Some(id) = registered_ids.get(&parent_ptr) {
-                return Some(id.clone());
+                return Some(id.snapshot_id.clone());
             }
             current = unsafe { parent.superview() };
         }
@@ -527,17 +794,28 @@ mod imp {
     fn normalize_provider_nodes(
         mut nodes: Vec<SemanticNode>,
         native_ids: &BTreeSet<String>,
+        native_id_counts: &BTreeMap<String, usize>,
     ) -> Vec<SemanticNode> {
         let provider_ids = nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+        let original_counts = provider_ids.iter().fold(BTreeMap::new(), |mut counts, id| {
+            *counts.entry(id.clone()).or_default() += 1;
+            counts
+        });
         let needs_namespace =
             provider_ids.iter().any(|id| native_ids.contains(id)) || has_duplicates(&provider_ids);
         if !needs_namespace {
+            let identity_ids = provider_ids
+                .iter()
+                .filter(|id| original_counts.get(*id).copied() == Some(1))
+                .map(|id| (id.clone(), id.clone()))
+                .collect::<BTreeMap<_, _>>();
+            repair_provider_parent_ids(
+                &mut nodes,
+                &original_counts,
+                &identity_ids,
+                native_id_counts,
+            );
             return nodes;
-        }
-
-        let mut original_counts = BTreeMap::<String, usize>::new();
-        for id in &provider_ids {
-            *original_counts.entry(id.clone()).or_default() += 1;
         }
 
         let mut original_to_unique = BTreeMap::<String, String>::new();
@@ -571,10 +849,28 @@ mod imp {
             }
         }
 
-        for node in &mut nodes {
+        repair_provider_parent_ids(
+            &mut nodes,
+            &original_counts,
+            &original_to_unique,
+            native_id_counts,
+        );
+
+        nodes
+    }
+
+    fn repair_provider_parent_ids(
+        nodes: &mut [SemanticNode],
+        original_counts: &BTreeMap<String, usize>,
+        original_to_unique: &BTreeMap<String, String>,
+        native_id_counts: &BTreeMap<String, usize>,
+    ) {
+        for node in nodes {
             if let Some(parent_id) = node.parent_id.as_ref() {
                 if original_counts.get(parent_id).copied().unwrap_or(0) == 1 {
                     node.parent_id = original_to_unique.get(parent_id).cloned();
+                } else if native_id_counts.get(parent_id).copied() == Some(1) {
+                    node.parent_id = Some(parent_id.clone());
                 } else {
                     node.properties.insert(
                         "glasscheck:ambiguous_parent_id".into(),
@@ -584,8 +880,6 @@ mod imp {
                 }
             }
         }
-
-        nodes
     }
 
     fn has_duplicates(ids: &[String]) -> bool {

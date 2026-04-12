@@ -3,7 +3,7 @@ mod imp {
     use std::ffi::c_uchar;
     use std::ptr;
 
-    use glasscheck_core::{Image, Point, Rect};
+    use glasscheck_core::{Image, Point, Rect, Size};
     use objc2::{AnyThread, ClassType};
     use objc2_app_kit::{NSBitmapImageRep, NSClipView, NSSplitView, NSView, NSWindow};
     use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
@@ -25,14 +25,7 @@ mod imp {
     }
 
     pub fn crop_image_in_view_coordinates(image: &Image, rect: Rect) -> Image {
-        let image_height = f64::from(image.height);
-        let image_rect = Rect::new(
-            Point::new(
-                rect.origin.x,
-                (image_height - rect.origin.y - rect.size.height).max(0.0),
-            ),
-            rect.size,
-        );
+        let image_rect = image_rect_from_view_rect(image.size(), rect);
         image.crop(image_rect)
     }
 
@@ -72,22 +65,55 @@ mod imp {
             .is_some_and(|clip| clip.isKindOfClass(NSClipView::class()));
 
         if is_document_view {
+            let visible_rect = view.visibleRect();
+            if visible_rect.size.width >= MIN_CAPTURE_DIM
+                && visible_rect.size.height >= MIN_CAPTURE_DIM
+            {
+                return visible_rect;
+            }
             let scroll_view = clip_view.and_then(|clip| unsafe { clip.superview() });
             if let Some(scroll_view) = &scroll_view {
                 let frame = scroll_view.frame();
                 if frame.size.width >= MIN_CAPTURE_DIM && frame.size.height >= MIN_CAPTURE_DIM {
-                    return NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
+                    return NSRect::new(visible_rect.origin, frame.size);
                 }
             }
             if let Some(window) = view.window() {
                 let frame = window.frame();
                 if frame.size.width >= MIN_CAPTURE_DIM && frame.size.height >= MIN_CAPTURE_DIM {
-                    return NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
+                    return NSRect::new(visible_rect.origin, frame.size);
                 }
             }
         }
 
         view.bounds()
+    }
+
+    fn image_rect_from_view_rect(image_size: Size, rect: Rect) -> Rect {
+        let bounded = rect_intersection(rect, Rect::new(Point::new(0.0, 0.0), image_size))
+            .unwrap_or_else(|| Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 0.0)));
+
+        Rect::new(
+            Point::new(
+                bounded.origin.x,
+                image_size.height - bounded.origin.y - bounded.size.height,
+            ),
+            bounded.size,
+        )
+    }
+
+    fn rect_intersection(lhs: Rect, rhs: Rect) -> Option<Rect> {
+        let origin_x = lhs.origin.x.max(rhs.origin.x);
+        let origin_y = lhs.origin.y.max(rhs.origin.y);
+        let end_x = (lhs.origin.x + lhs.size.width).min(rhs.origin.x + rhs.size.width);
+        let end_y = (lhs.origin.y + lhs.size.height).min(rhs.origin.y + rhs.size.height);
+
+        (end_x > origin_x && end_y > origin_y).then(|| {
+            Rect::new(
+                Point::new(origin_x, origin_y),
+                Size::new(end_x - origin_x, end_y - origin_y),
+            )
+        })
     }
 
     fn capture_rect(view: &NSView, rect: NSRect) -> Option<Image> {
@@ -148,6 +174,42 @@ mod imp {
         };
 
         Some(Image::new(width, height, data))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn image_rect_from_view_rect_flips_y_axis() {
+            let rect = image_rect_from_view_rect(
+                Size::new(20.0, 20.0),
+                Rect::new(Point::new(3.0, 4.0), Size::new(5.0, 6.0)),
+            );
+
+            assert_eq!(rect, Rect::new(Point::new(3.0, 10.0), Size::new(5.0, 6.0)));
+        }
+
+        #[test]
+        fn crop_image_in_view_coordinates_shrinks_top_overflow() {
+            let image = Image::new(
+                1,
+                4,
+                vec![
+                    1, 0, 0, 255, // top row
+                    2, 0, 0, 255, 3, 0, 0, 255, 4, 0, 0, 255, // bottom row
+                ],
+            );
+
+            let cropped = crop_image_in_view_coordinates(
+                &image,
+                Rect::new(Point::new(0.0, 3.0), Size::new(1.0, 2.0)),
+            );
+
+            assert_eq!(cropped.width, 1);
+            assert_eq!(cropped.height, 1);
+            assert_eq!(cropped.pixel_at(0, 0), Some([1, 0, 0, 255]));
+        }
     }
 }
 

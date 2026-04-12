@@ -78,6 +78,9 @@ fn main() {
     run("capture_region_matches_negative_origin_region", || {
         capture_region_matches_negative_origin_region(harness)
     });
+    run("document_view_capture_tracks_scrolled_viewport", || {
+        document_view_capture_tracks_scrolled_viewport(harness)
+    });
     run(
         "click_hotspot_reveals_rounded_gradient_and_anchored_text",
         || click_hotspot_reveals_rounded_gradient_and_anchored_text(harness),
@@ -888,6 +891,54 @@ fn capture_region_matches_negative_origin_region(harness: AppKitHarness) {
         },
     );
     assert!(result.passed);
+}
+
+fn document_view_capture_tracks_scrolled_viewport(harness: AppKitHarness) {
+    let host = harness.create_window(140.0, 120.0);
+    let clip = make_clip_view(harness.main_thread_marker(), NSSize::new(140.0, 120.0));
+    let document = make_text_view(harness.main_thread_marker(), NSSize::new(140.0, 320.0));
+    let font_name = NSString::from_str("Menlo-Regular");
+    let font = NSFont::fontWithName_size(&font_name, 20.0)
+        .expect("Menlo-Regular font should be available on macOS");
+    document.setFont(Some(&font));
+    if let Some(text_container) = unsafe { document.textContainer() } {
+        text_container.setLineFragmentPadding(0.0);
+    }
+    document.setDrawsBackground(true);
+    let background = NSColor::whiteColor();
+    document.setBackgroundColor(&background);
+    let foreground = NSColor::blackColor();
+    document.setTextColor(Some(&foreground));
+    host.input().replace_text(
+        &document,
+        "line 01\nline 02\nline 03\nline 04\nline 05\nline 06\nline 07\nline 08\nline 09\nline 10\nline 11\nline 12",
+    );
+
+    clip.setDocumentView(Some(&document));
+    clip.scrollToPoint(NSPoint::new(0.0, 120.0));
+    host.set_content_view(&clip);
+    harness.settle(4);
+
+    let expected = host
+        .capture_view(&clip)
+        .expect("clip view should capture the viewport");
+    let actual = host
+        .capture_view(&document)
+        .expect("document view capture should use the viewport rect");
+
+    let result = compare_images(
+        &actual,
+        &expected,
+        &CompareConfig {
+            channel_tolerance: 0,
+            match_threshold: 1.0,
+            generate_diff: false,
+        },
+    );
+    assert!(
+        result.passed,
+        "document capture should match the scrolled clip viewport"
+    );
 }
 
 fn click_hotspot_reveals_rounded_gradient_and_anchored_text(harness: AppKitHarness) {

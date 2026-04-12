@@ -77,7 +77,11 @@ impl NodeHandle {
 /// Rich semantic metadata captured for a UI node under test.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SemanticNode {
-    /// Stable semantic identifier for the node.
+    /// Semantic identifier for this snapshot.
+    ///
+    /// Callers may use this for exact matching within the current snapshot, but should not
+    /// assume it remains unchanged across future snapshots when duplicate native IDs or provider
+    /// ID collisions require disambiguation.
     pub id: String,
     /// Semantic role for the node.
     pub role: Role,
@@ -88,6 +92,8 @@ pub struct SemanticNode {
     /// Optional textual value.
     pub value: Option<String>,
     /// Parent node identifier when this node is part of a hierarchy.
+    ///
+    /// This references the parent snapshot ID, including any snapshot-local disambiguation.
     pub parent_id: Option<String>,
     /// Stable child ordering within the parent.
     pub child_index: usize,
