@@ -59,3 +59,23 @@ jobs:
       - name: Run GTK contracts test
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: GDK_BACKEND=x11 xvfb-run -a cargo test -p glasscheck-gtk --features native-contract-tests --test gtk_contracts
+
+      - name: Start direct X11 server
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 > /tmp/glasscheck-xvfb.log 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+          for _ in $(seq 1 50); do
+            DISPLAY=:99 xdpyinfo >/dev/null 2>&1 && exit 0
+            sleep 0.1
+          done
+          cat /tmp/glasscheck-xvfb.log
+          exit 1
+
+      - name: Run GTK smoke test on direct X11 display
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: GDK_BACKEND=x11 cargo test -p glasscheck-gtk --features native-smoke-tests --test gtk_smoke
+
+      - name: Run GTK contracts test on direct X11 display
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: GDK_BACKEND=x11 cargo test -p glasscheck-gtk --features native-contract-tests --test gtk_contracts
