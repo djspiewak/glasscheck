@@ -10,6 +10,7 @@ mod imp {
     use gtk4::glib;
     use gtk4::prelude::*;
 
+    use crate::screen::present_window_offscreen;
     use crate::window::{capture_widget_image, GtkWindowHost};
 
     /// Errors returned by the GTK text harness.
@@ -102,7 +103,7 @@ mod imp {
             );
             window.set_child(Some(&fixed));
             install_reference_css(&window, expectation)?;
-            window.present();
+            present_window_offscreen(&window);
             flush_main_context();
 
             let image =

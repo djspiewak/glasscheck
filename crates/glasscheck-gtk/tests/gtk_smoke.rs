@@ -10,6 +10,7 @@ use glasscheck_core::{
     Rect, RegionSpec, RelativeBounds, RgbaColor, Role, Selector, Size, TextAssertionConfig,
 };
 use glasscheck_gtk::{GtkHarness, InstrumentedWidget};
+use gtk4::gdk;
 use gtk4::prelude::*;
 
 fn main() {
@@ -18,6 +19,14 @@ fn main() {
     run("capture_returns_non_empty_image", || {
         capture_returns_non_empty_image(harness)
     });
+    run(
+        "root_attachment_starts_window_offscreen_for_all_connected_displays",
+        || root_attachment_starts_window_offscreen_for_all_connected_displays(harness),
+    );
+    run(
+        "input_activation_keeps_window_offscreen_for_all_connected_displays",
+        || input_activation_keeps_window_offscreen_for_all_connected_displays(harness),
+    );
     run("query_reports_registered_widget_geometry", || {
         query_reports_registered_widget_geometry(harness)
     });
@@ -64,6 +73,48 @@ fn capture_returns_non_empty_image(harness: GtkHarness) {
     let image = host.capture().expect("window capture should succeed");
     assert!(image.width > 0);
     assert!(image.height > 0);
+}
+
+fn root_attachment_starts_window_offscreen_for_all_connected_displays(harness: GtkHarness) {
+    let host = harness.create_window(240.0, 120.0);
+    let root = fixed_root(240, 120);
+    host.set_root(&root);
+    wait_for_window_map(harness, host.window());
+
+    let display = gtk4::prelude::WidgetExt::display(host.window());
+    if !display.backend().is_x11() {
+        eprintln!("non-X11 backend detected; skipping live frame placement assertion");
+        return;
+    }
+
+    if let Some(displays) = connected_display_rects(&display) {
+        let frame = x11_window_frame(host.window()).expect("X11 toplevel frame should be readable");
+        assert_frame_is_offscreen_for_displays(frame, &displays);
+    }
+}
+
+fn input_activation_keeps_window_offscreen_for_all_connected_displays(harness: GtkHarness) {
+    let host = harness.create_window(240.0, 120.0);
+    let root = fixed_root(240, 120);
+    let button = gtk4::Button::with_label("Run");
+    button.set_size_request(90, 30);
+    root.put(&button, 20.0, 20.0);
+    host.set_root(&root);
+    wait_for_window_map(harness, host.window());
+
+    host.input().move_mouse(Point::new(24.0, 24.0));
+    wait_for_window_map(harness, host.window());
+
+    let display = gtk4::prelude::WidgetExt::display(host.window());
+    if !display.backend().is_x11() {
+        eprintln!("non-X11 backend detected; skipping live frame placement assertion");
+        return;
+    }
+
+    if let Some(displays) = connected_display_rects(&display) {
+        let frame = x11_window_frame(host.window()).expect("X11 toplevel frame should be readable");
+        assert_frame_is_offscreen_for_displays(frame, &displays);
+    }
 }
 
 fn query_reports_registered_widget_geometry(harness: GtkHarness) {
@@ -307,4 +358,156 @@ fn temp_dir(prefix: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).unwrap();
     path
+}
+
+fn wait_for_window_map(harness: GtkHarness, window: &gtk4::Window) {
+    harness
+        .wait_until(
+            PollOptions {
+                timeout: Duration::from_millis(250),
+                interval: Duration::from_millis(10),
+            },
+            || window.surface().is_some_and(|surface| surface.is_mapped()),
+        )
+        .expect("GTK toplevel surface should become mapped");
+}
+
+fn connected_display_rects(display: &gdk::Display) -> Option<Vec<DisplayRect>> {
+    let displays: Vec<DisplayRect> = display
+        .monitors()
+        .snapshot()
+        .into_iter()
+        .filter_map(|object| object.downcast::<gdk::Monitor>().ok())
+        .map(|monitor| {
+            let geometry = monitor.geometry();
+            DisplayRect::new(
+                geometry.x(),
+                geometry.y(),
+                geometry.width(),
+                geometry.height(),
+            )
+        })
+        .collect();
+    if displays.is_empty() {
+        eprintln!(
+            "headless context detected; skipping live display intersection assertion because GDK reported no connected monitors"
+        );
+        return None;
+    }
+    Some(displays)
+}
+
+fn assert_frame_is_offscreen_for_displays(frame: DisplayRect, displays: &[DisplayRect]) {
+    assert!(
+        !displays
+            .iter()
+            .copied()
+            .any(|display| rects_intersect(frame, display)),
+        "window frame {:?} should not intersect any connected display {:?}",
+        frame,
+        displays
+    );
+}
+
+fn rects_intersect(lhs: DisplayRect, rhs: DisplayRect) -> bool {
+    lhs.x < rhs.x + rhs.width
+        && rhs.x < lhs.x + lhs.width
+        && lhs.y < rhs.y + rhs.height
+        && rhs.y < lhs.y + lhs.height
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DisplayRect {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl DisplayRect {
+    fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
+fn x11_window_frame(window: &gtk4::Window) -> Option<DisplayRect> {
+    use std::mem::MaybeUninit;
+    use std::os::raw::{c_int, c_uint, c_ulong};
+
+    use gtk4::glib::translate::ToGlibPtr;
+
+    gtk4::prelude::WidgetExt::realize(window);
+    let surface = window.surface()?;
+    let display = surface.display();
+    if !display.backend().is_x11() {
+        return None;
+    }
+
+    unsafe {
+        let xdisplay = gdk_x11_display_get_xdisplay(display.to_glib_none().0);
+        let xid = gdk_x11_surface_get_xid(surface.to_glib_none().0);
+        if xdisplay.is_null() || xid == 0 {
+            return None;
+        }
+        XSync(xdisplay, 0);
+
+        let mut root = MaybeUninit::<c_ulong>::uninit();
+        let mut x = MaybeUninit::<c_int>::uninit();
+        let mut y = MaybeUninit::<c_int>::uninit();
+        let mut width = MaybeUninit::<c_uint>::uninit();
+        let mut height = MaybeUninit::<c_uint>::uninit();
+        let mut border = MaybeUninit::<c_uint>::uninit();
+        let mut depth = MaybeUninit::<c_uint>::uninit();
+
+        if XGetGeometry(
+            xdisplay,
+            xid,
+            root.as_mut_ptr(),
+            x.as_mut_ptr(),
+            y.as_mut_ptr(),
+            width.as_mut_ptr(),
+            height.as_mut_ptr(),
+            border.as_mut_ptr(),
+            depth.as_mut_ptr(),
+        ) == 0
+        {
+            return None;
+        }
+
+        Some(DisplayRect::new(
+            x.assume_init(),
+            y.assume_init(),
+            width.assume_init() as i32,
+            height.assume_init() as i32,
+        ))
+    }
+}
+
+#[link(name = "gtk-4")]
+unsafe extern "C" {
+    fn gdk_x11_display_get_xdisplay(
+        display: *mut gtk4::gdk::ffi::GdkDisplay,
+    ) -> *mut std::ffi::c_void;
+    fn gdk_x11_surface_get_xid(surface: *mut gtk4::gdk::ffi::GdkSurface) -> std::os::raw::c_ulong;
+}
+
+#[link(name = "X11")]
+unsafe extern "C" {
+    fn XGetGeometry(
+        display: *mut std::ffi::c_void,
+        drawable: std::os::raw::c_ulong,
+        root_return: *mut std::os::raw::c_ulong,
+        x_return: *mut std::os::raw::c_int,
+        y_return: *mut std::os::raw::c_int,
+        width_return: *mut std::os::raw::c_uint,
+        height_return: *mut std::os::raw::c_uint,
+        border_width_return: *mut std::os::raw::c_uint,
+        depth_return: *mut std::os::raw::c_uint,
+    ) -> std::os::raw::c_int;
+    fn XSync(display: *mut std::ffi::c_void, discard: std::os::raw::c_int) -> std::os::raw::c_int;
 }

@@ -4,6 +4,8 @@ mod imp {
     use gtk4::prelude::*;
     use gtk4::{TextView, Widget, Window};
 
+    use crate::screen::present_window_offscreen;
+
     pub struct GtkInputDriver<'a> {
         window: &'a Window,
     }
@@ -81,7 +83,7 @@ mod imp {
         }
 
         fn activate_window(&self) {
-            self.window.present();
+            present_window_offscreen(self.window);
             self.window.grab_focus();
         }
     }

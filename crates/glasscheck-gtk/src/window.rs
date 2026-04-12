@@ -13,6 +13,7 @@ mod imp {
     use gtk4::{TextView, TextWindowType, Widget, Window};
 
     use crate::input::GtkInputDriver;
+    use crate::screen::present_window_offscreen;
     use crate::text::GtkTextHarness;
 
     struct RegisteredWidget {
@@ -38,7 +39,7 @@ mod imp {
                 .default_width(width.round() as i32)
                 .default_height(height.round() as i32)
                 .build();
-            window.present();
+            present_window_offscreen(&window);
             Self {
                 window: Some(window),
                 root_widget: RefCell::new(None),
@@ -97,7 +98,7 @@ mod imp {
         pub fn set_root(&self, widget: &impl IsA<Widget>) {
             if let Some(window) = self.window.as_ref() {
                 window.set_child(Some(widget));
-                window.present();
+                present_window_offscreen(window);
             }
             *self.root_widget.borrow_mut() = Some(widget.as_ref().clone());
         }
@@ -398,7 +399,7 @@ mod imp {
             .default_height(widget.as_ref().height_request().max(1))
             .build();
         window.set_child(Some(widget));
-        window.present();
+        present_window_offscreen(&window);
         window
     }
 
