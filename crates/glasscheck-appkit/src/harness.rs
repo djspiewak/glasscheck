@@ -3,7 +3,7 @@ mod imp {
     use std::sync::Once;
     use std::time::Duration;
 
-    use glasscheck_core::{wait_for_condition, PollError, PollOptions};
+    use glasscheck_core::{Harness, PollError, PollOptions};
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
     use objc2_foundation::{MainThreadMarker, NSDate, NSRunLoop};
 
@@ -57,10 +57,7 @@ mod imp {
         where
             F: FnMut() -> bool,
         {
-            wait_for_condition(options, || {
-                self.flush();
-                predicate()
-            })
+            Harness::wait_until(self, options, || predicate())
         }
 
         /// Creates a new test window with the requested content size.
@@ -73,6 +70,22 @@ mod imp {
         pub fn wait_for_duration(&self, duration: Duration) {
             let date = NSDate::dateWithTimeIntervalSinceNow(duration.as_secs_f64());
             NSRunLoop::currentRunLoop().runUntilDate(&date);
+        }
+    }
+
+    impl Harness for AppKitHarness {
+        type WindowHost = AppKitWindowHost;
+
+        fn flush(&self) {
+            Self::flush(self);
+        }
+
+        fn create_window(&self, width: f64, height: f64) -> Self::WindowHost {
+            Self::create_window(self, width, height)
+        }
+
+        fn wait_for_duration(&self, duration: Duration) {
+            Self::wait_for_duration(self, duration);
         }
     }
 }

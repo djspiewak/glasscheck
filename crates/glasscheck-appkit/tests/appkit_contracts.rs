@@ -6,7 +6,7 @@ use glasscheck_appkit::{AppKitHarness, AppKitWindowHost, InstrumentedView};
 use glasscheck_core::{
     assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
     NodePredicate, Point, PropertyValue, QueryError, Rect, RegionResolveError, Role, SemanticNode,
-    SemanticProvider, Size,
+    SemanticProvider, Size, TextRange,
 };
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
@@ -397,7 +397,7 @@ fn text_range_rect_converts_to_root_coordinates(harness: AppKitHarness) {
 
     let range = NSRange::new(0, 10);
     let actual = host
-        .text_range_rect(&view, range)
+        .text_range_rect(&view, TextRange::new(0, 10))
         .expect("text range rect should resolve");
 
     let layout_manager =
@@ -550,7 +550,7 @@ fn key_press_targets_attached_window_even_when_another_window_is_key(harness: Ap
 
     target
         .input()
-        .key_press(0, NSEventModifierFlags::empty(), "a");
+        .key_press("a", glasscheck_core::KeyModifiers::default());
     harness.settle(2);
 
     assert_eq!(target_view.ivars().key_downs.get(), 1);

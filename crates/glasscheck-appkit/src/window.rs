@@ -1,8 +1,9 @@
 #[cfg(target_os = "macos")]
 mod imp {
     use glasscheck_core::{
-        NodePredicate, Point, QueryRoot, Rect, RegionResolveError, RegionSpec, Role, SceneSnapshot,
-        SemanticNode, SemanticProvider, Size,
+        normalize_provider_nodes, registered_node_id, InstrumentedNode, NodePredicate, Point,
+        QueryRoot, Rect, RegionResolveError, RegionSpec, Role, SceneSnapshot, SemanticNode,
+        SemanticProvider, Size, TextRange,
     };
     use objc2::runtime::AnyObject;
     use objc2::{msg_send, rc::Retained, ClassType, MainThreadOnly};
@@ -12,27 +13,16 @@ mod imp {
     };
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSString};
     use std::cell::RefCell;
-    use std::collections::{BTreeMap, BTreeSet, HashMap};
+    use std::collections::{BTreeSet, HashMap};
 
     use crate::capture::{capture_view_image, crop_image_in_view_coordinates};
     use crate::input::AppKitInputDriver;
     use crate::screen::offscreen_window_content_rect;
     use crate::text::AppKitTextHarness;
 
-    /// Semantic metadata registered for a view exposed to querying APIs.
-    #[derive(Clone, Debug)]
-    pub struct InstrumentedView {
-        /// Stable semantic identifier.
-        pub id: Option<String>,
-        /// Semantic role.
-        pub role: Option<Role>,
-        /// Human-readable label.
-        pub label: Option<String>,
-    }
-
     struct RegisteredView {
         view: Retained<NSView>,
-        descriptor: InstrumentedView,
+        descriptor: InstrumentedNode,
     }
 
     /// AppKit window host used to build, capture, query, and drive a test scene.
@@ -99,7 +89,7 @@ mod imp {
         /// When no window is supplied, the host installs the view into a managed offscreen
         /// window so capture and input APIs remain usable.
         #[must_use]
-        pub fn from_root_view(view: &NSView, window: Option<&NSWindow>) -> Self {
+        pub fn from_root(view: &NSView, window: Option<&NSWindow>) -> Self {
             let root = unsafe {
                 Retained::retain(view as *const NSView as *mut NSView)
                     .expect("root view attachment should retain successfully")
@@ -120,6 +110,12 @@ mod imp {
             }
         }
 
+        /// Compatibility wrapper for the legacy name.
+        #[must_use]
+        pub fn from_root_view(view: &NSView, window: Option<&NSWindow>) -> Self {
+            Self::from_root(view, window)
+        }
+
         /// Returns the underlying `NSWindow`.
         #[must_use]
         pub fn window(&self) -> &NSWindow {
@@ -129,7 +125,7 @@ mod imp {
         }
 
         /// Sets the window content view.
-        pub fn set_content_view(&self, view: &NSView) {
+        pub fn set_root(&self, view: &NSView) {
             if let Some(window) = self.window.as_deref() {
                 window.setContentView(Some(view));
             }
@@ -138,6 +134,11 @@ mod imp {
                     .expect("content view should retain successfully")
             };
             *self.root_view.borrow_mut() = Some(retained);
+        }
+
+        /// Compatibility wrapper for the legacy name.
+        pub fn set_content_view(&self, view: &NSView) {
+            self.set_root(view);
         }
 
         /// Registers a pull-based semantic provider for virtual nodes.
@@ -154,8 +155,14 @@ mod imp {
 
         /// Captures a specific view as an image.
         #[must_use]
-        pub fn capture_view(&self, view: &NSView) -> Option<glasscheck_core::Image> {
+        pub fn capture_subtree(&self, view: &NSView) -> Option<glasscheck_core::Image> {
             capture_view_image(view)
+        }
+
+        /// Compatibility wrapper for the legacy name.
+        #[must_use]
+        pub fn capture_view(&self, view: &NSView) -> Option<glasscheck_core::Image> {
+            self.capture_subtree(view)
         }
 
         /// Captures a semantically resolved region as an image.
@@ -206,7 +213,7 @@ mod imp {
             let node = scene
                 .node(handle)
                 .ok_or(RegionResolveError::InvalidHandle(handle))?;
-            let point = self.root_point_to_window_point(NSPoint::new(
+            let point = self.root_point_to_window_point(Point::new(
                 node.rect.origin.x + node.rect.size.width / 2.0,
                 node.rect.origin.y + node.rect.size.height / 2.0,
             ));
@@ -216,7 +223,8 @@ mod imp {
                         let () = msg_send![&*view, performClick: std::ptr::null::<AnyObject>()];
                     }
                 } else {
-                    self.input().click_target(&view, point);
+                    self.input()
+                        .click_target(&view, NSPoint::new(point.x, point.y));
                 }
                 return Ok(());
             }
@@ -235,7 +243,8 @@ mod imp {
 
         /// Returns the bounding rect for a character range in a live `NSTextView`.
         #[must_use]
-        pub fn text_range_rect(&self, view: &NSTextView, range: NSRange) -> Option<Rect> {
+        pub fn text_range_rect(&self, view: &NSTextView, range: TextRange) -> Option<Rect> {
+            let range = ns_range_for_scalar_range(view, range);
             let layout_manager = unsafe { view.layoutManager() }?;
             let text_container = unsafe { view.textContainer() }?;
             let glyph_range = unsafe {
@@ -261,6 +270,7 @@ mod imp {
         #[must_use]
         pub fn insertion_caret_rect(&self, view: &NSTextView, location: usize) -> Option<Rect> {
             let window = view.window()?;
+            let location = scalar_index_to_utf16_offset(&view.string().to_string(), location);
             let rect = unsafe {
                 view.firstRectForCharacterRange_actualRange(
                     NSRange::new(location, 0),
@@ -277,7 +287,7 @@ mod imp {
         }
 
         /// Registers semantic metadata for a view so it can be queried later.
-        pub fn register_view(&self, view: &NSView, descriptor: InstrumentedView) {
+        pub fn register_node(&self, view: &NSView, descriptor: InstrumentedNode) {
             let retained = unsafe {
                 Retained::retain(view as *const NSView as *mut NSView)
                     .expect("registered view should retain successfully")
@@ -286,6 +296,11 @@ mod imp {
                 view: retained,
                 descriptor,
             });
+        }
+
+        /// Compatibility wrapper for the legacy name.
+        pub fn register_view(&self, view: &NSView, descriptor: InstrumentedNode) {
+            self.register_node(view, descriptor);
         }
 
         /// Builds a merged scene snapshot from registered native views and virtual nodes.
@@ -300,8 +315,9 @@ mod imp {
                     let id = entry
                         .descriptor
                         .id
-                        .clone()
-                        .unwrap_or_else(|| format!("view-{index}"));
+                        .as_deref()
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| registered_node_id(index, None, "view"));
                     let view_ptr = &*entry.view as *const NSView;
                     (view_ptr, id)
                 })
@@ -311,11 +327,7 @@ mod imp {
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
-                    let id = entry
-                        .descriptor
-                        .id
-                        .clone()
-                        .unwrap_or_else(|| format!("view-{index}"));
+                    let id = registered_node_id(index, entry.descriptor.id.as_deref(), "view");
                     let mut node = SemanticNode::new(
                         id,
                         entry
@@ -444,10 +456,11 @@ mod imp {
                 })
         }
 
-        fn root_point_to_window_point(&self, point: NSPoint) -> NSPoint {
-            self.root_view()
-                .as_deref()
-                .map_or(point, |root| root.convertPoint_toView(point, None))
+        fn root_point_to_window_point(&self, point: Point) -> Point {
+            self.root_view().as_deref().map_or(point, |root| {
+                let converted = root.convertPoint_toView(NSPoint::new(point.x, point.y), None);
+                Point::new(converted.x, converted.y)
+            })
         }
     }
 
@@ -523,87 +536,24 @@ mod imp {
     fn is_control_view(view: &NSView) -> bool {
         unsafe { msg_send![view, isKindOfClass: NSControl::class()] }
     }
-
-    fn normalize_provider_nodes(
-        mut nodes: Vec<SemanticNode>,
-        native_ids: &BTreeSet<String>,
-    ) -> Vec<SemanticNode> {
-        let provider_ids = nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
-        let needs_namespace =
-            provider_ids.iter().any(|id| native_ids.contains(id)) || has_duplicates(&provider_ids);
-        if !needs_namespace {
-            return nodes;
-        }
-
-        let mut original_counts = BTreeMap::<String, usize>::new();
-        for id in &provider_ids {
-            *original_counts.entry(id.clone()).or_default() += 1;
-        }
-
-        let mut original_to_unique = BTreeMap::<String, String>::new();
-        let mut assigned_counts = BTreeMap::<String, usize>::new();
-
-        for node in &mut nodes {
-            let original_id = node.id.clone();
-            let base_id = format!("provider::{original_id}");
-            let occurrence = assigned_counts.entry(base_id.clone()).or_default();
-            let unique_id = if *occurrence == 0 {
-                base_id.clone()
-            } else {
-                format!("{base_id}#{occurrence}")
-            };
-            *occurrence += 1;
-            node.id = unique_id.clone();
-            node.properties.insert(
-                "glasscheck:source_id".into(),
-                glasscheck_core::PropertyValue::String(original_id),
-            );
-        }
-
-        for node in &nodes {
-            let Some(glasscheck_core::PropertyValue::String(original_id)) =
-                node.properties.get("glasscheck:source_id")
-            else {
-                continue;
-            };
-            if original_counts.get(original_id).copied().unwrap_or(0) == 1 {
-                original_to_unique.insert(original_id.clone(), node.id.clone());
-            }
-        }
-
-        for node in &mut nodes {
-            if let Some(parent_id) = node.parent_id.as_ref() {
-                if original_counts.get(parent_id).copied().unwrap_or(0) == 1 {
-                    node.parent_id = original_to_unique.get(parent_id).cloned();
-                } else {
-                    node.properties.insert(
-                        "glasscheck:ambiguous_parent_id".into(),
-                        glasscheck_core::PropertyValue::String(parent_id.clone()),
-                    );
-                    node.parent_id = None;
-                }
-            }
-        }
-
-        nodes
+    fn scalar_index_to_utf16_offset(text: &str, scalar_index: usize) -> usize {
+        text.chars()
+            .take(scalar_index)
+            .map(char::len_utf16)
+            .sum::<usize>()
     }
 
-    fn has_duplicates(ids: &[String]) -> bool {
-        let mut seen = BTreeSet::new();
-        ids.iter().any(|id| !seen.insert(id.clone()))
+    fn ns_range_for_scalar_range(view: &NSTextView, range: TextRange) -> NSRange {
+        let content = view.string().to_string();
+        let start = scalar_index_to_utf16_offset(&content, range.start);
+        let end = scalar_index_to_utf16_offset(&content, range.start + range.len);
+        NSRange::new(start, end.saturating_sub(start))
     }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    #[derive(Clone, Debug)]
-    pub struct InstrumentedView {
-        pub id: Option<String>,
-        pub role: Option<glasscheck_core::Role>,
-        pub label: Option<String>,
-    }
-
     pub struct AppKitWindowHost;
 }
 
-pub use imp::{AppKitWindowHost, InstrumentedView};
+pub use imp::AppKitWindowHost;

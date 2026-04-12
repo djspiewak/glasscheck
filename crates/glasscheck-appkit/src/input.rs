@@ -8,7 +8,7 @@ mod imp {
     };
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSString};
 
-    use glasscheck_core::Rect;
+    use glasscheck_core::{InputDriver, KeyModifiers, Point, Rect, TextRange};
 
     pub struct AppKitInputDriver<'a> {
         window: &'a NSWindow,
@@ -22,8 +22,9 @@ mod imp {
         }
 
         /// Synthesizes a left mouse click at `point` in window coordinates.
-        pub fn click(&self, point: NSPoint) {
+        pub fn click(&self, point: Point) {
             self.activate_window();
+            let point = ns_point(point);
             let target = self.target_view(point);
             if self.is_control_target(target.as_deref()) {
                 if let Some(target) = target.as_deref() {
@@ -80,15 +81,16 @@ mod imp {
 
         /// Synthesizes a left click at the center of `rect`.
         pub fn click_rect_center(&self, rect: Rect) {
-            self.click(NSPoint::new(
+            self.click(Point::new(
                 rect.origin.x + rect.size.width / 2.0,
                 rect.origin.y + rect.size.height / 2.0,
             ));
         }
 
         /// Synthesizes a mouse-move event at `point` in window coordinates.
-        pub fn move_mouse(&self, point: NSPoint) {
+        pub fn move_mouse(&self, point: Point) {
             self.activate_window();
+            let point = ns_point(point);
             let window_number = self.window.windowNumber();
             if let Some(event) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
                 NSEventType::MouseMoved,
@@ -106,7 +108,12 @@ mod imp {
         }
 
         /// Synthesizes a key press and release with the provided metadata.
-        pub fn key_press(&self, key_code: u16, modifiers: NSEventModifierFlags, characters: &str) {
+        pub fn key_press_raw(
+            &self,
+            key_code: u16,
+            modifiers: NSEventModifierFlags,
+            characters: &str,
+        ) {
             let chars = NSString::from_str(characters);
             let chars_ignoring = NSString::from_str(characters);
             let point = NSPoint::new(0.0, 0.0);
@@ -143,6 +150,11 @@ mod imp {
             }
         }
 
+        /// Synthesizes a key press and release using backend-neutral modifiers.
+        pub fn key_press(&self, characters: &str, modifiers: KeyModifiers) {
+            self.key_press_raw(0, ns_modifiers(modifiers), characters);
+        }
+
         /// Inserts `text` directly through the `NSTextInputClient` API.
         pub fn type_text_direct(&self, view: &NSTextView, text: &str) {
             for ch in text.chars() {
@@ -174,8 +186,8 @@ mod imp {
         }
 
         /// Sets the selected range in `view`.
-        pub fn set_selection(&self, view: &NSTextView, location: usize, length: usize) {
-            view.setSelectedRange(NSRange::new(location, length));
+        pub fn set_selection(&self, view: &NSTextView, range: TextRange) {
+            view.setSelectedRange(ns_range_for_scalar_range(view, range));
         }
 
         /// Sends an Objective-C action message to `target`.
@@ -206,6 +218,69 @@ mod imp {
             let local = content.convertPoint_fromView(point, None);
             content.hitTest(local)
         }
+    }
+
+    impl InputDriver for AppKitInputDriver<'_> {
+        type NativeText = NSTextView;
+
+        fn click(&self, point: Point) {
+            Self::click(self, point);
+        }
+
+        fn move_mouse(&self, point: Point) {
+            Self::move_mouse(self, point);
+        }
+
+        fn key_press(&self, key: &str, modifiers: KeyModifiers) {
+            Self::key_press(self, key, modifiers);
+        }
+
+        fn type_text_direct(&self, view: &Self::NativeText, text: &str) {
+            Self::type_text_direct(self, view, text);
+        }
+
+        fn replace_text(&self, view: &Self::NativeText, text: &str) {
+            Self::replace_text(self, view, text);
+        }
+
+        fn set_selection(&self, view: &Self::NativeText, range: TextRange) {
+            Self::set_selection(self, view, range);
+        }
+    }
+
+    fn ns_point(point: Point) -> NSPoint {
+        NSPoint::new(point.x, point.y)
+    }
+
+    fn ns_modifiers(modifiers: KeyModifiers) -> NSEventModifierFlags {
+        let mut flags = NSEventModifierFlags::empty();
+        if modifiers.shift {
+            flags |= NSEventModifierFlags::Shift;
+        }
+        if modifiers.control {
+            flags |= NSEventModifierFlags::Control;
+        }
+        if modifiers.alt {
+            flags |= NSEventModifierFlags::Option;
+        }
+        if modifiers.meta {
+            flags |= NSEventModifierFlags::Command;
+        }
+        flags
+    }
+
+    fn scalar_index_to_utf16_offset(text: &str, scalar_index: usize) -> usize {
+        text.chars()
+            .take(scalar_index)
+            .map(char::len_utf16)
+            .sum::<usize>()
+    }
+
+    fn ns_range_for_scalar_range(view: &NSTextView, range: TextRange) -> NSRange {
+        let content = view.string().to_string();
+        let start = scalar_index_to_utf16_offset(&content, range.start);
+        let end = scalar_index_to_utf16_offset(&content, range.start + range.len);
+        NSRange::new(start, end.saturating_sub(start))
     }
 }
 

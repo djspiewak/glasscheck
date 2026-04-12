@@ -141,6 +141,20 @@ impl Image {
     }
 }
 
+/// Crops `image` using a bottom-left-origin rectangle from a native view system.
+#[must_use]
+pub fn crop_image_view_coordinates(image: &Image, rect: Rect) -> Image {
+    let image_height = f64::from(image.height);
+    let image_rect = Rect::new(
+        Point::new(
+            rect.origin.x,
+            (image_height - rect.origin.y - rect.size.height).max(0.0),
+        ),
+        rect.size,
+    );
+    image.crop(image_rect)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +201,21 @@ mod tests {
     #[should_panic(expected = "RGBA image data must contain exactly width * height * 4 bytes")]
     fn new_rejects_incorrect_data_length() {
         let _ = Image::new(1, 1, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn crop_image_view_coordinates_uses_bottom_left_origin() {
+        let image = Image::new(
+            2,
+            2,
+            vec![
+                10, 10, 10, 255, 20, 20, 20, 255, 30, 30, 30, 255, 40, 40, 40, 255,
+            ],
+        );
+        let cropped = crop_image_view_coordinates(
+            &image,
+            Rect::new(Point::new(0.0, 0.0), Size::new(1.0, 1.0)),
+        );
+        assert_eq!(cropped.data, vec![30, 30, 30, 255]);
     }
 }

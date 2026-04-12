@@ -3,7 +3,7 @@ mod imp {
     use std::ffi::c_uchar;
     use std::ptr;
 
-    use glasscheck_core::{Image, Point, Rect};
+    use glasscheck_core::{crop_image_bottom_left, Image};
     use objc2::{AnyThread, ClassType};
     use objc2_app_kit::{NSBitmapImageRep, NSClipView, NSSplitView, NSView, NSWindow};
     use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
@@ -24,16 +24,8 @@ mod imp {
         capture_rect(view, rect)
     }
 
-    pub fn crop_image_in_view_coordinates(image: &Image, rect: Rect) -> Image {
-        let image_height = f64::from(image.height);
-        let image_rect = Rect::new(
-            Point::new(
-                rect.origin.x,
-                (image_height - rect.origin.y - rect.size.height).max(0.0),
-            ),
-            rect.size,
-        );
-        image.crop(image_rect)
+    pub fn crop_image_in_view_coordinates(image: &Image, rect: glasscheck_core::Rect) -> Image {
+        crop_image_bottom_left(image, rect)
     }
 
     fn ensure_window_has_frame(window: &NSWindow) {

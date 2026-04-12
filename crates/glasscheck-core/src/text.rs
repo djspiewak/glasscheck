@@ -349,6 +349,14 @@ impl AnchoredTextExpectation {
     }
 }
 
+/// Returns `true` when a text expectation combines a concrete font name with
+/// family/weight/italic options that only make sense for font matching.
+#[must_use]
+pub fn font_expectation_has_conflict(expectation: &TextExpectation) -> bool {
+    expectation.font_name.is_some()
+        && (expectation.font_family.is_some() || expectation.weight.is_some() || expectation.italic)
+}
+
 /// Configuration for rendered-text assertions.
 #[derive(Clone, Debug)]
 pub struct TextAssertionConfig {
