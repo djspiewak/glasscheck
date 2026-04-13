@@ -3,7 +3,7 @@ mod imp {
     use std::ffi::c_uchar;
     use std::ptr;
 
-    use glasscheck_core::{Image, Point, Rect, Size};
+    use glasscheck_core::{crop_image_bottom_left, Image};
     use objc2::{AnyThread, ClassType};
     use objc2_app_kit::{NSBitmapImageRep, NSClipView, NSSplitView, NSView, NSWindow};
     use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
@@ -24,9 +24,8 @@ mod imp {
         capture_rect(view, rect)
     }
 
-    pub fn crop_image_in_view_coordinates(image: &Image, rect: Rect) -> Image {
-        let image_rect = image_rect_from_view_rect(image.size(), rect);
-        image.crop(image_rect)
+    pub fn crop_image_in_view_coordinates(image: &Image, rect: glasscheck_core::Rect) -> Image {
+        crop_image_bottom_left(image, rect)
     }
 
     fn ensure_window_has_frame(window: &NSWindow) {
@@ -87,33 +86,6 @@ mod imp {
         }
 
         view.bounds()
-    }
-
-    fn image_rect_from_view_rect(image_size: Size, rect: Rect) -> Rect {
-        let bounded = rect_intersection(rect, Rect::new(Point::new(0.0, 0.0), image_size))
-            .unwrap_or_else(|| Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 0.0)));
-
-        Rect::new(
-            Point::new(
-                bounded.origin.x,
-                image_size.height - bounded.origin.y - bounded.size.height,
-            ),
-            bounded.size,
-        )
-    }
-
-    fn rect_intersection(lhs: Rect, rhs: Rect) -> Option<Rect> {
-        let origin_x = lhs.origin.x.max(rhs.origin.x);
-        let origin_y = lhs.origin.y.max(rhs.origin.y);
-        let end_x = (lhs.origin.x + lhs.size.width).min(rhs.origin.x + rhs.size.width);
-        let end_y = (lhs.origin.y + lhs.size.height).min(rhs.origin.y + rhs.size.height);
-
-        (end_x > origin_x && end_y > origin_y).then(|| {
-            Rect::new(
-                Point::new(origin_x, origin_y),
-                Size::new(end_x - origin_x, end_y - origin_y),
-            )
-        })
     }
 
     fn capture_rect(view: &NSView, rect: NSRect) -> Option<Image> {
@@ -179,16 +151,7 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
-
-        #[test]
-        fn image_rect_from_view_rect_flips_y_axis() {
-            let rect = image_rect_from_view_rect(
-                Size::new(20.0, 20.0),
-                Rect::new(Point::new(3.0, 4.0), Size::new(5.0, 6.0)),
-            );
-
-            assert_eq!(rect, Rect::new(Point::new(3.0, 10.0), Size::new(5.0, 6.0)));
-        }
+        use glasscheck_core::{Point, Rect, Size};
 
         #[test]
         fn crop_image_in_view_coordinates_shrinks_top_overflow() {

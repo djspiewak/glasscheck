@@ -7,7 +7,7 @@ use glasscheck_appkit::{AppKitHarness, AppKitWindowHost, InstrumentedView};
 use glasscheck_core::{
     assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
     NodePredicate, Point, PropertyValue, QueryError, Rect, RegionResolveError, RelativeBounds,
-    Role, SemanticNode, SemanticProvider, Size,
+    Role, SemanticNode, SemanticProvider, Size, TextRange,
 };
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
@@ -606,7 +606,7 @@ fn text_range_rect_converts_to_root_coordinates(harness: AppKitHarness) {
 
     let range = NSRange::new(0, 10);
     let actual = host
-        .text_range_rect(&view, range)
+        .text_range_rect(&view, TextRange::new(0, 10))
         .expect("text range rect should resolve");
 
     let layout_manager =
@@ -730,7 +730,7 @@ fn move_mouse_targets_attached_window_even_when_another_window_is_key(harness: A
     other.window().makeKeyWindow();
     harness.settle(2);
 
-    target.input().move_mouse(NSPoint::new(40.0, 40.0));
+    target.input().move_mouse(Point::new(40.0, 40.0));
     harness.settle(2);
 
     assert_eq!(target_view.ivars().mouse_moves.get(), 1);
@@ -759,7 +759,7 @@ fn key_press_targets_attached_window_even_when_another_window_is_key(harness: Ap
 
     target
         .input()
-        .key_press(0, NSEventModifierFlags::empty(), "a");
+        .key_press("a", glasscheck_core::KeyModifiers::default());
     harness.settle(2);
 
     assert_eq!(target_view.ivars().key_downs.get(), 1);
@@ -1044,11 +1044,10 @@ fn duplicate_native_ids_do_not_drop_ancestor_relationships(harness: AppKitHarnes
             .index(),
         right_label.index()
     );
-    let original_id_matches =
-        scene.find_all(&NodePredicate::property_eq(
-            "glasscheck:source_id",
-            PropertyValue::string("duplicate-parent"),
-        ));
+    let original_id_matches = scene.find_all(&NodePredicate::property_eq(
+        "glasscheck:source_id",
+        PropertyValue::string("duplicate-parent"),
+    ));
     assert_eq!(original_id_matches.len(), 2);
 }
 
@@ -1066,7 +1065,7 @@ fn nested_child_click_routes_to_hit_tested_view(harness: AppKitHarness) {
     host.set_content_view(&parent);
     harness.settle(2);
 
-    host.input().click(NSPoint::new(40.0, 32.0));
+    host.input().click(Point::new(40.0, 32.0));
     harness.settle(2);
 
     let child_mouse_downs = child.ivars().mouse_downs.get();
@@ -1138,7 +1137,7 @@ fn stock_button_click_outside_does_not_invoke_action(harness: AppKitHarness) {
     host.set_content_view(&root);
     harness.settle(2);
 
-    host.input().click(NSPoint::new(190.0, 110.0));
+    host.input().click(Point::new(190.0, 110.0));
     harness.settle(2);
 
     assert_eq!(target.ivars().actions.get(), 0);

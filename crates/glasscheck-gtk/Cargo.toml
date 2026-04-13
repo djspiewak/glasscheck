@@ -4,5 +4,23 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+native-smoke-tests = []
+native-contract-tests = []
+
 [dependencies]
 glasscheck-core = { path = "../glasscheck-core" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+glib = "0.20"
+gtk4 = "0.9"
+
+[[test]]
+name = "gtk_smoke"
+harness = false
+required-features = ["native-smoke-tests"]
+
+[[test]]
+name = "gtk_contracts"
+harness = false
+required-features = ["native-contract-tests"]

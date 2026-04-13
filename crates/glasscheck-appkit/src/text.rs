@@ -1,8 +1,9 @@
 #[cfg(target_os = "macos")]
 mod imp {
     use glasscheck_core::{
-        assert_text_renders, AnchoredTextExpectation, Image, Rect, RegionResolveError,
-        TextAssertionConfig, TextAssertionError, TextExpectation, TextRenderer,
+        assert_anchored_text_renders, font_expectation_has_conflict, AnchoredTextAssertionError,
+        AnchoredTextExpectation, AnchoredTextHarness, Image, Rect, TextAssertionConfig,
+        TextExpectation, TextRenderer,
     };
     use objc2::rc::Retained;
     use objc2::MainThreadOnly;
@@ -56,24 +57,7 @@ mod imp {
     impl std::error::Error for AppKitTextError {}
 
     /// Errors returned by anchored AppKit text assertions.
-    #[derive(Debug)]
-    pub enum AppKitAnchoredTextError {
-        /// Region resolution failed before rendering or capture.
-        Resolve(RegionResolveError),
-        /// The underlying text assertion failed.
-        Assert(TextAssertionError<AppKitTextError>),
-    }
-
-    impl std::fmt::Display for AppKitAnchoredTextError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::Resolve(error) => write!(f, "{error}"),
-                Self::Assert(error) => write!(f, "{error}"),
-            }
-        }
-    }
-
-    impl std::error::Error for AppKitAnchoredTextError {}
+    pub type AppKitAnchoredTextError = AnchoredTextAssertionError<AppKitTextError>;
 
     /// AppKit implementation of the `TextRenderer` trait.
     pub struct AppKitTextHarness<'a> {
@@ -95,13 +79,13 @@ mod imp {
             artifact_dir: &Path,
             config: &TextAssertionConfig,
         ) -> Result<(), AppKitAnchoredTextError> {
-            let rect = self
-                .host
-                .resolve_region(&expectation.region)
-                .map_err(AppKitAnchoredTextError::Resolve)?;
-            let expectation = expectation.resolve(rect);
-            assert_text_renders(self, &expectation, artifact_dir, config)
-                .map_err(AppKitAnchoredTextError::Assert)
+            assert_anchored_text_renders(
+                self,
+                |region| self.host.resolve_region(region),
+                expectation,
+                artifact_dir,
+                config,
+            )
         }
     }
 
@@ -123,6 +107,17 @@ mod imp {
         fn capture_text_region(&self, expectation: &TextExpectation) -> Result<Image, Self::Error> {
             let actual = self.host.capture().ok_or(AppKitTextError::CaptureFailed)?;
             Ok(crop_in_view_coordinates(&actual, expectation.rect))
+        }
+    }
+
+    impl AnchoredTextHarness for AppKitTextHarness<'_> {
+        fn assert_text_renders_anchored(
+            &self,
+            expectation: &AnchoredTextExpectation,
+            artifact_dir: &Path,
+            config: &TextAssertionConfig,
+        ) -> Result<(), AnchoredTextAssertionError<Self::Error>> {
+            Self::assert_text_renders_anchored(self, expectation, artifact_dir, config)
         }
     }
 
@@ -193,11 +188,7 @@ mod imp {
     }
 
     fn validate_font_expectation(expectation: &TextExpectation) -> Result<(), AppKitTextError> {
-        if expectation.font_name.is_some()
-            && (expectation.font_family.is_some()
-                || expectation.weight.is_some()
-                || expectation.italic)
-        {
+        if font_expectation_has_conflict(expectation) {
             return Err(AppKitTextError::ConflictingFontOptions {
                 font_name: expectation.font_name.clone().unwrap_or_default(),
                 font_family: expectation.font_family.clone(),

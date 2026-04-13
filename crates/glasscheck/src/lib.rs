@@ -10,24 +10,34 @@ pub use glasscheck_appkit::*;
 #[cfg(feature = "gtk")]
 pub use glasscheck_gtk::*;
 
-#[cfg(test)]
-const fn appkit_public_api_enabled() -> bool {
-    cfg!(all(feature = "appkit", target_os = "macos"))
-}
+#[cfg(all(feature = "appkit", target_os = "macos"))]
+pub type Harness = AppKitHarness;
+#[cfg(all(feature = "appkit", target_os = "macos"))]
+pub type WindowHost = AppKitWindowHost;
+#[cfg(all(feature = "appkit", target_os = "macos"))]
+pub type NativeInputDriver<'a> = AppKitInputDriver<'a>;
+#[cfg(all(feature = "appkit", target_os = "macos"))]
+pub type NativeTextHarness<'a> = AppKitTextHarness<'a>;
+#[cfg(all(feature = "gtk", target_os = "linux"))]
+pub type Harness = GtkHarness;
+#[cfg(all(feature = "gtk", target_os = "linux"))]
+pub type WindowHost = GtkWindowHost;
+#[cfg(all(feature = "gtk", target_os = "linux"))]
+pub type NativeInputDriver<'a> = GtkInputDriver<'a>;
+#[cfg(all(feature = "gtk", target_os = "linux"))]
+pub type NativeTextHarness<'a> = GtkTextHarness<'a>;
 
 #[cfg(test)]
 mod tests {
-    use super::appkit_public_api_enabled;
-
     #[cfg(all(feature = "appkit", target_os = "macos"))]
     #[test]
     fn appkit_public_api_is_enabled_on_macos() {
-        assert!(appkit_public_api_enabled());
+        assert!(cfg!(all(feature = "appkit", target_os = "macos")));
     }
 
     #[cfg(all(feature = "appkit", not(target_os = "macos")))]
     #[test]
     fn appkit_public_api_is_disabled_off_macos() {
-        assert!(!appkit_public_api_enabled());
+        assert!(!cfg!(all(feature = "appkit", target_os = "macos")));
     }
 }

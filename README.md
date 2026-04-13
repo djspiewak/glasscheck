@@ -158,3 +158,16 @@ On macOS, `glasscheck` also exposes an in-process AppKit harness for native UI t
 - `AppKitTextHarness`
 - `AppKitWindowHost::capture_region`
 - `AppKitTextHarness::assert_text_renders_anchored`
+
+## Linux GTK Verification
+
+For the GTK backend on Linux, there are two useful X11 verification modes:
+
+- Real X11 display, for validating live desktop behavior such as ensuring test windows do not visibly flash:
+  - `env GDK_BACKEND=x11 cargo test -p glasscheck-gtk --test gtk_smoke --features native-smoke-tests`
+  - `env GDK_BACKEND=x11 cargo test -p glasscheck-gtk --test gtk_contracts --features native-contract-tests`
+- Hidden X11 via `xvfb-run`, for CI-style or headless execution:
+  - `env GDK_BACKEND=x11 xvfb-run -a cargo test -p glasscheck-gtk --test gtk_smoke --features native-smoke-tests`
+  - `env GDK_BACKEND=x11 xvfb-run -a cargo test -p glasscheck-gtk --test gtk_contracts --features native-contract-tests`
+
+Always force `GDK_BACKEND=x11` for these GTK verification paths. Depending on the environment, plain `xvfb-run` can otherwise select a different backend.
