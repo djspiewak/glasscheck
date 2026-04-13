@@ -7,6 +7,9 @@ use crate::{
 };
 
 /// Polling configuration for asynchronous UI assertions.
+///
+/// Use short intervals when a backend flush is cheap and longer intervals when
+/// capture is expensive. The default targets frame-scale UI settling.
 #[derive(Clone, Copy, Debug)]
 pub struct PollOptions {
     /// Maximum amount of time to wait before failing.
@@ -110,7 +113,9 @@ where
 
 /// Captures images until the output remains unchanged for `stable_frames`.
 ///
-/// Returns the stable image once the requirement is met.
+/// This is useful for animations, deferred drawing, or raster content that
+/// settles after multiple event-loop turns. Returns the stable image once the
+/// requirement is met.
 pub fn wait_for_image_stability<F>(
     options: PollOptions,
     stable_frames: usize,
@@ -156,6 +161,9 @@ where
 }
 
 /// Captures scene snapshots until the scene remains unchanged for `stable_polls`.
+///
+/// Prefer this over image stability when tests care about semantic state rather
+/// than exact pixels.
 pub fn wait_for_scene_stability<F>(
     options: PollOptions,
     stable_polls: usize,
@@ -208,6 +216,8 @@ pub struct WaitArtifacts {
 }
 
 /// Waits for a predicate to exist in the captured scene.
+///
+/// Returns the last successful scene so follow-up assertions can reuse it.
 pub fn wait_for_exists<F>(
     options: PollOptions,
     capture: F,
@@ -249,7 +259,7 @@ where
     })
 }
 
-/// Waits for a predicate to resolve to an interactable node.
+/// Waits for a predicate to resolve to a hit-testable node.
 pub fn wait_for_hit_testable<F>(
     options: PollOptions,
     capture: F,

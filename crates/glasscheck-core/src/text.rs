@@ -100,6 +100,10 @@ trait TextStyleBuilder: Sized {
 }
 
 /// Declarative specification of text expected to appear in a UI region.
+///
+/// Use this when the region is already known in root coordinates. If the
+/// layout can move, prefer `AnchoredTextExpectation` and resolve the region
+/// semantically at assertion time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextExpectation {
     /// Expected text content.
@@ -109,6 +113,9 @@ pub struct TextExpectation {
     /// Optional font family name.
     pub font_family: Option<String>,
     /// Optional concrete font face name.
+    ///
+    /// Prefer either `font_name` or the family/weight/italic combination. A
+    /// concrete face name is exact, but it is less portable across platforms.
     pub font_name: Option<String>,
     /// Expected point size.
     pub point_size: f64,
@@ -217,6 +224,9 @@ impl TextExpectation {
 }
 
 /// Declarative text expectation whose target region is resolved semantically.
+///
+/// Use this for text checks tied to UI semantics instead of fixed pixel
+/// rectangles. It is usually more stable across layout shifts and DPI changes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnchoredTextExpectation {
     /// Expected text content.
@@ -358,6 +368,9 @@ pub fn font_expectation_has_conflict(expectation: &TextExpectation) -> bool {
 }
 
 /// Configuration for rendered-text assertions.
+///
+/// Tune `compare` for antialiasing tolerance. Enable `write_diff` when failures
+/// should leave concrete artifacts for review.
 #[derive(Clone, Debug)]
 pub struct TextAssertionConfig {
     /// Pixel comparison settings.
@@ -391,6 +404,10 @@ pub struct TextAssertionArtifacts {
 }
 
 /// Backend capable of rendering a text reference image and capturing a live UI region.
+///
+/// This is intentionally low-level so platform backends can pick the right
+/// rendering stack. Callers normally use backend harness types instead of
+/// implementing this directly.
 pub trait TextRenderer {
     /// Backend-specific error type.
     type Error;

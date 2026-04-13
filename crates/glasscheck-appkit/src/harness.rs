@@ -13,6 +13,9 @@ mod imp {
 
     #[derive(Clone, Copy)]
     /// Main-thread AppKit harness for creating windows and flushing the run loop.
+    ///
+    /// Use this as the entry point for AppKit tests. It owns the main-thread
+    /// setup and keeps polling aligned with real run-loop progress.
     pub struct AppKitHarness {
         mtm: MainThreadMarker,
     }
@@ -61,6 +64,9 @@ mod imp {
         }
 
         /// Creates a new test window with the requested content size.
+        ///
+        /// This is the usual starting point when tests need capture, semantic
+        /// snapshots, or synthesized input against a real window.
         #[must_use]
         pub fn create_window(&self, width: f64, height: f64) -> AppKitWindowHost {
             AppKitWindowHost::new(self.mtm, width, height)

@@ -1,144 +1,89 @@
 # glasscheck
 
-Functional testing primitives for native UI applications written in Rust.
+Functional testing primitives for graphical native Rust UIs.
 
-Much of the semantic scene/query/wait functionality in `glasscheck` is directly inspired by
-[Zed](https://github.com/zed-industries/zed)'s test harness design.
+`glasscheck` is for in-process tests of graphical native UIs, not browser-based UIs. It is for tests that need more than string checks and less than full external automation. It focuses on three things:
 
-The intended use-case is stable, maintainable, sandbox-friendly assertions around real UI state:
+- semantic queries over a scene snapshot
+- image and rendered-text assertions against live UI pixels
+- polling helpers for asynchronous UI state
 
-- query instrumented views by semantic metadata
-- capture rendered output without external automation tooling
-- assert text and image output with tolerances
-- wait for asynchronous UI state to settle before asserting
+`glasscheck` is the intended dependency for most users. It re-exports the core APIs and adds the supported native backends behind features. `glasscheck-core` is backend-neutral, but it is mainly useful for backend authors or specialized integrations.
 
-`glasscheck-core` provides the portable assertion model.
-`glasscheck` re-exports the core crate and, on macOS, the AppKit backend for in-process testing.
+Much of the semantic scene/query/wait design in `glasscheck` is directly inspired by [Zed](https://github.com/zed-industries/zed)'s test harness.
 
-## Add It
+## Crates
+
+Use `glasscheck` unless you are building a new backend or integrating with an existing native test harness.
 
 ```toml
 [dependencies]
 glasscheck = { path = "crates/glasscheck" }
 ```
 
-Core-only:
+Use `glasscheck-core` only when you already have your own scene snapshot and pixel capture integration and do not want the built-in native backends.
 
 ```toml
 [dependencies]
 glasscheck-core = { path = "crates/glasscheck-core" }
 ```
 
-## Testing Flow
+## Pick An API
 
-Model the views you care about with semantic IDs, roles, and labels:
+Use `SceneSnapshot` and `NodePredicate` for most new tests. They support hierarchy, selectors, properties, state, hit testing, and scene diffs.
+
+Use `QueryRoot` and `Selector` only when you need the older flat metadata model or want a very small compatibility layer. The tradeoff is less expressive matching.
+
+Prefer stable selectors and semantic roles over snapshot-local IDs. IDs are exact, but they can be disambiguated during snapshot construction and should not be treated as cross-snapshot identities.
+
+## Scene Queries
 
 ```rust
 use glasscheck_core::{
-    NodeMetadata, Point, QueryRoot, Rect, Role, Selector, Size,
+    NodePredicate, Point, PropertyValue, Rect, Role, SceneSnapshot, SemanticNode, Size,
 };
 
-let root = QueryRoot::new(vec![NodeMetadata {
-    id: Some("editor".into()),
-    role: Some(Role::TextInput),
-    label: Some("Editor".into()),
-    rect: Rect::new(Point::new(0.0, 0.0), Size::new(320.0, 160.0)),
-}]);
+let scene = SceneSnapshot::new(vec![
+    SemanticNode::new(
+        "save-button",
+        Role::Button,
+        Rect::new(Point::new(20.0, 12.0), Size::new(80.0, 32.0)),
+    )
+    .with_selector("toolbar.save")
+    .with_label("Save")
+    .with_state("enabled", PropertyValue::Bool(true)),
+]);
 
-let editor = root.find(&Selector::by_id("editor")).unwrap();
-assert_eq!(editor.label.as_deref(), Some("Editor"));
+let save = scene.resolve(&NodePredicate::selector_eq("toolbar.save")).unwrap();
+assert_eq!(save.node.label.as_deref(), Some("Save"));
 ```
 
-Wait for the UI to reach a stable state before asserting:
+## Wait For Real UI State
+
+Use waits when the UI changes across frames or event-loop turns. The helpers return the last scene or match data on timeout, which is more useful than a bare sleep.
 
 ```rust
-use glasscheck_core::{wait_for_condition, PollOptions};
-use std::time::Duration;
+use glasscheck_core::{wait_for_exists, NodePredicate, PollOptions, Role};
 
-let mut attempts = 0;
-wait_for_condition(
-    PollOptions {
-        timeout: Duration::from_millis(50),
-        interval: Duration::from_millis(1),
-    },
-    || {
-        attempts += 1;
-        attempts >= 3
-    },
+let scene = wait_for_exists(
+    PollOptions::default(),
+    || app.snapshot_scene(),
+    &NodePredicate::role_eq(Role::Button),
 )
 .unwrap();
+
+assert!(scene.count(&NodePredicate::role_eq(Role::Button)) >= 1);
 ```
 
-Assert rendered text against a reference renderer instead of brittle string-only checks:
+## Rendered Text
+
+Use rendered-text assertions when string extraction is not enough, such as custom text rendering, truncation, aliasing, or color-sensitive checks.
+
+Prefer anchored expectations over fixed rectangles when the layout can move.
 
 ```rust
 use glasscheck_core::{
-    assert_text_renders, CompareConfig, Image, Point, Rect, RgbaColor, Size,
-    TextAssertionConfig, TextExpectation, TextRenderer,
-};
-
-#[derive(Debug)]
-struct StubError;
-
-impl std::fmt::Display for StubError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "stub error")
-    }
-}
-
-impl std::error::Error for StubError {}
-
-struct StubRenderer;
-
-impl TextRenderer for StubRenderer {
-    type Error = StubError;
-
-    fn render_text_reference(&self, _: &TextExpectation) -> Result<Image, Self::Error> {
-        Ok(Image::new(1, 1, vec![255, 255, 255, 255]))
-    }
-
-    fn capture_text_region(&self, _: &TextExpectation) -> Result<Image, Self::Error> {
-        Ok(Image::new(1, 1, vec![255, 255, 255, 255]))
-    }
-}
-
-let expectation = TextExpectation::new(
-    "Hello",
-    Rect::new(Point::new(0.0, 0.0), Size::new(120.0, 40.0)),
-)
-.with_point_size(14.0)
-.with_foreground(RgbaColor::new(0, 0, 0, 255));
-
-assert_text_renders(
-    &StubRenderer,
-    &expectation,
-    std::path::Path::new("target/text-artifacts"),
-    &TextAssertionConfig {
-        compare: CompareConfig::default(),
-        write_diff: true,
-    },
-)
-.unwrap();
-```
-
-Compare captured output with configurable tolerance:
-
-```rust
-use glasscheck_core::{compare_images, CompareConfig, Image};
-
-let actual = Image::new(1, 1, vec![255, 255, 255, 255]);
-let expected = Image::new(1, 1, vec![255, 255, 255, 255]);
-
-let result = compare_images(&actual, &expected, &CompareConfig::default());
-assert!(result.passed);
-```
-
-Prefer semantic regions over hard-coded pixel rectangles when possible:
-
-```rust
-use glasscheck_core::{
-    AnchoredTextExpectation, NodePredicate, RegionSpec, RelativeBounds, Role,
-    TextMatch,
+    AnchoredTextExpectation, NodePredicate, RegionSpec, RelativeBounds, Role, TextMatch,
 };
 
 let expectation = AnchoredTextExpectation::new(
@@ -151,26 +96,34 @@ let expectation = AnchoredTextExpectation::new(
 );
 ```
 
-## macOS AppKit
+## Image Baselines
 
-On macOS, `glasscheck` also exposes an in-process AppKit harness for native UI tests:
+Use direct image comparison for screenshots, icons, or custom drawing where semantic metadata is too coarse.
 
-- `AppKitHarness`
-- `AppKitWindowHost`
-- `AppKitInputDriver`
-- `AppKitTextHarness`
-- `AppKitWindowHost::capture_region`
-- `AppKitTextHarness::assert_text_renders_anchored`
+```rust
+use glasscheck_core::{compare_images, CompareConfig, Image};
 
-## Linux GTK Verification
+let actual = Image::new(1, 1, vec![255, 255, 255, 255]);
+let expected = Image::new(1, 1, vec![255, 255, 255, 255]);
 
-For the GTK backend on Linux, there are two useful X11 verification modes:
+assert!(compare_images(&actual, &expected, &CompareConfig::default()).passed);
+```
 
-- Real X11 display, for validating live desktop behavior such as ensuring test windows do not visibly flash:
-  - `env GDK_BACKEND=x11 cargo test -p glasscheck-gtk --test gtk_smoke --features native-smoke-tests`
-  - `env GDK_BACKEND=x11 cargo test -p glasscheck-gtk --test gtk_contracts --features native-contract-tests`
-- Hidden X11 via `xvfb-run`, for CI-style or headless execution:
-  - `env GDK_BACKEND=x11 xvfb-run -a cargo test -p glasscheck-gtk --test gtk_smoke --features native-smoke-tests`
-  - `env GDK_BACKEND=x11 xvfb-run -a cargo test -p glasscheck-gtk --test gtk_contracts --features native-contract-tests`
+## Native Backends
 
-Always force `GDK_BACKEND=x11` for these GTK verification paths. Depending on the environment, plain `xvfb-run` can otherwise select a different backend.
+Only AppKit on macOS and GTK4 on Linux are supported native backends today.
+
+`glasscheck-appkit` is for in-process AppKit tests on macOS. It provides window hosting, pixel capture, semantic scene snapshots, hit-point-based clicks, and text rendering.
+
+`glasscheck-gtk` is the Linux GTK4 backend. It provides the same overall testing model, but some low-level input paths remain best-effort and may fall back to widget activation or focus routing.
+
+## GTK Verification
+
+Use real X11 when you need to validate live desktop behavior. Use `xvfb-run` when you need headless or CI-style verification.
+
+- `env GDK_BACKEND=x11 cargo test -p glasscheck-gtk --test gtk_smoke --features native-smoke-tests`
+- `env GDK_BACKEND=x11 cargo test -p glasscheck-gtk --test gtk_contracts --features native-contract-tests`
+- `env GDK_BACKEND=x11 xvfb-run -a cargo test -p glasscheck-gtk --test gtk_smoke --features native-smoke-tests`
+- `env GDK_BACKEND=x11 xvfb-run -a cargo test -p glasscheck-gtk --test gtk_contracts --features native-contract-tests`
+
+Always force `GDK_BACKEND=x11` for these GTK verification paths.

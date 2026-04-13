@@ -1,8 +1,12 @@
-//! Core primitives for stable functional testing of native Rust UIs.
+//! Backend-neutral primitives for functional testing of graphical native Rust UIs.
 //!
-//! This crate provides portable geometry, image comparison, semantic query,
-//! text assertion, and polling utilities. Platform-specific crates can build
-//! on these APIs to offer in-process UI testing without external automation.
+//! Use this crate when tests can expose semantic scene snapshots, capture
+//! pixels, or both. The main tradeoff is explicit instrumentation: callers
+//! provide semantic metadata up front and get stable scene queries, image
+//! assertions, rendered-text checks, and polling helpers without external UI
+//! automation. This crate targets native graphical UIs rather than
+//! browser-based interfaces. Most users should depend on `glasscheck` instead
+//! so they get the supported native backend integration as well.
 
 mod anchor;
 mod assertions;

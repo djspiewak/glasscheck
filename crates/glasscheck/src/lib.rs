@@ -1,7 +1,11 @@
 //! Top-level `glasscheck` crate.
 //!
-//! This crate re-exports the portable `glasscheck-core` APIs and, when the
-//! relevant backend feature is enabled, a native platform-backed test harness.
+//! This crate re-exports `glasscheck-core` and, when enabled for the current
+//! target, a native backend harness. Use it when you want one dependency for
+//! both portable assertions and platform-specific window hosting, capture, and
+//! input helpers for graphical native UIs rather than browser-based UIs. This
+//! is the intended dependency for most users. Supported native backends are
+//! AppKit on macOS and GTK4 on Linux.
 
 pub use glasscheck_core::*;
 

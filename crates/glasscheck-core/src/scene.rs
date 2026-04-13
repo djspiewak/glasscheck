@@ -77,6 +77,10 @@ impl NodeHandle {
 }
 
 /// Rich semantic metadata captured for a UI node under test.
+///
+/// Use this as the primary testing model for new code. Compared with the older
+/// flat `NodeMetadata` model, it supports hierarchy, selectors, properties,
+/// state, visibility, and hit-testing semantics in one snapshot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SemanticNode {
     /// Semantic identifier for this snapshot.
@@ -86,6 +90,10 @@ pub struct SemanticNode {
     /// ID collisions require disambiguation.
     pub id: String,
     /// Stable test-facing selectors or aliases.
+    ///
+    /// Prefer selectors for cross-snapshot tests. Unlike `id`, selectors are
+    /// caller-defined and are not rewritten to resolve snapshot-local
+    /// collisions.
     pub selectors: BTreeSet<String>,
     /// Semantic role for the node.
     pub role: Role,
@@ -209,6 +217,9 @@ impl SemanticNode {
 }
 
 /// Serializable snapshot of the semantic scene under test.
+///
+/// A snapshot is the main query surface for semantic assertions, waits, and
+/// scene diffs. Build one per assertion step when the UI can change over time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneSnapshot {
     nodes: Vec<SemanticNode>,
@@ -225,6 +236,9 @@ impl Default for SceneSnapshot {
 
 impl SceneSnapshot {
     /// Creates a scene snapshot from collected semantic nodes.
+    ///
+    /// The constructor builds indexes for exact ID lookup, selector lookup, and
+    /// parent-child traversal.
     #[must_use]
     pub fn new(nodes: Vec<SemanticNode>) -> Self {
         let mut id_index = BTreeMap::<String, Vec<usize>>::new();

@@ -1,7 +1,10 @@
-//! AppKit backend for in-process functional testing of native macOS UIs.
+//! AppKit backend for in-process testing of native macOS UIs.
 //!
-//! These APIs integrate the portable `glasscheck-core` assertions with AppKit
-//! windows, views, input synthesis, capture, and text rendering.
+//! Use this crate when tests can run on the main thread and need direct access
+//! to real AppKit windows, semantic snapshots, capture, or input synthesis.
+//! Compared with external UI automation, the setup cost is lower and the
+//! assertions are more precise, but tests must opt into explicit
+//! instrumentation.
 
 mod capture;
 mod harness;

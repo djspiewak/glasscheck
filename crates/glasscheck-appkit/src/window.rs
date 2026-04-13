@@ -26,6 +26,9 @@ mod imp {
     }
 
     /// Semantic metadata registered for a view exposed to querying APIs.
+    ///
+    /// Keep this small and stable. Prefer selectors, roles, and labels that
+    /// reflect test intent rather than AppKit implementation details.
     #[derive(Clone, Debug)]
     pub struct InstrumentedView {
         /// Semantic identifier to expose in snapshots.
@@ -42,6 +45,9 @@ mod imp {
     }
 
     /// Search strategy for semantic hit-point resolution.
+    ///
+    /// Use the default first. Increase sampling only when controls have
+    /// irregular hit regions and a single center point is not reliable.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct HitPointSearch {
         pub strategy: HitPointStrategy,
@@ -60,8 +66,11 @@ mod imp {
     /// Candidate generation strategy for semantic hit-point resolution.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum HitPointStrategy {
+        /// Try the visible center before sampling other points.
         VisibleCenterFirst,
+        /// Sample a regular grid inside the visible region.
         Grid,
+        /// Sample the corners and center of the visible region.
         CornersAndCenter,
     }
     #[derive(Clone, Debug)]
@@ -77,6 +86,10 @@ mod imp {
     }
 
     /// AppKit window host used to build, capture, query, and drive a test scene.
+    ///
+    /// This is the main AppKit integration surface. Use it to attach semantic
+    /// metadata to native views, capture pixels, query the current scene, and
+    /// drive best-effort native input.
     pub struct AppKitWindowHost {
         window: Option<Retained<NSWindow>>,
         root_view: RefCell<Option<Retained<NSView>>>,
@@ -194,6 +207,9 @@ mod imp {
         }
 
         /// Registers a pull-based semantic provider for virtual nodes.
+        ///
+        /// Use a provider when the test needs semantic nodes that do not map
+        /// one-to-one onto concrete AppKit views.
         pub fn set_semantic_provider(&self, provider: Box<dyn SemanticProvider>) {
             *self.provider.borrow_mut() = Some(provider);
         }
@@ -240,6 +256,9 @@ mod imp {
         }
 
         /// Clicks the semantic hit point of the unique node matching `predicate`.
+        ///
+        /// Prefer this over raw coordinate clicks when the test is about user
+        /// intent rather than a specific pixel location.
         pub fn click_node(&self, predicate: &NodePredicate) -> Result<(), RegionResolveError> {
             self.click_node_with_search(predicate, &HitPointSearch::default())
         }

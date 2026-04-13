@@ -10,6 +10,9 @@ mod imp {
 
     #[derive(Clone, Copy, Debug, Default)]
     /// Main-context GTK harness for creating windows and flushing the event loop.
+    ///
+    /// Use this as the entry point for GTK tests. It keeps waits aligned with
+    /// the GTK main context rather than arbitrary sleeps.
     pub struct GtkHarness;
 
     impl GtkHarness {

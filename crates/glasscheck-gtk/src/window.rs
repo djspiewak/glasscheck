@@ -22,6 +22,10 @@ mod imp {
     }
 
     /// GTK4 window host used to build, capture, query, and drive a test scene.
+    ///
+    /// Use it to attach semantic metadata to live widgets, capture rendered
+    /// pixels, and query the current widget tree through a backend-neutral
+    /// scene model.
     pub struct GtkWindowHost {
         window: Option<Window>,
         root_widget: RefCell<Option<Widget>>,
@@ -113,6 +117,9 @@ mod imp {
         }
 
         /// Registers a pull-based semantic provider for virtual nodes.
+        ///
+        /// This is useful for semantic overlays or logical nodes that are not
+        /// represented by a single concrete widget.
         pub fn set_semantic_provider(&self, provider: Box<dyn SemanticProvider>) {
             *self.provider.borrow_mut() = Some(provider);
         }
@@ -166,6 +173,10 @@ mod imp {
         }
 
         /// Clicks the visual center of the unique node matching `predicate`.
+        ///
+        /// GTK input synthesis is still best-effort in some paths. Prefer
+        /// semantic assertions and direct widget APIs when interaction fidelity
+        /// matters more than exercising the click route itself.
         pub fn click_node(&self, predicate: &NodePredicate) -> Result<(), RegionResolveError> {
             if self.detached_root_widget {
                 return Err(RegionResolveError::DetachedRootView);

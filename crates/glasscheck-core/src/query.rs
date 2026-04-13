@@ -3,6 +3,9 @@ pub use crate::scene::PropertyValue;
 use crate::{scene::PredicateContext, scene::Role, Rect, SceneSnapshot, SemanticNode};
 
 /// Compatibility metadata captured for a UI node under test.
+///
+/// Prefer `SemanticNode` for new tests. This type exists for flat metadata
+/// cases and for migrating older query-based tests.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeMetadata {
     /// Semantic identifier captured for a specific snapshot.
@@ -30,6 +33,10 @@ impl From<&SemanticNode> for NodeMetadata {
 }
 
 /// A semantic selector used to find instrumented nodes.
+///
+/// `Selector` only supports exact ID, role, and label matching. Use
+/// `NodePredicate` when tests need selectors, hierarchy, properties, state, or
+/// text matching rules.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selector {
     /// Required node identifier.
@@ -120,6 +127,10 @@ impl std::fmt::Display for QueryError {
 impl std::error::Error for QueryError {}
 
 /// A compatibility wrapper over the richer scene snapshot model.
+///
+/// This is useful when an existing test suite already thinks in terms of
+/// flat metadata lookup. The tradeoff is that richer scene relationships are
+/// only available when the root is backed by a `SceneSnapshot`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryRoot {
     scene: Option<SceneSnapshot>,
@@ -149,6 +160,9 @@ impl QueryRoot {
     }
 
     /// Creates a query root from a richer scene snapshot.
+    ///
+    /// Use this when callers still want `Selector`-style queries but already
+    /// have a full scene snapshot available.
     #[must_use]
     pub fn from_scene(scene: SceneSnapshot) -> Self {
         let nodes = scene.all().iter().map(NodeMetadata::from).collect();
