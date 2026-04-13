@@ -158,10 +158,7 @@ mod imp {
             let image = Image::new(
                 1,
                 4,
-                vec![
-                    1, 0, 0, 255, // top row
-                    2, 0, 0, 255, 3, 0, 0, 255, 4, 0, 0, 255, // bottom row
-                ],
+                vec![1, 0, 0, 255, 2, 0, 0, 255, 3, 0, 0, 255, 4, 0, 0, 255],
             );
 
             let cropped = crop_image_in_view_coordinates(
@@ -170,8 +167,9 @@ mod imp {
             );
 
             assert_eq!(cropped.width, 1);
-            assert_eq!(cropped.height, 1);
+            assert_eq!(cropped.height, 2);
             assert_eq!(cropped.pixel_at(0, 0), Some([1, 0, 0, 255]));
+            assert_eq!(cropped.pixel_at(0, 1), Some([2, 0, 0, 255]));
         }
     }
 }

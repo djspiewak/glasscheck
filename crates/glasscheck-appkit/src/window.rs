@@ -1,9 +1,9 @@
 #[cfg(target_os = "macos")]
 mod imp {
     use glasscheck_core::{
-        normalize_provider_nodes, registered_node_id, InstrumentedNode, NodePredicate, Point,
-        QueryRoot, Rect, RegionResolveError, RegionSpec, Role, SceneSnapshot, SemanticNode,
-        SemanticProvider, Size, TextRange,
+        normalize_provider_nodes, InstrumentedNode, NodePredicate, Point, QueryRoot, Rect,
+        RegionResolveError, RegionSpec, Role, SceneSnapshot, SemanticNode, SemanticProvider, Size,
+        TextRange,
     };
     use objc2::runtime::AnyObject;
     use objc2::{msg_send, rc::Retained, ClassType, MainThreadOnly};
