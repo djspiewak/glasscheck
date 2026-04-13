@@ -63,11 +63,16 @@ jobs:
       - name: Start direct X11 server
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
-          Xvfb :99 -screen 0 1920x1080x24 > /tmp/glasscheck-xvfb.log 2>&1 &
-          echo "DISPLAY=:99" >> "$GITHUB_ENV"
-          for _ in $(seq 1 50); do
-            DISPLAY=:99 xdpyinfo >/dev/null 2>&1 && exit 0
-            sleep 0.1
+          for display in $(seq 99 110); do
+            Xvfb ":${display}" -screen 0 1920x1080x24 > /tmp/glasscheck-xvfb.log 2>&1 &
+            for _ in $(seq 1 50); do
+              DISPLAY=":${display}" xdpyinfo >/dev/null 2>&1 && {
+                echo "DISPLAY=:${display}" >> "$GITHUB_ENV"
+                exit 0
+              }
+              sleep 0.1
+            done
+            wait $! || true
           done
           cat /tmp/glasscheck-xvfb.log
           exit 1
