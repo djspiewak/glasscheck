@@ -12,8 +12,8 @@ native-contract-tests = []
 glasscheck-core = { path = "../glasscheck-core" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-glib = "0.20"
-gtk4 = "0.9"
+glib = "0.21"
+gtk4 = "0.10"
 
 [[test]]
 name = "gtk_smoke"
