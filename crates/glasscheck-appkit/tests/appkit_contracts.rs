@@ -1480,14 +1480,17 @@ fn provider_parent_repair_marks_ambiguous_native_parents_without_namespacing(
         .find(&NodePredicate::id_eq("provider-card/label"))
         .unwrap();
 
-    assert_eq!(scene.node(provider_child).unwrap().parent_id, None);
+    assert_eq!(
+        scene.node(provider_child).unwrap().parent_id.as_deref(),
+        Some("battlefield")
+    );
     assert_eq!(
         scene
             .node(provider_child)
             .unwrap()
             .properties
             .get("glasscheck:ambiguous_parent_id"),
-        Some(&PropertyValue::string("battlefield"))
+        None
     );
 }
 
