@@ -11,9 +11,7 @@ use glasscheck_core::{
 };
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{
-    NSButton, NSEvent, NSEventModifierFlags, NSFont, NSTextInputClient, NSTextView, NSView,
-};
+use objc2_app_kit::{NSButton, NSEvent, NSFont, NSTextInputClient, NSTextView, NSView};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSSize, NSString};
 
 fn main() {
@@ -104,8 +102,8 @@ fn main() {
         || provider_namespacing_preserves_existing_source_id_property(harness),
     );
     run(
-        "provider_namespacing_preserves_unique_provider_parent_relationships",
-        || provider_namespacing_preserves_unique_provider_parent_relationships(harness),
+        "provider_namespacing_marks_unresolved_native_parent_reference_as_ambiguous",
+        || provider_namespacing_marks_unresolved_native_parent_reference_as_ambiguous(harness),
     );
     run(
         "provider_namespacing_marks_ambiguous_native_parents",
@@ -1347,7 +1345,9 @@ fn provider_namespacing_preserves_existing_source_id_property(harness: AppKitHar
     );
 }
 
-fn provider_namespacing_preserves_unique_provider_parent_relationships(harness: AppKitHarness) {
+fn provider_namespacing_marks_unresolved_native_parent_reference_as_ambiguous(
+    harness: AppKitHarness,
+) {
     let host = harness.create_window(320.0, 180.0);
     let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 180.0));
     let native = make_view(harness.main_thread_marker(), NSSize::new(120.0, 60.0));
@@ -1372,17 +1372,14 @@ fn provider_namespacing_preserves_unique_provider_parent_relationships(harness: 
         ))
         .unwrap();
 
-    assert_eq!(
-        scene.node(provider_child).unwrap().parent_id.as_deref(),
-        Some("provider::battlefield")
-    );
+    assert_eq!(scene.node(provider_child).unwrap().parent_id, None);
     assert_eq!(
         scene
             .node(provider_child)
             .unwrap()
             .properties
             .get("glasscheck:ambiguous_parent_id"),
-        None
+        Some(&PropertyValue::string("battlefield"))
     );
 }
 
