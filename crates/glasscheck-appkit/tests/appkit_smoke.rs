@@ -186,6 +186,7 @@ fn query_reports_registered_view_geometry(harness: AppKitHarness) {
             id: Some("root".into()),
             role: Some(Role::Container),
             label: Some("Root".into()),
+            selectors: Vec::new(),
         },
     );
 
@@ -217,6 +218,7 @@ fn direct_text_input_changes_rendered_content(harness: AppKitHarness) {
             id: Some("editor".into()),
             role: Some(Role::TextInput),
             label: Some("Editor".into()),
+            selectors: Vec::new(),
         },
     );
 
@@ -258,6 +260,7 @@ fn capture_region_matches_registered_view_bounds(harness: AppKitHarness) {
             id: Some("editor".into()),
             role: Some(Role::TextInput),
             label: Some("Editor Panel".into()),
+            selectors: Vec::new(),
         },
     );
     host.input().replace_text(&view, "Functional UI");
@@ -434,6 +437,7 @@ fn anchored_text_assertion_reports_ambiguous_match(harness: AppKitHarness) {
             id: Some("left-editor".into()),
             role: Some(Role::TextInput),
             label: Some("Editor".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -442,6 +446,7 @@ fn anchored_text_assertion_reports_ambiguous_match(harness: AppKitHarness) {
             id: Some("right-editor".into()),
             role: Some(Role::TextInput),
             label: Some("Editor".into()),
+            selectors: Vec::new(),
         },
     );
 
@@ -485,6 +490,7 @@ fn anchored_text_assertion_matches_semantic_region(harness: AppKitHarness) {
             id: Some("editor".into()),
             role: Some(Role::TextInput),
             label: Some("Editor Canvas".into()),
+            selectors: Vec::new(),
         },
     );
 
@@ -540,6 +546,7 @@ fn anchored_text_assertion_reports_visual_regression(harness: AppKitHarness) {
             id: Some("editor".into()),
             role: Some(Role::TextInput),
             label: Some("Editor Canvas".into()),
+            selectors: Vec::new(),
         },
     );
 
@@ -720,6 +727,7 @@ fn rendered_text_assertion_matches_negative_origin_region(harness: AppKitHarness
             id: Some("neg-origin".into()),
             role: Some(Role::TextInput),
             label: Some("Negative Origin".into()),
+            selectors: Vec::new(),
         },
     );
 
@@ -779,6 +787,7 @@ fn rendered_text_assertion_reports_negative_origin_regression(harness: AppKitHar
             id: Some("neg-origin".into()),
             role: Some(Role::TextInput),
             label: Some("Negative Origin".into()),
+            selectors: Vec::new(),
         },
     );
 
@@ -857,6 +866,7 @@ fn capture_region_matches_negative_origin_region(harness: AppKitHarness) {
             id: Some("neg-origin".into()),
             role: Some(Role::TextInput),
             label: Some("Negative Origin".into()),
+            selectors: Vec::new(),
         },
     );
 
@@ -1395,6 +1405,7 @@ fn register_gradient_scene(host: &glasscheck_appkit::AppKitWindowHost, scene: &G
             id: Some("gradient-card".into()),
             role: Some(Role::Container),
             label: Some("Gradient Card".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -1403,6 +1414,7 @@ fn register_gradient_scene(host: &glasscheck_appkit::AppKitWindowHost, scene: &G
             id: Some("gradient-title".into()),
             role: Some(Role::Label),
             label: Some("Gradient Title".into()),
+            selectors: Vec::new(),
         },
     );
 }

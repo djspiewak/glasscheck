@@ -12,8 +12,7 @@ mod window;
 
 pub use capture::capture_view_image;
 pub use glasscheck_core::InstrumentedNode;
-pub use glasscheck_core::InstrumentedNode as InstrumentedView;
 pub use harness::AppKitHarness;
 pub use input::AppKitInputDriver;
 pub use text::{AppKitAnchoredTextError, AppKitTextError, AppKitTextHarness};
-pub use window::AppKitWindowHost;
+pub use window::{AppKitWindowHost, HitPointSearch, HitPointStrategy, InstrumentedView};

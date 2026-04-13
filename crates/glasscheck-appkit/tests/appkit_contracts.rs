@@ -3,7 +3,9 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use glasscheck_appkit::{AppKitHarness, AppKitWindowHost, InstrumentedView};
+use glasscheck_appkit::{
+    AppKitHarness, AppKitWindowHost, HitPointSearch, HitPointStrategy, InstrumentedView,
+};
 use glasscheck_core::{
     assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
     NodePredicate, Point, PropertyValue, QueryError, Rect, RegionResolveError, RelativeBounds,
@@ -54,6 +56,13 @@ fn main() {
     run("query_root_is_scene_backed", || {
         query_root_is_scene_backed(harness)
     });
+    run("registered_native_selectors_are_queryable", || {
+        registered_native_selectors_are_queryable(harness)
+    });
+    run(
+        "resolve_hit_point_supports_selector_lookup_and_missing_errors",
+        || resolve_hit_point_supports_selector_lookup_and_missing_errors(harness),
+    );
     run("registered_views_leave_active_root_subtree_cleanly", || {
         registered_views_leave_active_root_subtree_cleanly(harness)
     });
@@ -97,6 +106,9 @@ fn main() {
     run("colliding_provider_id_is_not_left_ambiguous", || {
         colliding_provider_id_is_not_left_ambiguous(harness)
     });
+    run("unique_native_ids_do_not_expose_source_id_aliases", || {
+        unique_native_ids_do_not_expose_source_id_aliases(harness)
+    });
     run(
         "provider_namespacing_preserves_existing_source_id_property",
         || provider_namespacing_preserves_existing_source_id_property(harness),
@@ -137,6 +149,9 @@ fn main() {
     });
     run("semantic_click_uses_visible_hit_testable_point", || {
         semantic_click_uses_visible_hit_testable_point(harness)
+    });
+    run("semantic_click_falls_back_when_center_is_occluded", || {
+        semantic_click_falls_back_when_center_is_occluded(harness)
     });
     run("semantic_click_reports_unhittable_registered_node", || {
         semantic_click_reports_unhittable_registered_node(harness)
@@ -237,6 +252,7 @@ fn attach_to_existing_window_builds_scene_snapshot(harness: AppKitHarness) {
             id: Some("sidebar-row".into()),
             role: Some(Role::ListItem),
             label: Some("Draft".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -245,6 +261,7 @@ fn attach_to_existing_window_builds_scene_snapshot(harness: AppKitHarness) {
             id: Some("sidebar-label".into()),
             role: Some(Role::Label),
             label: Some("Draft".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -256,6 +273,7 @@ fn attach_to_existing_window_builds_scene_snapshot(harness: AppKitHarness) {
             id: Some("sidebar-row".into()),
             role: Some(Role::ListItem),
             label: Some("Draft".into()),
+            selectors: Vec::new(),
         },
     );
     attached.register_view(
@@ -264,6 +282,7 @@ fn attach_to_existing_window_builds_scene_snapshot(harness: AppKitHarness) {
             id: Some("sidebar-label".into()),
             role: Some(Role::Label),
             label: Some("Draft".into()),
+            selectors: Vec::new(),
         },
     );
 
@@ -298,6 +317,7 @@ fn query_root_is_scene_backed(harness: AppKitHarness) {
             id: Some("native-child".into()),
             role: Some(Role::ListItem),
             label: Some("Loose".into()),
+            selectors: Vec::new(),
         },
     );
     host.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
@@ -310,16 +330,96 @@ fn query_root_is_scene_backed(harness: AppKitHarness) {
             PropertyValue::Bool(true),
         ))
         .expect("scene-backed query root should include provider nodes");
+    let provider_selector = query_root
+        .find_by_predicate(&NodePredicate::selector_eq("provider.node"))
+        .expect("scene-backed query root should preserve provider selectors");
     let native = query_root
         .find_by_predicate(&NodePredicate::id_eq("native-child"))
         .expect("scene-backed query root should include registered native nodes");
 
     assert!(query_root.scene().is_some());
     assert_eq!(provider.id.as_deref(), Some("provider-node"));
+    assert_eq!(provider_selector.id.as_deref(), Some("provider-node"));
     assert_eq!(native.id.as_deref(), Some("native-child"));
     assert!(query_root
         .find_by_predicate(&NodePredicate::parent(NodePredicate::id_eq("native-child")))
         .is_err());
+}
+
+fn registered_native_selectors_are_queryable(harness: AppKitHarness) {
+    let host = harness.create_window(160.0, 120.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(160.0, 120.0));
+    let child = make_view(harness.main_thread_marker(), NSSize::new(40.0, 20.0));
+    child.setFrameOrigin(NSPoint::new(20.0, 10.0));
+    root.addSubview(&child);
+    host.set_content_view(&root);
+    host.register_view(
+        &child,
+        InstrumentedView {
+            id: Some("native-child".into()),
+            role: Some(Role::ListItem),
+            label: Some("Loose".into()),
+            selectors: vec!["sidebar.row".into(), "draft".into()],
+        },
+    );
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let exact = scene
+        .find(&NodePredicate::selector_eq("sidebar.row"))
+        .expect("exact selector should match the registered node");
+    let fuzzy = scene
+        .find(&NodePredicate::any_selector(
+            glasscheck_core::TextMatch::contains("draft"),
+        ))
+        .expect("fuzzy selector match should find the registered node");
+
+    assert_eq!(scene.node(exact).unwrap().id, "native-child");
+    assert_eq!(scene.node(fuzzy).unwrap().id, "native-child");
+    assert!(scene
+        .find(&NodePredicate::selector_eq("missing.selector"))
+        .is_err());
+}
+
+fn resolve_hit_point_supports_selector_lookup_and_missing_errors(harness: AppKitHarness) {
+    let host = harness.create_window(160.0, 120.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(160.0, 120.0));
+    let child = make_view(harness.main_thread_marker(), NSSize::new(40.0, 20.0));
+    child.setFrameOrigin(NSPoint::new(20.0, 10.0));
+    root.addSubview(&child);
+    host.set_content_view(&root);
+    host.register_view(
+        &child,
+        InstrumentedView {
+            id: Some("native-child".into()),
+            role: Some(Role::ListItem),
+            label: Some("Loose".into()),
+            selectors: vec!["sidebar.row".into()],
+        },
+    );
+    harness.settle(2);
+
+    let hit_point = host
+        .resolve_hit_point(
+            &NodePredicate::selector_eq("sidebar.row"),
+            &HitPointSearch {
+                strategy: HitPointStrategy::VisibleCenterFirst,
+                sample_count: 1,
+            },
+        )
+        .expect("selector-based hit point resolution should succeed");
+    assert_eq!(hit_point, Point::new(40.0, 20.0));
+
+    let error = host
+        .resolve_hit_point(
+            &NodePredicate::selector_eq("missing.selector"),
+            &HitPointSearch {
+                strategy: HitPointStrategy::Grid,
+                sample_count: 9,
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(error, RegionResolveError::NotFound(_)));
 }
 
 fn registered_views_leave_active_root_subtree_cleanly(harness: AppKitHarness) {
@@ -334,6 +434,7 @@ fn registered_views_leave_active_root_subtree_cleanly(harness: AppKitHarness) {
             id: Some("detached-child".into()),
             role: Some(Role::Container),
             label: Some("Detached".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -367,6 +468,7 @@ fn attached_window_registry_drops_nodes_after_content_swap(harness: AppKitHarnes
             id: Some("stale-child".into()),
             role: Some(Role::Container),
             label: Some("Stale".into()),
+            selectors: Vec::new(),
         },
     );
     assert!(attached
@@ -411,6 +513,7 @@ fn native_snapshot_visibility_tracks_hidden_ancestors_and_clipping(harness: AppK
             id: Some("hidden-child".into()),
             role: Some(Role::Container),
             label: Some("Hidden".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -419,6 +522,7 @@ fn native_snapshot_visibility_tracks_hidden_ancestors_and_clipping(harness: AppK
             id: Some("clipped-child".into()),
             role: Some(Role::Container),
             label: Some("Clipped".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -504,6 +608,7 @@ fn root_view_only_host_without_window_is_safe(harness: AppKitHarness) {
             id: Some("root".into()),
             role: Some(Role::Button),
             label: Some("Root".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -563,6 +668,7 @@ fn pinned_root_view_semantic_click_uses_window_coordinates(harness: AppKitHarnes
             id: Some("pinned-click".into()),
             role: Some(Role::Button),
             label: Some("Pinned".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -574,8 +680,17 @@ fn pinned_root_view_semantic_click_uses_window_coordinates(harness: AppKitHarnes
             id: Some("pinned-click".into()),
             role: Some(Role::Button),
             label: Some("Pinned".into()),
+            selectors: vec!["pinned.click".into()],
         },
     );
+
+    let hit_point = attached
+        .resolve_hit_point(
+            &NodePredicate::selector_eq("pinned.click"),
+            &HitPointSearch::default(),
+        )
+        .unwrap();
+    assert_eq!(hit_point, Point::new(100.0, 60.0));
 
     attached
         .click_node(&NodePredicate::id_eq("pinned-click"))
@@ -788,6 +903,7 @@ fn registered_native_hierarchy_supports_parent_and_child_indexes(harness: AppKit
             id: Some("root".into()),
             role: Some(Role::Container),
             label: Some("Root".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -796,6 +912,7 @@ fn registered_native_hierarchy_supports_parent_and_child_indexes(harness: AppKit
             id: Some("left".into()),
             role: Some(Role::Container),
             label: Some("Left".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -804,6 +921,7 @@ fn registered_native_hierarchy_supports_parent_and_child_indexes(harness: AppKit
             id: Some("right".into()),
             role: Some(Role::Container),
             label: Some("Right".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -812,6 +930,7 @@ fn registered_native_hierarchy_supports_parent_and_child_indexes(harness: AppKit
             id: Some("label".into()),
             role: Some(Role::Label),
             label: Some("Nested".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -872,6 +991,7 @@ fn registered_native_hierarchy_reports_missing_ancestor(harness: AppKitHarness) 
             id: Some("root".into()),
             role: Some(Role::Container),
             label: Some("Root".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -880,6 +1000,7 @@ fn registered_native_hierarchy_reports_missing_ancestor(harness: AppKitHarness) 
             id: Some("child".into()),
             role: Some(Role::Container),
             label: Some("Child".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -911,6 +1032,7 @@ fn registered_native_hierarchy_uses_nearest_registered_ancestor(harness: AppKitH
             id: Some("root".into()),
             role: Some(Role::Container),
             label: Some("Root".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -919,6 +1041,7 @@ fn registered_native_hierarchy_uses_nearest_registered_ancestor(harness: AppKitH
             id: Some("label".into()),
             role: Some(Role::Label),
             label: Some("Nested".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -965,6 +1088,7 @@ fn duplicate_native_ids_do_not_drop_ancestor_relationships(harness: AppKitHarnes
             id: Some("root".into()),
             role: Some(Role::Container),
             label: Some("Root".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -973,6 +1097,7 @@ fn duplicate_native_ids_do_not_drop_ancestor_relationships(harness: AppKitHarnes
             id: Some("duplicate-parent".into()),
             role: Some(Role::Container),
             label: Some("Left Parent".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -981,6 +1106,7 @@ fn duplicate_native_ids_do_not_drop_ancestor_relationships(harness: AppKitHarnes
             id: Some("duplicate-parent".into()),
             role: Some(Role::Container),
             label: Some("Right Parent".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -989,6 +1115,7 @@ fn duplicate_native_ids_do_not_drop_ancestor_relationships(harness: AppKitHarnes
             id: Some("left-label".into()),
             role: Some(Role::Label),
             label: Some("Left".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -997,6 +1124,7 @@ fn duplicate_native_ids_do_not_drop_ancestor_relationships(harness: AppKitHarnes
             id: Some("right-label".into()),
             role: Some(Role::Label),
             label: Some("Right".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -1104,6 +1232,7 @@ fn stock_button_click_invokes_action_once(harness: AppKitHarness) {
             id: Some("run-button".into()),
             role: Some(Role::Button),
             label: Some("Run".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -1249,6 +1378,7 @@ fn provider_ids_are_namespaced_when_they_collide_with_native_ids(harness: AppKit
             id: Some("battlefield".into()),
             role: Some(Role::Container),
             label: Some("Native Battlefield".into()),
+            selectors: Vec::new(),
         },
     );
     host.set_semantic_provider(Box::new(CollidingProvider));
@@ -1276,6 +1406,15 @@ fn provider_ids_are_namespaced_when_they_collide_with_native_ids(harness: AppKit
         scene.node(provider_child).unwrap().parent_id.as_deref(),
         Some("provider::battlefield")
     );
+    assert_eq!(
+        scene
+            .find_all(&NodePredicate::property_eq(
+                "glasscheck:source_id",
+                PropertyValue::string("battlefield"),
+            ))
+            .len(),
+        1
+    );
 }
 
 fn colliding_provider_id_is_not_left_ambiguous(harness: AppKitHarness) {
@@ -1290,6 +1429,7 @@ fn colliding_provider_id_is_not_left_ambiguous(harness: AppKitHarness) {
             id: Some("battlefield".into()),
             role: Some(Role::Container),
             label: Some("Native Battlefield".into()),
+            selectors: Vec::new(),
         },
     );
     host.set_semantic_provider(Box::new(CollidingProvider));
@@ -1309,6 +1449,36 @@ fn colliding_provider_id_is_not_left_ambiguous(harness: AppKitHarness) {
         .is_ok());
 }
 
+fn unique_native_ids_do_not_expose_source_id_aliases(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 180.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 180.0));
+    let native = make_view(harness.main_thread_marker(), NSSize::new(120.0, 60.0));
+    root.addSubview(&native);
+    host.set_content_view(&root);
+    host.register_view(
+        &native,
+        InstrumentedView {
+            id: Some("battlefield".into()),
+            role: Some(Role::Container),
+            label: Some("Native Battlefield".into()),
+            selectors: Vec::new(),
+        },
+    );
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let native = scene.find(&NodePredicate::id_eq("battlefield")).unwrap();
+
+    assert_eq!(
+        scene
+            .node(native)
+            .unwrap()
+            .properties
+            .get("glasscheck:source_id"),
+        None
+    );
+}
+
 fn provider_namespacing_preserves_existing_source_id_property(harness: AppKitHarness) {
     let host = harness.create_window(320.0, 180.0);
     let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 180.0));
@@ -1321,6 +1491,7 @@ fn provider_namespacing_preserves_existing_source_id_property(harness: AppKitHar
             id: Some("battlefield".into()),
             role: Some(Role::Container),
             label: Some("Native Battlefield".into()),
+            selectors: Vec::new(),
         },
     );
     host.set_semantic_provider(Box::new(CollidingProviderWithSourceId));
@@ -1359,6 +1530,7 @@ fn provider_namespacing_marks_unresolved_native_parent_reference_as_ambiguous(
             id: Some("battlefield".into()),
             role: Some(Role::Container),
             label: Some("Native Battlefield".into()),
+            selectors: Vec::new(),
         },
     );
     host.set_semantic_provider(Box::new(CollidingProviderWithNativeChild));
@@ -1398,6 +1570,7 @@ fn provider_namespacing_marks_ambiguous_native_parents(harness: AppKitHarness) {
                 id: Some("battlefield".into()),
                 role: Some(Role::Container),
                 label: Some("Native Battlefield".into()),
+                selectors: Vec::new(),
             },
         );
     }
@@ -1469,6 +1642,7 @@ fn provider_parent_repair_marks_ambiguous_native_parents_without_namespacing(
                 id: Some("battlefield".into()),
                 role: Some(Role::Container),
                 label: Some("Native Battlefield".into()),
+                selectors: Vec::new(),
             },
         );
     }
@@ -1532,6 +1706,7 @@ fn semantic_click_uses_matched_handle_when_native_ids_duplicate(harness: AppKitH
             id: Some("duplicate-id".into()),
             role: Some(Role::Button),
             label: Some("First".into()),
+            selectors: Vec::new(),
         },
     );
     host.register_view(
@@ -1540,6 +1715,7 @@ fn semantic_click_uses_matched_handle_when_native_ids_duplicate(harness: AppKitH
             id: Some("duplicate-id".into()),
             role: Some(Role::Button),
             label: Some("Second".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -1567,6 +1743,7 @@ fn semantic_click_targets_registered_node(harness: AppKitHarness) {
             id: Some("click-target".into()),
             role: Some(Role::Button),
             label: Some("Click Target".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -1607,6 +1784,7 @@ fn provider_click_after_content_swap_does_not_dispatch_to_stale_registered_view(
             id: Some("stale-button".into()),
             role: Some(Role::Button),
             label: Some("Stale".into()),
+            selectors: Vec::new(),
         },
     );
     attached.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
@@ -1645,6 +1823,7 @@ fn semantic_click_on_registered_ancestor_routes_to_descendant_hit_view(harness: 
             id: Some("container".into()),
             role: Some(Role::Button),
             label: Some("Container".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -1684,6 +1863,7 @@ fn semantic_click_uses_visible_hit_testable_point(harness: AppKitHarness) {
             id: Some("clipped-target".into()),
             role: Some(Role::Button),
             label: Some("Clipped Target".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -1707,6 +1887,48 @@ fn semantic_click_uses_visible_hit_testable_point(harness: AppKitHarness) {
     assert_eq!(target.ivars().last_click_y.get(), 45.0);
 }
 
+fn semantic_click_falls_back_when_center_is_occluded(harness: AppKitHarness) {
+    let host = harness.create_window(120.0, 120.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(120.0, 120.0));
+    let target = PointTrackingClickView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(30.0, 30.0)),
+    );
+    let occluder = make_view(harness.main_thread_marker(), NSSize::new(8.0, 8.0));
+    occluder.setFrameOrigin(NSPoint::new(31.0, 31.0));
+    root.addSubview(&target);
+    root.addSubview(&occluder);
+    host.set_content_view(&root);
+    host.register_view(
+        &target,
+        InstrumentedView {
+            id: Some("partially-covered-target".into()),
+            role: Some(Role::Button),
+            label: Some("Partially Covered".into()),
+            selectors: Vec::new(),
+        },
+    );
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let node = scene
+        .node(
+            scene
+                .find(&NodePredicate::id_eq("partially-covered-target"))
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(node.hit_testable);
+
+    host.click_node(&NodePredicate::id_eq("partially-covered-target"))
+        .unwrap();
+    harness.settle(2);
+
+    assert_eq!(target.ivars().mouse_downs.get(), 1);
+    assert_ne!(target.ivars().last_click_x.get(), 35.0);
+    assert_ne!(target.ivars().last_click_y.get(), 35.0);
+}
+
 fn semantic_click_reports_unhittable_registered_node(harness: AppKitHarness) {
     let host = harness.create_window(180.0, 120.0);
     let root = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
@@ -1724,6 +1946,7 @@ fn semantic_click_reports_unhittable_registered_node(harness: AppKitHarness) {
             id: Some("covered-target".into()),
             role: Some(Role::Button),
             label: Some("Covered Target".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -1755,6 +1978,7 @@ fn semantic_click_reports_unhittable_registered_root_node(harness: AppKitHarness
             id: Some("unhittable-root".into()),
             role: Some(Role::Button),
             label: Some("Unhittable Root".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -1795,6 +2019,7 @@ fn semantic_click_rejects_registered_node_when_hit_test_returns_ancestor(harness
             id: Some("ancestor-hit-target".into()),
             role: Some(Role::Button),
             label: Some("Ancestor Hit Target".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -1826,6 +2051,7 @@ fn semantic_click_rejects_registered_node_when_hit_test_is_unknown(harness: AppK
             id: Some("unknown-hit-target".into()),
             role: Some(Role::Button),
             label: Some("Unknown Hit Target".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -1859,6 +2085,7 @@ fn attached_window_prunes_stale_registered_views_after_content_swap(harness: App
             id: Some("stale-dealloc-child".into()),
             role: Some(Role::Container),
             label: Some("Stale".into()),
+            selectors: Vec::new(),
         },
     );
     assert!(attached
@@ -1924,6 +2151,7 @@ fn semantic_click_stress_does_not_duplicate_mouse_downs(harness: AppKitHarness) 
             id: Some("click-target".into()),
             role: Some(Role::Button),
             label: Some("Click Target".into()),
+            selectors: Vec::new(),
         },
     );
     harness.settle(2);
@@ -2317,6 +2545,7 @@ impl SemanticProvider for ProviderOnlySceneProvider {
             Rect::new(Point::new(12.0, 16.0), Size::new(64.0, 32.0)),
         )
         .with_label("Provider Node")
+        .with_selector("provider.node")
         .with_property("provider", PropertyValue::Bool(true))]
     }
 }

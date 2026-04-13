@@ -1,6 +1,8 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use crate::Rect;
+use crate::{Interactability, NodePredicate, Point, QueryError, QueryMatch, Rect};
+
+const PAINT_ORDER_PATH_PROPERTY: &str = "glasscheck:paint_order_path";
 
 /// A semantic role attached to a UI node under test.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -83,6 +85,8 @@ pub struct SemanticNode {
     /// assume it remains unchanged across future snapshots when duplicate native IDs or provider
     /// ID collisions require disambiguation.
     pub id: String,
+    /// Stable test-facing selectors or aliases.
+    pub selectors: BTreeSet<String>,
     /// Semantic role for the node.
     pub role: Role,
     /// Bounds of the node in root coordinates.
@@ -123,6 +127,7 @@ impl SemanticNode {
     pub fn new(id: impl Into<String>, role: Role, rect: Rect) -> Self {
         Self {
             id: id.into(),
+            selectors: BTreeSet::new(),
             role,
             rect,
             label: None,
@@ -145,6 +150,24 @@ impl SemanticNode {
     #[must_use]
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Adds a stable test-facing selector.
+    #[must_use]
+    pub fn with_selector(mut self, selector: impl Into<String>) -> Self {
+        self.selectors.insert(selector.into());
+        self
+    }
+
+    /// Adds multiple stable test-facing selectors.
+    #[must_use]
+    pub fn with_selectors<I, S>(mut self, selectors: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.selectors.extend(selectors.into_iter().map(Into::into));
         self
     }
 
@@ -190,6 +213,7 @@ impl SemanticNode {
 pub struct SceneSnapshot {
     nodes: Vec<SemanticNode>,
     id_index: BTreeMap<String, Vec<usize>>,
+    selector_index: BTreeMap<String, Vec<usize>>,
     children_index: BTreeMap<String, Vec<usize>>,
 }
 
@@ -204,10 +228,17 @@ impl SceneSnapshot {
     #[must_use]
     pub fn new(nodes: Vec<SemanticNode>) -> Self {
         let mut id_index = BTreeMap::<String, Vec<usize>>::new();
+        let mut selector_index = BTreeMap::<String, Vec<usize>>::new();
         let mut children_index = BTreeMap::<String, Vec<usize>>::new();
 
         for (index, node) in nodes.iter().enumerate() {
             id_index.entry(node.id.clone()).or_default().push(index);
+            for selector in &node.selectors {
+                selector_index
+                    .entry(selector.clone())
+                    .or_default()
+                    .push(index);
+            }
             if let Some(parent_id) = node.parent_id.as_ref() {
                 children_index
                     .entry(parent_id.clone())
@@ -226,6 +257,7 @@ impl SceneSnapshot {
         Self {
             nodes,
             id_index,
+            selector_index,
             children_index,
         }
     }
@@ -245,14 +277,26 @@ impl SceneSnapshot {
     /// Finds all handles matching `predicate`.
     #[must_use]
     pub fn find_all(&self, predicate: &crate::NodePredicate) -> Vec<NodeHandle> {
-        if let crate::NodePredicate::IdEq(id) = predicate {
-            return self
-                .id_index
-                .get(id)
-                .into_iter()
-                .flat_map(|indices| indices.iter().copied())
-                .map(|index| NodeHandle { index })
-                .collect();
+        match predicate {
+            crate::NodePredicate::IdEq(id) => {
+                return self
+                    .id_index
+                    .get(id)
+                    .into_iter()
+                    .flat_map(|indices| indices.iter().copied())
+                    .map(|index| NodeHandle { index })
+                    .collect();
+            }
+            crate::NodePredicate::SelectorEq(selector) => {
+                return self
+                    .selector_index
+                    .get(selector)
+                    .into_iter()
+                    .flat_map(|indices| indices.iter().copied())
+                    .map(|index| NodeHandle { index })
+                    .collect();
+            }
+            _ => {}
         }
         self.nodes
             .iter()
@@ -311,12 +355,316 @@ impl SceneSnapshot {
             .and_then(|indices| (indices.len() == 1).then_some(indices[0]))
             .map(|index| NodeHandle { index })
     }
+
+    /// Resolves exactly one semantic match with rich metadata.
+    pub fn resolve(&self, predicate: &NodePredicate) -> Result<QueryMatch<'_>, QueryError> {
+        let handle = self.find(predicate)?;
+        self.resolve_handle(handle)
+            .ok_or(QueryError::NotFoundPredicate(predicate.clone()))
+    }
+
+    /// Resolves all semantic matches with rich metadata.
+    #[must_use]
+    pub fn resolve_all(&self, predicate: &NodePredicate) -> Vec<QueryMatch<'_>> {
+        self.find_all(predicate)
+            .into_iter()
+            .filter_map(|handle| self.resolve_handle(handle))
+            .collect()
+    }
+
+    /// Returns whether the predicate matches any nodes.
+    #[must_use]
+    pub fn exists(&self, predicate: &NodePredicate) -> bool {
+        !self.find_all(predicate).is_empty()
+    }
+
+    /// Returns the number of nodes matching the predicate.
+    #[must_use]
+    pub fn count(&self, predicate: &NodePredicate) -> usize {
+        self.find_all(predicate).len()
+    }
+
+    /// Returns the raw bounds of the unique match.
+    pub fn bounds(&self, predicate: &NodePredicate) -> Result<Rect, QueryError> {
+        Ok(self.resolve(predicate)?.bounds)
+    }
+
+    /// Returns the visible bounds of the unique match.
+    pub fn visible_bounds(&self, predicate: &NodePredicate) -> Result<Rect, QueryError> {
+        self.resolve(predicate)?
+            .visible_bounds
+            .ok_or(QueryError::NotFoundPredicate(predicate.clone()))
+    }
+
+    /// Returns the center point of the unique match's raw bounds.
+    pub fn center(&self, predicate: &NodePredicate) -> Result<Point, QueryError> {
+        Ok(rect_center(self.bounds(predicate)?))
+    }
+
+    /// Returns the center point of the unique match's visible bounds.
+    pub fn visible_center(&self, predicate: &NodePredicate) -> Result<Point, QueryError> {
+        Ok(rect_center(self.visible_bounds(predicate)?))
+    }
+
+    /// Returns all raw bounds for all matches.
+    #[must_use]
+    pub fn all_bounds(&self, predicate: &NodePredicate) -> Vec<Rect> {
+        self.resolve_all(predicate)
+            .into_iter()
+            .map(|resolved| resolved.bounds)
+            .collect()
+    }
+
+    /// Returns the interactability classification for the unique match.
+    pub fn interactability(
+        &self,
+        predicate: &NodePredicate,
+    ) -> Result<Interactability, QueryError> {
+        Ok(self.resolve(predicate)?.interactability)
+    }
+
+    /// Returns the preferred hit point for the unique match.
+    pub fn preferred_hit_point(&self, predicate: &NodePredicate) -> Result<Point, QueryError> {
+        self.interactability(predicate)?
+            .preferred_hit_point()
+            .ok_or(QueryError::NotFoundPredicate(predicate.clone()))
+    }
+
+    /// Returns the topmost node at `point`, when any semantic hit exists.
+    #[must_use]
+    pub fn topmost_at(&self, point: Point) -> Option<NodeHandle> {
+        self.hit_path_at(point).into_iter().next()
+    }
+
+    /// Returns the semantic hit path at `point`, ordered from topmost to backmost.
+    #[must_use]
+    pub fn hit_path_at(&self, point: Point) -> Vec<NodeHandle> {
+        let mut hits = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, node)| {
+                let rect = node.visible_rect.unwrap_or(node.rect);
+                (node.visible
+                    && node.hit_testable
+                    && rect.size.width > 0.0
+                    && rect.size.height > 0.0
+                    && rect.contains(point))
+                .then_some((index, node))
+            })
+            .collect::<Vec<_>>();
+
+        hits.sort_by(|(left_index, left), (right_index, right)| {
+            compare_paint_order(
+                self,
+                (*left_index, left.child_index, left.z_index),
+                (*right_index, right.child_index, right.z_index),
+            )
+        });
+
+        hits.into_iter()
+            .map(|(index, _)| NodeHandle { index })
+            .collect()
+    }
+
+    fn resolve_handle(&self, handle: NodeHandle) -> Option<QueryMatch<'_>> {
+        let node = self.node(handle)?;
+        let interactability = classify_interactability(self, handle, node);
+        let preferred_hit_point = interactability.preferred_hit_point();
+        Some(QueryMatch {
+            handle,
+            node,
+            bounds: node.rect,
+            visible_bounds: visible_bounds_for_node(node),
+            interactability,
+            preferred_hit_point,
+        })
+    }
 }
 
 /// Application-supplied virtual semantic provider.
 pub trait SemanticProvider {
     /// Produces the current semantic nodes for the live scene.
     fn snapshot_nodes(&self) -> Vec<SemanticNode>;
+}
+
+fn classify_interactability(
+    scene: &SceneSnapshot,
+    handle: NodeHandle,
+    node: &SemanticNode,
+) -> Interactability {
+    if !node.visible {
+        return Interactability::Hidden;
+    }
+    if node.rect.size.width <= 0.0 || node.rect.size.height <= 0.0 {
+        return Interactability::ZeroSized;
+    }
+    let visible_bounds = node.visible_rect.unwrap_or(node.rect);
+    if visible_bounds.size.width <= 0.0 || visible_bounds.size.height <= 0.0 {
+        return Interactability::FullyClipped;
+    }
+    if node.state.get("disabled") == Some(&PropertyValue::Bool(true))
+        || node.properties.get("disabled") == Some(&PropertyValue::Bool(true))
+    {
+        return Interactability::Disabled;
+    }
+    if !node.hit_testable {
+        return Interactability::NotHitTestable;
+    }
+    let mut occluded = None;
+    for hit_point in interactability_probe_points(visible_bounds) {
+        match scene.topmost_at(hit_point) {
+            Some(topmost) if topmost == handle => {
+                return Interactability::Interactable { hit_point };
+            }
+            Some(topmost) => {
+                occluded.get_or_insert((hit_point, topmost));
+            }
+            None => {}
+        }
+    }
+    if let Some((hit_point, topmost)) = occluded {
+        Interactability::Occluded { hit_point, topmost }
+    } else {
+        Interactability::NotHitTestable
+    }
+}
+
+fn rect_center(rect: Rect) -> Point {
+    Point::new(
+        rect.origin.x + rect.size.width / 2.0,
+        rect.origin.y + rect.size.height / 2.0,
+    )
+}
+
+fn visible_bounds_for_node(node: &SemanticNode) -> Option<Rect> {
+    node.visible
+        .then_some(node.visible_rect.unwrap_or(node.rect))
+}
+
+fn interactability_probe_points(rect: Rect) -> Vec<Point> {
+    let x0 = rect.origin.x;
+    let x1 = rect.origin.x + rect.size.width / 2.0;
+    let x2 = rect.origin.x + rect.size.width;
+    let y0 = rect.origin.y;
+    let y1 = rect.origin.y + rect.size.height / 2.0;
+    let y2 = rect.origin.y + rect.size.height;
+
+    let mut points = vec![
+        Point::new(x1, y1),
+        Point::new(x0, y0),
+        Point::new(x2, y0),
+        Point::new(x0, y2),
+        Point::new(x2, y2),
+    ];
+
+    for row in 0..3 {
+        for column in 0..3 {
+            let point = Point::new(
+                rect.origin.x + rect.size.width * ((column as f64 + 0.5) / 3.0),
+                rect.origin.y + rect.size.height * ((row as f64 + 0.5) / 3.0),
+            );
+            if !points.contains(&point) {
+                points.push(point);
+            }
+        }
+    }
+
+    points
+}
+
+fn compare_paint_order(
+    scene: &SceneSnapshot,
+    left: (usize, usize, i32),
+    right: (usize, usize, i32),
+) -> std::cmp::Ordering {
+    if is_ancestor(scene, left.0, right.0) {
+        return std::cmp::Ordering::Greater;
+    }
+    if is_ancestor(scene, right.0, left.0) {
+        return std::cmp::Ordering::Less;
+    }
+
+    if let Some(ordering) = compare_explicit_paint_paths(scene, left.0, right.0) {
+        return ordering;
+    }
+
+    let left_path = paint_order_path(scene, left.0);
+    let right_path = paint_order_path(scene, right.0);
+
+    for (left_segment, right_segment) in left_path.iter().zip(right_path.iter()) {
+        if left_segment != right_segment {
+            return right_segment.cmp(left_segment);
+        }
+    }
+
+    right_path
+        .len()
+        .cmp(&left_path.len())
+        .then_with(|| right.2.cmp(&left.2))
+        .then_with(|| right.1.cmp(&left.1))
+        .then_with(|| right.0.cmp(&left.0))
+}
+
+fn compare_explicit_paint_paths(
+    scene: &SceneSnapshot,
+    left_index: usize,
+    right_index: usize,
+) -> Option<std::cmp::Ordering> {
+    let left = explicit_paint_path(scene.node(NodeHandle { index: left_index })?)?;
+    let right = explicit_paint_path(scene.node(NodeHandle { index: right_index })?)?;
+
+    for (left_segment, right_segment) in left.iter().zip(right.iter()) {
+        if left_segment != right_segment {
+            return Some(right_segment.cmp(left_segment));
+        }
+    }
+
+    Some(
+        right
+            .len()
+            .cmp(&left.len())
+            .then_with(|| right_index.cmp(&left_index)),
+    )
+}
+
+fn explicit_paint_path(node: &SemanticNode) -> Option<Vec<usize>> {
+    let PropertyValue::String(path) = node.properties.get(PAINT_ORDER_PATH_PROPERTY)? else {
+        return None;
+    };
+    path.split('/')
+        .map(str::parse::<usize>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+}
+
+fn paint_order_path(scene: &SceneSnapshot, index: usize) -> Vec<(i32, usize, usize)> {
+    let mut path = Vec::new();
+    let mut current = Some(NodeHandle { index });
+
+    while let Some(handle) = current {
+        let Some(node) = scene.node(handle) else {
+            break;
+        };
+        path.push((node.z_index, node.child_index, handle.index()));
+        current = scene.parent_of(handle);
+    }
+
+    path.reverse();
+    path
+}
+
+fn is_ancestor(scene: &SceneSnapshot, ancestor_index: usize, descendant_index: usize) -> bool {
+    let mut current = scene.parent_of(NodeHandle {
+        index: descendant_index,
+    });
+    while let Some(parent) = current {
+        if parent.index() == ancestor_index {
+            return true;
+        }
+        current = scene.parent_of(parent);
+    }
+    false
 }
 
 /// Context exposed to predicates for relationship-aware matching.
@@ -438,5 +786,265 @@ mod tests {
             scene.parent_of(scene.find(&NodePredicate::id_eq("child")).unwrap()),
             None
         );
+    }
+
+    #[test]
+    fn selector_indexes_support_exact_and_fuzzy_lookup() {
+        let scene = SceneSnapshot::new(vec![
+            SemanticNode::new("run", Role::Button, rect())
+                .with_selector("toolbar.run")
+                .with_selector("run"),
+            SemanticNode::new("stop", Role::Button, rect()).with_selector("toolbar.stop"),
+        ]);
+
+        assert_eq!(scene.count(&NodePredicate::selector_eq("toolbar.run")), 1);
+        assert_eq!(
+            scene
+                .find(&NodePredicate::any_selector(crate::TextMatch::contains(
+                    "stop"
+                )))
+                .unwrap()
+                .index(),
+            1
+        );
+        assert!(!scene.exists(&NodePredicate::selector_eq("missing")));
+    }
+
+    #[test]
+    fn resolve_helpers_expose_bounds_centers_and_counts() {
+        let scene = SceneSnapshot::new(vec![
+            SemanticNode::new("run", Role::Button, rect()).with_selector("toolbar.run"),
+            SemanticNode::new(
+                "secondary",
+                Role::Button,
+                Rect::new(Point::new(20.0, 0.0), Size::new(10.0, 10.0)),
+            ),
+        ]);
+
+        assert_eq!(scene.count(&NodePredicate::role_eq(Role::Button)), 2);
+        assert_eq!(
+            scene
+                .bounds(&NodePredicate::selector_eq("toolbar.run"))
+                .unwrap(),
+            rect()
+        );
+        assert_eq!(
+            scene
+                .center(&NodePredicate::selector_eq("toolbar.run"))
+                .unwrap(),
+            Point::new(5.0, 5.0)
+        );
+        assert_eq!(
+            scene
+                .all_bounds(&NodePredicate::role_eq(Role::Button))
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn visible_bounds_fall_back_to_raw_bounds_when_visible_rect_is_unknown() {
+        let visible =
+            SceneSnapshot::new(vec![SemanticNode::new("provider", Role::Button, rect())
+                .with_selector("provider.button")]);
+
+        assert_eq!(
+            visible
+                .visible_bounds(&NodePredicate::selector_eq("provider.button"))
+                .unwrap(),
+            rect()
+        );
+        assert_eq!(
+            visible
+                .resolve(&NodePredicate::selector_eq("provider.button"))
+                .unwrap()
+                .visible_bounds,
+            Some(rect())
+        );
+
+        let hidden = SceneSnapshot::new(vec![SemanticNode {
+            visible: false,
+            ..SemanticNode::new("provider", Role::Button, rect()).with_selector("provider.button")
+        }]);
+        assert!(hidden
+            .visible_bounds(&NodePredicate::selector_eq("provider.button"))
+            .is_err());
+        assert_eq!(
+            hidden
+                .resolve(&NodePredicate::selector_eq("provider.button"))
+                .unwrap()
+                .visible_bounds,
+            None
+        );
+    }
+
+    #[test]
+    fn hit_path_orders_descendants_above_their_ancestors_within_one_subtree() {
+        let scene = SceneSnapshot::new(vec![
+            SemanticNode::new(
+                "parent",
+                Role::Container,
+                Rect::new(Point::new(0.0, 0.0), Size::new(20.0, 20.0)),
+            ),
+            SemanticNode::new(
+                "child",
+                Role::Button,
+                Rect::new(Point::new(5.0, 5.0), Size::new(10.0, 10.0)),
+            )
+            .with_parent("parent", 0),
+        ]);
+
+        let hit_path = scene.hit_path_at(Point::new(10.0, 10.0));
+        assert_eq!(scene.node(hit_path[0]).unwrap().id, "child");
+        assert_eq!(scene.topmost_at(Point::new(10.0, 10.0)), Some(hit_path[0]));
+    }
+
+    #[test]
+    fn hit_path_prefers_later_painted_sibling_subtrees_over_deeper_descendants() {
+        let scene = SceneSnapshot::new(vec![
+            SemanticNode::new(
+                "root",
+                Role::Container,
+                Rect::new(Point::new(0.0, 0.0), Size::new(20.0, 20.0)),
+            ),
+            SemanticNode::new(
+                "branch",
+                Role::Container,
+                Rect::new(Point::new(0.0, 0.0), Size::new(20.0, 20.0)),
+            )
+            .with_parent("root", 0),
+            SemanticNode::new(
+                "leaf",
+                Role::Button,
+                Rect::new(Point::new(5.0, 5.0), Size::new(10.0, 10.0)),
+            )
+            .with_parent("branch", 0),
+            SemanticNode::new(
+                "overlay",
+                Role::Button,
+                Rect::new(Point::new(5.0, 5.0), Size::new(10.0, 10.0)),
+            )
+            .with_parent("root", 1),
+        ]);
+
+        let hit_path = scene.hit_path_at(Point::new(10.0, 10.0));
+        let hit_ids = hit_path
+            .into_iter()
+            .map(|handle| scene.node(handle).unwrap().id.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(hit_ids[0], "overlay");
+        assert_eq!(hit_ids[1], "leaf");
+        assert_eq!(
+            scene
+                .node(scene.topmost_at(Point::new(10.0, 10.0)).unwrap())
+                .unwrap()
+                .id,
+            "overlay"
+        );
+    }
+
+    #[test]
+    fn hit_path_prefers_explicit_native_paint_paths_when_registered_parent_chain_is_reduced() {
+        let scene = SceneSnapshot::new(vec![
+            SemanticNode::new(
+                "root",
+                Role::Container,
+                Rect::new(Point::new(0.0, 0.0), Size::new(20.0, 20.0)),
+            )
+            .with_property(PAINT_ORDER_PATH_PROPERTY, PropertyValue::string("0")),
+            SemanticNode::new(
+                "left-leaf",
+                Role::Button,
+                Rect::new(Point::new(5.0, 5.0), Size::new(10.0, 10.0)),
+            )
+            .with_parent("root", 0)
+            .with_property(PAINT_ORDER_PATH_PROPERTY, PropertyValue::string("0/0/0")),
+            SemanticNode::new(
+                "right-overlay",
+                Role::Button,
+                Rect::new(Point::new(5.0, 5.0), Size::new(10.0, 10.0)),
+            )
+            .with_parent("root", 0)
+            .with_property(PAINT_ORDER_PATH_PROPERTY, PropertyValue::string("0/1/0")),
+        ]);
+
+        let hit_path = scene.hit_path_at(Point::new(10.0, 10.0));
+        let hit_ids = hit_path
+            .into_iter()
+            .map(|handle| scene.node(handle).unwrap().id.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(hit_ids[0], "right-overlay");
+        assert_eq!(hit_ids[1], "left-leaf");
+        assert!(matches!(
+            scene.interactability(&NodePredicate::id_eq("left-leaf")),
+            Ok(Interactability::Occluded { topmost, .. })
+                if scene.node(topmost).unwrap().id == "right-overlay"
+        ));
+    }
+
+    #[test]
+    fn interactability_distinguishes_interactable_and_occluded_nodes() {
+        let target = SemanticNode::new(
+            "target",
+            Role::Button,
+            Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0)),
+        );
+        let interactable_scene = SceneSnapshot::new(vec![target.clone()]);
+        assert!(matches!(
+            interactable_scene.interactability(&NodePredicate::id_eq("target")),
+            Ok(Interactability::Interactable { .. })
+        ));
+
+        let occluded_scene = SceneSnapshot::new(vec![
+            SemanticNode::new(
+                "root",
+                Role::Container,
+                Rect::new(Point::new(0.0, 0.0), Size::new(20.0, 20.0)),
+            ),
+            SemanticNode::new(
+                "branch",
+                Role::Container,
+                Rect::new(Point::new(0.0, 0.0), Size::new(20.0, 20.0)),
+            )
+            .with_parent("root", 0),
+            target.with_parent("branch", 0),
+            SemanticNode::new(
+                "overlay",
+                Role::Button,
+                Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0)),
+            )
+            .with_parent("root", 1),
+        ]);
+
+        assert!(matches!(
+            occluded_scene.interactability(&NodePredicate::id_eq("target")),
+            Ok(Interactability::Occluded { topmost, .. })
+                if occluded_scene.node(topmost).unwrap().id == "overlay"
+        ));
+    }
+
+    #[test]
+    fn interactability_uses_fallback_probe_points_when_center_is_occluded() {
+        let scene = SceneSnapshot::new(vec![
+            SemanticNode::new(
+                "target",
+                Role::Button,
+                Rect::new(Point::new(0.0, 0.0), Size::new(12.0, 12.0)),
+            ),
+            SemanticNode::new(
+                "overlay",
+                Role::Button,
+                Rect::new(Point::new(4.0, 4.0), Size::new(4.0, 4.0)),
+            )
+            .with_property(PAINT_ORDER_PATH_PROPERTY, PropertyValue::string("1")),
+        ]);
+
+        assert!(matches!(
+            scene.interactability(&NodePredicate::id_eq("target")),
+            Ok(Interactability::Interactable { hit_point })
+                if hit_point != Point::new(6.0, 6.0)
+        ));
     }
 }

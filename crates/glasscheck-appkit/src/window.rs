@@ -1,9 +1,8 @@
 #[cfg(target_os = "macos")]
 mod imp {
     use glasscheck_core::{
-        normalize_provider_nodes, InstrumentedNode, NodePredicate, Point, QueryRoot, Rect,
-        RegionResolveError, RegionSpec, Role, SceneSnapshot, SemanticNode, SemanticProvider, Size,
-        TextRange,
+        NodePredicate, Point, QueryRoot, Rect, RegionResolveError, RegionSpec, Role, SceneSnapshot,
+        SemanticNode, SemanticProvider, Size, TextRange,
     };
     use objc2::runtime::AnyObject;
     use objc2::{msg_send, rc::Retained, ClassType, MainThreadOnly};
@@ -13,7 +12,7 @@ mod imp {
     };
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSString};
     use std::cell::RefCell;
-    use std::collections::{BTreeSet, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     use crate::capture::{capture_view_image, crop_image_in_view_coordinates};
     use crate::input::AppKitInputDriver;
@@ -26,10 +25,49 @@ mod imp {
         Blocked,
     }
 
+    /// Semantic metadata registered for a view exposed to querying APIs.
+    #[derive(Clone, Debug)]
+    pub struct InstrumentedView {
+        /// Semantic identifier to expose in snapshots.
+        ///
+        /// Duplicate native identifiers are disambiguated when snapshots are built, so callers
+        /// should treat the resulting scene/query IDs as snapshot-local.
+        pub id: Option<String>,
+        /// Semantic role.
+        pub role: Option<Role>,
+        /// Human-readable label.
+        pub label: Option<String>,
+        /// Stable test-facing selectors or aliases.
+        pub selectors: Vec<String>,
+    }
+
+    /// Search strategy for semantic hit-point resolution.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct HitPointSearch {
+        pub strategy: HitPointStrategy,
+        pub sample_count: usize,
+    }
+
+    impl Default for HitPointSearch {
+        fn default() -> Self {
+            Self {
+                strategy: HitPointStrategy::VisibleCenterFirst,
+                sample_count: 9,
+            }
+        }
+    }
+
+    /// Candidate generation strategy for semantic hit-point resolution.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum HitPointStrategy {
+        VisibleCenterFirst,
+        Grid,
+        CornersAndCenter,
+    }
     #[derive(Clone, Debug)]
     struct RegisteredView {
         view: Retained<NSView>,
-        descriptor: InstrumentedNode,
+        descriptor: InstrumentedView,
     }
 
     #[derive(Clone, Debug)]
@@ -201,41 +239,64 @@ mod imp {
             AppKitInputDriver::new(window)
         }
 
-        /// Clicks the visual center of the unique node matching `predicate`.
+        /// Clicks the semantic hit point of the unique node matching `predicate`.
         pub fn click_node(&self, predicate: &NodePredicate) -> Result<(), RegionResolveError> {
+            self.click_node_with_search(predicate, &HitPointSearch::default())
+        }
+
+        /// Resolves a semantic hit point for the unique node matching `predicate`.
+        pub fn resolve_hit_point(
+            &self,
+            predicate: &NodePredicate,
+            search: &HitPointSearch,
+        ) -> Result<Point, RegionResolveError> {
             if self.detached_root_view {
                 return Err(RegionResolveError::DetachedRootView);
             }
             let scene = self.snapshot_scene();
-            let handle = scene.find(predicate).map_err(|error| match error {
-                glasscheck_core::QueryError::NotFoundPredicate(predicate) => {
-                    RegionResolveError::NotFound(predicate)
-                }
-                glasscheck_core::QueryError::MultiplePredicateMatches { predicate, count } => {
-                    RegionResolveError::MultipleMatches { predicate, count }
-                }
-                glasscheck_core::QueryError::NotFound(selector) => RegionResolveError::NotFound(
-                    NodePredicate::id_eq(selector.id.unwrap_or_default()),
-                ),
-                glasscheck_core::QueryError::MultipleMatches { selector, count } => {
-                    RegionResolveError::MultipleMatches {
-                        predicate: NodePredicate::id_eq(selector.id.unwrap_or_default()),
-                        count,
-                    }
-                }
-            })?;
+            let handle = scene.find(predicate).map_err(map_query_error)?;
             let node = scene
                 .node(handle)
                 .ok_or(RegionResolveError::InvalidHandle(handle))?;
             let root_view = self.root_view();
             let registered_view = self.registered_view_for_handle(handle, root_view.as_deref());
-            let (point, click_view) =
-                match self.click_target(root_view.as_deref(), registered_view.as_deref(), node) {
-                    Some((point, click_view)) => {
-                        (self.root_point_to_window_point(point), click_view)
-                    }
-                    None => return Err(RegionResolveError::InputUnavailable),
-                };
+            let (point, _) = self
+                .click_target(
+                    root_view.as_deref(),
+                    registered_view.as_deref(),
+                    node,
+                    search,
+                )
+                .ok_or(RegionResolveError::InputUnavailable)?;
+            let point = self.root_point_to_window_point(point);
+            Ok(Point::new(point.x, point.y))
+        }
+
+        /// Clicks the unique node matching `predicate` using semantic hit-point search.
+        pub fn click_node_with_search(
+            &self,
+            predicate: &NodePredicate,
+            search: &HitPointSearch,
+        ) -> Result<(), RegionResolveError> {
+            if self.detached_root_view {
+                return Err(RegionResolveError::DetachedRootView);
+            }
+            let scene = self.snapshot_scene();
+            let handle = scene.find(predicate).map_err(map_query_error)?;
+            let node = scene
+                .node(handle)
+                .ok_or(RegionResolveError::InvalidHandle(handle))?;
+            let root_view = self.root_view();
+            let registered_view = self.registered_view_for_handle(handle, root_view.as_deref());
+            let (point, click_view) = match self.click_target(
+                root_view.as_deref(),
+                registered_view.as_deref(),
+                node,
+                search,
+            ) {
+                Some((point, click_view)) => (self.root_point_to_window_point(point), click_view),
+                None => return Err(RegionResolveError::InputUnavailable),
+            };
             if let Some(view) = click_view.or(registered_view) {
                 if is_control_view(&view) {
                     unsafe {
@@ -310,7 +371,7 @@ mod imp {
         }
 
         /// Registers semantic metadata for a view so it can be queried later.
-        pub fn register_node(&self, view: &NSView, descriptor: InstrumentedNode) {
+        pub fn register_node(&self, view: &NSView, descriptor: InstrumentedView) {
             let retained = unsafe {
                 Retained::retain(view as *const NSView as *mut NSView)
                     .expect("registered view should retain successfully")
@@ -322,7 +383,7 @@ mod imp {
         }
 
         /// Compatibility wrapper for the legacy name.
-        pub fn register_view(&self, view: &NSView, descriptor: InstrumentedNode) {
+        pub fn register_view(&self, view: &NSView, descriptor: InstrumentedView) {
             self.register_node(view, descriptor);
         }
 
@@ -359,9 +420,18 @@ mod imp {
                             glasscheck_core::PropertyValue::String(source_id),
                         );
                     }
+                    node.properties.insert(
+                        "glasscheck:paint_order_path".into(),
+                        glasscheck_core::PropertyValue::String(native_paint_order_path(
+                            &entry.view,
+                            root_view.as_deref(),
+                        )),
+                    );
                     let (visible, visible_rect, hit_testable) =
                         native_visibility(&entry.view, root_view.as_deref());
                     node.label = entry.descriptor.label.clone();
+                    node.selectors
+                        .extend(entry.descriptor.selectors.iter().cloned());
                     node.visible = visible;
                     node.visible_rect = visible_rect;
                     node.hit_testable = hit_testable;
@@ -384,9 +454,19 @@ mod imp {
                     .iter()
                     .map(|node| node.id.clone())
                     .collect::<BTreeSet<_>>();
+                let native_parent_ids = registered_ids
+                    .values()
+                    .map(|registered| {
+                        registered
+                            .source_id
+                            .clone()
+                            .unwrap_or_else(|| registered.snapshot_id.clone())
+                    })
+                    .collect::<BTreeSet<_>>();
                 nodes.extend(normalize_provider_nodes(
                     provider.snapshot_nodes(),
                     &native_ids,
+                    &native_parent_ids,
                 ));
             }
 
@@ -488,28 +568,30 @@ mod imp {
             root_view: Option<&NSView>,
             target_view: Option<&NSView>,
             node: &SemanticNode,
+            search: &HitPointSearch,
         ) -> Option<(NSPoint, Option<Retained<NSView>>)> {
             let target_rect = node.visible_rect.unwrap_or(node.rect);
             if rect_is_empty_rect(target_rect) {
                 return None;
             }
-            let point = NSPoint::new(
-                target_rect.origin.x + target_rect.size.width / 2.0,
-                target_rect.origin.y + target_rect.size.height / 2.0,
-            );
-            if let Some(target_view) = target_view {
-                match self.resolve_registered_click_route(
-                    root_view,
-                    target_view,
-                    target_rect,
-                    point,
-                ) {
-                    RegisteredViewClickRoute::Target(view) => return Some((point, Some(view))),
-                    RegisteredViewClickRoute::Descendant(view) => return Some((point, Some(view))),
-                    RegisteredViewClickRoute::Blocked => return None,
+            for point in hit_point_candidates(target_rect, search) {
+                if let Some(target_view) = target_view {
+                    match self.resolve_registered_click_route(
+                        root_view,
+                        target_view,
+                        target_rect,
+                        point,
+                    ) {
+                        RegisteredViewClickRoute::Target(view) => return Some((point, Some(view))),
+                        RegisteredViewClickRoute::Descendant(view) => {
+                            return Some((point, Some(view)))
+                        }
+                        RegisteredViewClickRoute::Blocked => continue,
+                    }
                 }
+                return Some((point, None));
             }
-            Some((point, None))
+            None
         }
 
         fn resolve_registered_click_route(
@@ -610,21 +692,20 @@ mod imp {
         root_view: Option<&NSView>,
         visible_rect: Rect,
     ) -> bool {
-        let point = NSPoint::new(
-            visible_rect.origin.x + visible_rect.size.width / 2.0,
-            visible_rect.origin.y + visible_rect.size.height / 2.0,
-        );
+        hit_point_candidates(visible_rect, &HitPointSearch::default())
+            .into_iter()
+            .any(|point| {
+                let hit = match root_view {
+                    Some(root_view) => root_view.hitTest(point),
+                    None => view.hitTest(NSPoint::new(
+                        point.x - visible_rect.origin.x,
+                        point.y - visible_rect.origin.y,
+                    )),
+                };
 
-        let hit = match root_view {
-            Some(root_view) => root_view.hitTest(point),
-            None => view.hitTest(NSPoint::new(
-                visible_rect.size.width / 2.0,
-                visible_rect.size.height / 2.0,
-            )),
-        };
-
-        hit.as_deref()
-            .is_some_and(|hit| std::ptr::eq(hit, view) || is_descendant_of_view(hit, view))
+                hit.as_deref()
+                    .is_some_and(|hit| std::ptr::eq(hit, view) || is_descendant_of_view(hit, view))
+            })
     }
 
     fn registered_view_hit_test(
@@ -761,8 +842,8 @@ mod imp {
                     format!("native::{stable_id}#{occurrence}")
                 };
                 *occurrence += 1;
-                let source_id =
-                    (stable_counts.get(&stable_id).copied().unwrap_or(0) > 1).then(|| stable_id);
+                let source_id = (stable_counts.get(&stable_id).copied().unwrap_or(0) > 1)
+                    .then(|| stable_id.clone());
 
                 (
                     &*entry.view as *const NSView,
@@ -773,6 +854,35 @@ mod imp {
                 )
             })
             .collect()
+    }
+
+    fn native_paint_order_path(view: &NSView, root_view: Option<&NSView>) -> String {
+        let mut segments = Vec::new();
+        let mut current = unsafe {
+            Retained::retain(view as *const NSView as *mut NSView)
+                .expect("paint-order view retention should succeed")
+        };
+
+        loop {
+            if let Some(parent) = unsafe { current.superview() } {
+                segments.push(sibling_index(&current, &parent));
+                if root_view.is_some_and(|root| std::ptr::eq(&*parent, root)) {
+                    segments.push(0);
+                    break;
+                }
+                current = parent;
+            } else {
+                segments.push(0);
+                break;
+            }
+        }
+
+        segments.reverse();
+        segments
+            .into_iter()
+            .map(|segment| format!("{segment:010}"))
+            .collect::<Vec<_>>()
+            .join("/")
     }
 
     fn registered_ancestor_id(
@@ -801,17 +911,226 @@ mod imp {
             .sum::<usize>()
     }
 
+    fn normalize_provider_nodes(
+        mut nodes: Vec<SemanticNode>,
+        native_ids: &BTreeSet<String>,
+        native_parent_ids: &BTreeSet<String>,
+    ) -> Vec<SemanticNode> {
+        let provider_ids = nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+        let original_counts = provider_ids.iter().fold(BTreeMap::new(), |mut counts, id| {
+            *counts.entry(id.clone()).or_default() += 1;
+            counts
+        });
+        let needs_namespace =
+            provider_ids.iter().any(|id| native_ids.contains(id)) || has_duplicates(&provider_ids);
+        if !needs_namespace {
+            for node in &mut nodes {
+                node.properties
+                    .entry("glasscheck:source_id".into())
+                    .or_insert_with(|| glasscheck_core::PropertyValue::String(node.id.clone()));
+            }
+            let identity_ids = provider_ids
+                .iter()
+                .filter(|id| original_counts.get(*id).copied() == Some(1))
+                .map(|id| (id.clone(), id.clone()))
+                .collect::<BTreeMap<_, _>>();
+            repair_provider_parent_ids(
+                &mut nodes,
+                &original_counts,
+                &identity_ids,
+                native_parent_ids,
+                true,
+            );
+            return nodes;
+        }
+
+        let mut original_to_unique = BTreeMap::<String, String>::new();
+        let mut assigned_counts = BTreeMap::<String, usize>::new();
+
+        for node in &mut nodes {
+            let original_id = node.id.clone();
+            let base_id = format!("provider::{original_id}");
+            let occurrence = assigned_counts.entry(base_id.clone()).or_default();
+            let unique_id = if *occurrence == 0 {
+                base_id.clone()
+            } else {
+                format!("{base_id}#{occurrence}")
+            };
+            *occurrence += 1;
+            node.id = unique_id.clone();
+            node.properties.insert(
+                "glasscheck:source_id".into(),
+                glasscheck_core::PropertyValue::String(original_id),
+            );
+        }
+
+        for node in &nodes {
+            let Some(glasscheck_core::PropertyValue::String(original_id)) =
+                node.properties.get("glasscheck:source_id")
+            else {
+                continue;
+            };
+            if original_counts.get(original_id).copied().unwrap_or(0) == 1 {
+                original_to_unique.insert(original_id.clone(), node.id.clone());
+            }
+        }
+
+        repair_provider_parent_ids(
+            &mut nodes,
+            &original_counts,
+            &original_to_unique,
+            native_parent_ids,
+            false,
+        );
+
+        nodes
+    }
+
+    fn repair_provider_parent_ids(
+        nodes: &mut [SemanticNode],
+        original_counts: &BTreeMap<String, usize>,
+        original_to_unique: &BTreeMap<String, String>,
+        native_parent_ids: &BTreeSet<String>,
+        allow_unique_native_parents: bool,
+    ) {
+        for node in nodes {
+            if let Some(parent_id) = node.parent_id.as_ref() {
+                if original_counts.get(parent_id).copied().unwrap_or(0) == 1 {
+                    node.parent_id = original_to_unique.get(parent_id).cloned();
+                } else if allow_unique_native_parents && native_parent_ids.contains(parent_id) {
+                    node.parent_id = Some(parent_id.clone());
+                } else {
+                    node.properties.insert(
+                        "glasscheck:ambiguous_parent_id".into(),
+                        glasscheck_core::PropertyValue::String(parent_id.clone()),
+                    );
+                    node.parent_id = None;
+                }
+            }
+        }
+    }
+
+    fn has_duplicates(ids: &[String]) -> bool {
+        let mut seen = BTreeSet::new();
+        ids.iter().any(|id| !seen.insert(id.clone()))
+    }
+
     fn ns_range_for_scalar_range(view: &NSTextView, range: TextRange) -> NSRange {
         let content = view.string().to_string();
         let start = scalar_index_to_utf16_offset(&content, range.start);
         let end = scalar_index_to_utf16_offset(&content, range.start + range.len);
         NSRange::new(start, end.saturating_sub(start))
     }
+
+    fn hit_point_candidates(rect: Rect, search: &HitPointSearch) -> Vec<NSPoint> {
+        match search.strategy {
+            HitPointStrategy::VisibleCenterFirst => {
+                let center = NSPoint::new(
+                    rect.origin.x + rect.size.width / 2.0,
+                    rect.origin.y + rect.size.height / 2.0,
+                );
+                let mut points = vec![center];
+                for point in hit_point_candidates(
+                    rect,
+                    &HitPointSearch {
+                        strategy: HitPointStrategy::Grid,
+                        sample_count: search.sample_count.max(9),
+                    },
+                ) {
+                    if !points
+                        .iter()
+                        .any(|candidate| candidate.x == point.x && candidate.y == point.y)
+                    {
+                        points.push(point);
+                    }
+                }
+                points
+            }
+            HitPointStrategy::CornersAndCenter => vec![
+                NSPoint::new(rect.origin.x, rect.origin.y),
+                NSPoint::new(rect.origin.x + rect.size.width, rect.origin.y),
+                NSPoint::new(rect.origin.x, rect.origin.y + rect.size.height),
+                NSPoint::new(
+                    rect.origin.x + rect.size.width,
+                    rect.origin.y + rect.size.height,
+                ),
+                NSPoint::new(
+                    rect.origin.x + rect.size.width / 2.0,
+                    rect.origin.y + rect.size.height / 2.0,
+                ),
+            ],
+            HitPointStrategy::Grid => {
+                let dimension = (search.sample_count.max(4) as f64).sqrt().ceil() as usize;
+                let mut points = Vec::new();
+                for row in 0..dimension {
+                    for column in 0..dimension {
+                        points.push(NSPoint::new(
+                            rect.origin.x
+                                + rect.size.width * ((column as f64 + 0.5) / dimension as f64),
+                            rect.origin.y
+                                + rect.size.height * ((row as f64 + 0.5) / dimension as f64),
+                        ));
+                    }
+                }
+                points
+            }
+        }
+    }
+
+    fn map_query_error(error: glasscheck_core::QueryError) -> RegionResolveError {
+        match error {
+            glasscheck_core::QueryError::NotFoundPredicate(predicate) => {
+                RegionResolveError::NotFound(predicate)
+            }
+            glasscheck_core::QueryError::MultiplePredicateMatches { predicate, count } => {
+                RegionResolveError::MultipleMatches { predicate, count }
+            }
+            glasscheck_core::QueryError::NotFound(selector) => {
+                RegionResolveError::NotFound(NodePredicate::id_eq(selector.id.unwrap_or_default()))
+            }
+            glasscheck_core::QueryError::MultipleMatches { selector, count } => {
+                RegionResolveError::MultipleMatches {
+                    predicate: NodePredicate::id_eq(selector.id.unwrap_or_default()),
+                    count,
+                }
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
+    #[derive(Clone, Debug)]
+    pub struct InstrumentedView {
+        pub id: Option<String>,
+        pub role: Option<glasscheck_core::Role>,
+        pub label: Option<String>,
+        pub selectors: Vec<String>,
+    }
     pub struct AppKitWindowHost;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct HitPointSearch {
+        pub strategy: HitPointStrategy,
+        pub sample_count: usize,
+    }
+
+    impl Default for HitPointSearch {
+        fn default() -> Self {
+            Self {
+                strategy: HitPointStrategy::VisibleCenterFirst,
+                sample_count: 9,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum HitPointStrategy {
+        VisibleCenterFirst,
+        Grid,
+        CornersAndCenter,
+    }
 }
 
-pub use imp::AppKitWindowHost;
+#[allow(unused_imports)]
+pub use imp::{AppKitWindowHost, HitPointSearch, HitPointStrategy, InstrumentedView};

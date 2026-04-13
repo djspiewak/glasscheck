@@ -2,6 +2,9 @@
 
 Functional testing primitives for native UI applications written in Rust.
 
+Much of the semantic scene/query/wait functionality in `glasscheck` is directly inspired by
+[Zed](https://github.com/zed-industries/zed)'s test harness design.
+
 The intended use-case is stable, maintainable, sandbox-friendly assertions around real UI state:
 
 - query instrumented views by semantic metadata

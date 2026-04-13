@@ -217,6 +217,8 @@ pub(crate) fn predicate_is_metadata_supported(predicate: &NodePredicate) -> bool
     match predicate {
         NodePredicate::IdEq(_) | NodePredicate::RoleEq(_) | NodePredicate::Label(_) => true,
         NodePredicate::Value(_)
+        | NodePredicate::SelectorEq(_)
+        | NodePredicate::AnySelector(_)
         | NodePredicate::ClassEq(_)
         | NodePredicate::TagEq(_)
         | NodePredicate::PropertyEq(_, _)
@@ -241,6 +243,8 @@ pub(crate) fn predicate_matches_metadata(predicate: &NodePredicate, node: &NodeM
             .as_deref()
             .is_some_and(|label| matcher.matches(label)),
         NodePredicate::Value(_)
+        | NodePredicate::SelectorEq(_)
+        | NodePredicate::AnySelector(_)
         | NodePredicate::ClassEq(_)
         | NodePredicate::TagEq(_)
         | NodePredicate::PropertyEq(_, _)
@@ -266,6 +270,14 @@ pub enum TextMatch {
     Contains(String),
     /// Match when the candidate starts with the prefix.
     StartsWith(String),
+    /// Match when the candidate ends with the suffix.
+    EndsWith(String),
+    /// Match using lowercase normalization on both matcher and candidate.
+    CaseInsensitive(Box<TextMatch>),
+    /// Match after trimming and collapsing repeated whitespace.
+    NormalizedWhitespace(Box<TextMatch>),
+    /// Match when any alternative matches.
+    OneOf(Vec<TextMatch>),
 }
 
 impl TextMatch {
@@ -287,6 +299,30 @@ impl TextMatch {
         Self::StartsWith(value.into())
     }
 
+    /// Creates a suffix matcher.
+    #[must_use]
+    pub fn ends_with(value: impl Into<String>) -> Self {
+        Self::EndsWith(value.into())
+    }
+
+    /// Creates a case-insensitive matcher.
+    #[must_use]
+    pub fn case_insensitive(matcher: TextMatch) -> Self {
+        Self::CaseInsensitive(Box::new(matcher))
+    }
+
+    /// Creates a matcher that normalizes whitespace before matching.
+    #[must_use]
+    pub fn normalized_whitespace(matcher: TextMatch) -> Self {
+        Self::NormalizedWhitespace(Box::new(matcher))
+    }
+
+    /// Creates a matcher that succeeds when any alternative matches.
+    #[must_use]
+    pub fn one_of(matchers: Vec<TextMatch>) -> Self {
+        Self::OneOf(matchers)
+    }
+
     /// Returns `true` when `candidate` satisfies this matcher.
     #[must_use]
     pub fn matches(&self, candidate: &str) -> bool {
@@ -294,6 +330,12 @@ impl TextMatch {
             Self::Exact(expected) => candidate == expected,
             Self::Contains(expected) => candidate.contains(expected),
             Self::StartsWith(expected) => candidate.starts_with(expected),
+            Self::EndsWith(expected) => candidate.ends_with(expected),
+            Self::CaseInsensitive(matcher) => matcher_matches_case_insensitive(matcher, candidate),
+            Self::NormalizedWhitespace(matcher) => {
+                matcher.matches(&normalize_whitespace(candidate))
+            }
+            Self::OneOf(matchers) => matchers.iter().any(|matcher| matcher.matches(candidate)),
         }
     }
 }
@@ -303,6 +345,10 @@ impl TextMatch {
 pub enum NodePredicate {
     /// Match an exact semantic identifier.
     IdEq(String),
+    /// Match an exact selector alias.
+    SelectorEq(String),
+    /// Match any selector using the supplied text semantics.
+    AnySelector(TextMatch),
     /// Match an exact semantic role.
     RoleEq(Role),
     /// Match a label with the supplied text semantics.
@@ -334,6 +380,18 @@ impl NodePredicate {
     #[must_use]
     pub fn id_eq(id: impl Into<String>) -> Self {
         Self::IdEq(id.into())
+    }
+
+    /// Creates an exact selector predicate.
+    #[must_use]
+    pub fn selector_eq(selector: impl Into<String>) -> Self {
+        Self::SelectorEq(selector.into())
+    }
+
+    /// Creates an any-selector predicate.
+    #[must_use]
+    pub fn any_selector(matcher: TextMatch) -> Self {
+        Self::AnySelector(matcher)
     }
 
     /// Creates an exact semantic-role predicate.
@@ -395,6 +453,11 @@ impl NodePredicate {
     pub(crate) fn matches<C: PredicateContext>(&self, context: &C, node: &SemanticNode) -> bool {
         match self {
             Self::IdEq(id) => node.id == *id,
+            Self::SelectorEq(selector) => node.selectors.contains(selector),
+            Self::AnySelector(matcher) => node
+                .selectors
+                .iter()
+                .any(|selector| matcher.matches(selector)),
             Self::RoleEq(role) => node.role == *role,
             Self::Label(matcher) => node
                 .label
@@ -420,6 +483,27 @@ impl NodePredicate {
                 .iter()
                 .any(|predicate| predicate.matches(context, node)),
         }
+    }
+}
+
+fn normalize_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn matcher_matches_case_insensitive(matcher: &TextMatch, candidate: &str) -> bool {
+    let lower_candidate = candidate.to_lowercase();
+    match matcher {
+        TextMatch::Exact(expected) => lower_candidate == expected.to_lowercase(),
+        TextMatch::Contains(expected) => lower_candidate.contains(&expected.to_lowercase()),
+        TextMatch::StartsWith(expected) => lower_candidate.starts_with(&expected.to_lowercase()),
+        TextMatch::EndsWith(expected) => lower_candidate.ends_with(&expected.to_lowercase()),
+        TextMatch::CaseInsensitive(inner) => matcher_matches_case_insensitive(inner, candidate),
+        TextMatch::NormalizedWhitespace(inner) => {
+            matcher_matches_case_insensitive(inner, &normalize_whitespace(candidate))
+        }
+        TextMatch::OneOf(matchers) => matchers
+            .iter()
+            .any(|matcher| matcher_matches_case_insensitive(matcher, candidate)),
     }
 }
 
@@ -521,5 +605,75 @@ mod tests {
             root.find_by_predicate(&NodePredicate::id_eq("missing")),
             Err(RegionResolveError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn selector_predicates_match_scene_backed_selectors() {
+        let scene = SceneSnapshot::new(vec![
+            SemanticNode::new("primary", Role::Button, rect())
+                .with_selector("toolbar.run")
+                .with_selector("run"),
+            SemanticNode::new("secondary", Role::Button, rect()).with_selector("toolbar.stop"),
+        ]);
+
+        let root = QueryRoot::from_scene(scene);
+        assert_eq!(
+            root.find_by_predicate(&NodePredicate::selector_eq("toolbar.run"))
+                .unwrap()
+                .id
+                .as_deref(),
+            Some("primary")
+        );
+        assert_eq!(
+            root.find_by_predicate(&NodePredicate::any_selector(TextMatch::contains("stop")))
+                .unwrap()
+                .id
+                .as_deref(),
+            Some("secondary")
+        );
+    }
+
+    #[test]
+    fn selector_predicates_do_not_match_compatibility_roots() {
+        let root = QueryRoot::new(vec![NodeMetadata {
+            id: Some("button".into()),
+            role: Some(Role::Button),
+            label: Some("Run".into()),
+            rect: rect(),
+        }]);
+
+        assert!(matches!(
+            root.find_by_predicate(&NodePredicate::selector_eq("toolbar.run")),
+            Err(RegionResolveError::NotFound(_))
+        ));
+        assert!(root
+            .find_all_by_predicate(&NodePredicate::any_selector(TextMatch::contains("run")))
+            .is_empty());
+    }
+
+    #[test]
+    fn text_match_extensions_cover_positive_and_negative_cases() {
+        assert!(TextMatch::ends_with("Panel").matches("Editor Panel"));
+        assert!(!TextMatch::ends_with("Panel").matches("Panel Editor"));
+
+        assert!(TextMatch::case_insensitive(TextMatch::exact("run")).matches("RUN"));
+        assert!(!TextMatch::case_insensitive(TextMatch::exact("run")).matches("stop"));
+
+        assert!(
+            TextMatch::normalized_whitespace(TextMatch::exact("Run Tests"))
+                .matches("  Run   Tests ")
+        );
+        assert!(
+            !TextMatch::normalized_whitespace(TextMatch::exact("Run Tests")).matches("Run Faster")
+        );
+
+        assert!(
+            TextMatch::one_of(vec![TextMatch::exact("Run"), TextMatch::exact("Build")])
+                .matches("Build")
+        );
+        assert!(
+            !TextMatch::one_of(vec![TextMatch::exact("Run"), TextMatch::exact("Build")])
+                .matches("Test")
+        );
     }
 }

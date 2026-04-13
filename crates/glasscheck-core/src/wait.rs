@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use crate::{Image, SceneSnapshot};
+use crate::{
+    Image, LayoutTolerance, NodePredicate, PropertyValue, Rect, ResolvedNode, SceneSnapshot,
+};
 
 /// Polling configuration for asynchronous UI assertions.
 #[derive(Clone, Copy, Debug)]
@@ -47,6 +49,39 @@ impl std::fmt::Display for PollError {
 }
 
 impl std::error::Error for PollError {}
+
+/// Errors returned by semantic wait helpers.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WaitError {
+    /// The condition did not succeed before the timeout elapsed.
+    Timeout {
+        elapsed: Duration,
+        attempts: usize,
+        last_scene: Option<SceneSnapshot>,
+        last_matches: Vec<ResolvedNode>,
+    },
+    /// A capture source could not provide a scene.
+    CaptureFailed(&'static str),
+}
+
+impl std::fmt::Display for WaitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout {
+                elapsed, attempts, ..
+            } => {
+                write!(
+                    f,
+                    "condition timed out after {:?} ({} attempts)",
+                    elapsed, attempts
+                )
+            }
+            Self::CaptureFailed(message) => write!(f, "capture failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for WaitError {}
 
 /// Repeatedly evaluates `predicate` until it returns `true` or times out.
 ///
@@ -170,6 +205,220 @@ where
 pub struct WaitArtifacts {
     /// Paths to captured frames.
     pub frames: Vec<PathBuf>,
+}
+
+/// Waits for a predicate to exist in the captured scene.
+pub fn wait_for_exists<F>(
+    options: PollOptions,
+    capture: F,
+    predicate: &NodePredicate,
+) -> Result<SceneSnapshot, WaitError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+{
+    wait_for_scene_match(options, capture, predicate, |scene, predicate| {
+        scene.exists(predicate)
+    })
+}
+
+/// Waits for a predicate to become absent from the captured scene.
+pub fn wait_for_absent<F>(
+    options: PollOptions,
+    capture: F,
+    predicate: &NodePredicate,
+) -> Result<SceneSnapshot, WaitError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+{
+    wait_for_scene_match(options, capture, predicate, |scene, predicate| {
+        !scene.exists(predicate)
+    })
+}
+
+/// Waits for a predicate to resolve to a visible node.
+pub fn wait_for_visible<F>(
+    options: PollOptions,
+    capture: F,
+    predicate: &NodePredicate,
+) -> Result<ResolvedNode, WaitError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+{
+    wait_for_resolved(options, capture, predicate, |resolved| {
+        resolved.visible_bounds.is_some()
+    })
+}
+
+/// Waits for a predicate to resolve to an interactable node.
+pub fn wait_for_hit_testable<F>(
+    options: PollOptions,
+    capture: F,
+    predicate: &NodePredicate,
+) -> Result<ResolvedNode, WaitError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+{
+    wait_for_resolved(options, capture, predicate, |resolved| {
+        resolved.interactability.is_hit_testable()
+    })
+}
+
+/// Waits for a predicate to match the expected count.
+pub fn wait_for_count<F>(
+    options: PollOptions,
+    capture: F,
+    predicate: &NodePredicate,
+    expected: usize,
+) -> Result<SceneSnapshot, WaitError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+{
+    wait_for_scene_match(options, capture, predicate, |scene, predicate| {
+        scene.count(predicate) == expected
+    })
+}
+
+/// Waits for a predicate to expose a property value.
+pub fn wait_for_property<F>(
+    options: PollOptions,
+    capture: F,
+    predicate: &NodePredicate,
+    key: &str,
+    expected: &PropertyValue,
+) -> Result<ResolvedNode, WaitError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+{
+    wait_for_resolved(options, capture, predicate, |resolved| {
+        resolved.node.properties.get(key) == Some(expected)
+    })
+}
+
+/// Waits for a predicate to expose a state value.
+pub fn wait_for_state<F>(
+    options: PollOptions,
+    capture: F,
+    predicate: &NodePredicate,
+    key: &str,
+    expected: &PropertyValue,
+) -> Result<ResolvedNode, WaitError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+{
+    wait_for_resolved(options, capture, predicate, |resolved| {
+        resolved.node.state.get(key) == Some(expected)
+    })
+}
+
+/// Waits for a predicate to reach the expected bounds.
+pub fn wait_for_bounds<F>(
+    options: PollOptions,
+    capture: F,
+    predicate: &NodePredicate,
+    expected: Rect,
+    tolerance: LayoutTolerance,
+) -> Result<ResolvedNode, WaitError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+{
+    wait_for_resolved(options, capture, predicate, |resolved| {
+        (resolved.bounds.origin.x - expected.origin.x).abs() <= tolerance.position
+            && (resolved.bounds.origin.y - expected.origin.y).abs() <= tolerance.position
+            && (resolved.bounds.size.width - expected.size.width).abs() <= tolerance.size
+            && (resolved.bounds.size.height - expected.size.height).abs() <= tolerance.size
+    })
+}
+
+/// Waits for a predicate to become interactable.
+pub fn wait_for_interactable<F>(
+    options: PollOptions,
+    capture: F,
+    predicate: &NodePredicate,
+) -> Result<ResolvedNode, WaitError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+{
+    wait_for_resolved(options, capture, predicate, |resolved| {
+        matches!(
+            resolved.interactability,
+            crate::Interactability::Interactable { .. }
+        )
+    })
+}
+
+fn wait_for_scene_match<F, P>(
+    options: PollOptions,
+    mut capture: F,
+    predicate: &NodePredicate,
+    mut matches_scene: P,
+) -> Result<SceneSnapshot, WaitError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+    P: FnMut(&SceneSnapshot, &NodePredicate) -> bool,
+{
+    let start = Instant::now();
+    let mut attempts = 0usize;
+    loop {
+        attempts += 1;
+        let scene = capture().ok_or(WaitError::CaptureFailed("scene source returned None"))?;
+        let last_matches: Vec<ResolvedNode> = scene
+            .resolve_all(predicate)
+            .into_iter()
+            .map(ResolvedNode::from)
+            .collect();
+        if matches_scene(&scene, predicate) {
+            return Ok(scene);
+        }
+        let last_scene = Some(scene);
+        if start.elapsed() >= options.timeout {
+            return Err(WaitError::Timeout {
+                elapsed: start.elapsed(),
+                attempts,
+                last_scene,
+                last_matches,
+            });
+        }
+        sleep(options.interval);
+    }
+}
+
+fn wait_for_resolved<F, P>(
+    options: PollOptions,
+    mut capture: F,
+    predicate: &NodePredicate,
+    mut matches_resolved: P,
+) -> Result<ResolvedNode, WaitError>
+where
+    F: FnMut() -> Option<SceneSnapshot>,
+    P: FnMut(&ResolvedNode) -> bool,
+{
+    let start = Instant::now();
+    let mut attempts = 0usize;
+    loop {
+        attempts += 1;
+        let scene = capture().ok_or(WaitError::CaptureFailed("scene source returned None"))?;
+        let last_matches: Vec<ResolvedNode> = scene
+            .resolve_all(predicate)
+            .into_iter()
+            .map(ResolvedNode::from)
+            .collect();
+        if let Ok(resolved) = scene.resolve(predicate) {
+            let resolved = ResolvedNode::from(resolved);
+            if matches_resolved(&resolved) {
+                return Ok(resolved);
+            }
+        }
+        let last_scene = Some(scene);
+        if start.elapsed() >= options.timeout {
+            return Err(WaitError::Timeout {
+                elapsed: start.elapsed(),
+                attempts,
+                last_scene,
+                last_matches,
+            });
+        }
+        sleep(options.interval);
+    }
 }
 
 #[cfg(test)]
@@ -306,5 +555,262 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, PollError::Timeout { .. }));
+    }
+
+    #[test]
+    fn semantic_waits_cover_success_and_failure_cases() {
+        let mut scenes = vec![
+            scene(1),
+            scene(2),
+            SceneSnapshot::new(vec![crate::SemanticNode::new(
+                "node-3",
+                crate::Role::Container,
+                crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(10.0, 10.0)),
+            )
+            .with_selector("target")
+            .with_property("value", crate::PropertyValue::Integer(3))]),
+        ]
+        .into_iter();
+
+        let resolved = wait_for_exists(
+            PollOptions {
+                timeout: Duration::from_millis(50),
+                interval: Duration::from_millis(1),
+            },
+            || scenes.next(),
+            &crate::NodePredicate::selector_eq("target"),
+        )
+        .unwrap();
+        assert!(resolved.exists(&crate::NodePredicate::selector_eq("target")));
+
+        let stable_missing = SceneSnapshot::new(vec![crate::SemanticNode::new(
+            "node",
+            crate::Role::Container,
+            crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(10.0, 10.0)),
+        )]);
+        let error = wait_for_exists(
+            PollOptions {
+                timeout: Duration::from_millis(5),
+                interval: Duration::from_millis(1),
+            },
+            || Some(stable_missing.clone()),
+            &crate::NodePredicate::selector_eq("missing"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, WaitError::Timeout { .. }));
+    }
+
+    #[test]
+    fn semantic_wait_for_property_and_absence_cover_pass_and_fail_cases() {
+        let mut scenes = vec![
+            SceneSnapshot::new(vec![crate::SemanticNode::new(
+                "node",
+                crate::Role::Container,
+                crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(10.0, 10.0)),
+            )
+            .with_selector("target")]),
+            SceneSnapshot::new(vec![crate::SemanticNode::new(
+                "node",
+                crate::Role::Container,
+                crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(10.0, 10.0)),
+            )
+            .with_selector("target")
+            .with_property("ready", crate::PropertyValue::Bool(true))]),
+        ]
+        .into_iter();
+
+        assert!(wait_for_property(
+            PollOptions {
+                timeout: Duration::from_millis(50),
+                interval: Duration::from_millis(1),
+            },
+            || scenes.next(),
+            &crate::NodePredicate::selector_eq("target"),
+            "ready",
+            &crate::PropertyValue::Bool(true),
+        )
+        .is_ok());
+
+        let mut scenes = vec![SceneSnapshot::new(Vec::new())].into_iter();
+        assert!(wait_for_absent(
+            PollOptions {
+                timeout: Duration::from_millis(20),
+                interval: Duration::from_millis(1),
+            },
+            || scenes.next(),
+            &crate::NodePredicate::selector_eq("target"),
+        )
+        .is_ok());
+
+        let error = wait_for_visible(
+            PollOptions {
+                timeout: Duration::from_millis(20),
+                interval: Duration::from_millis(1),
+            },
+            || None,
+            &crate::NodePredicate::selector_eq("target"),
+        )
+        .unwrap_err();
+        assert!(matches!(error, WaitError::CaptureFailed(_)));
+    }
+
+    #[test]
+    fn wait_for_visible_supports_visible_nodes_without_known_visible_rect_and_times_out_when_hidden(
+    ) {
+        let mut visible_scenes = vec![SceneSnapshot::new(vec![crate::SemanticNode::new(
+            "node",
+            crate::Role::Button,
+            crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(10.0, 10.0)),
+        )
+        .with_selector("provider.button")])]
+        .into_iter();
+
+        let resolved = wait_for_visible(
+            PollOptions {
+                timeout: Duration::from_millis(20),
+                interval: Duration::from_millis(1),
+            },
+            || visible_scenes.next(),
+            &crate::NodePredicate::selector_eq("provider.button"),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved.visible_bounds,
+            Some(crate::Rect::new(
+                crate::Point::new(0.0, 0.0),
+                crate::Size::new(10.0, 10.0),
+            ))
+        );
+
+        let hidden_scene = SceneSnapshot::new(vec![crate::SemanticNode {
+            visible: false,
+            ..crate::SemanticNode::new(
+                "node",
+                crate::Role::Button,
+                crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(10.0, 10.0)),
+            )
+            .with_selector("provider.button")
+        }]);
+        let error = wait_for_visible(
+            PollOptions {
+                timeout: Duration::from_millis(5),
+                interval: Duration::from_millis(1),
+            },
+            || Some(hidden_scene.clone()),
+            &crate::NodePredicate::selector_eq("provider.button"),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            WaitError::Timeout {
+                last_matches,
+                ..
+            } if last_matches.len() == 1 && last_matches[0].visible_bounds.is_none()
+        ));
+    }
+
+    #[test]
+    fn wait_for_hit_testable_accepts_occluded_nodes_and_rejects_not_hit_testable_ones() {
+        let mut occluded_scenes = vec![SceneSnapshot::new(vec![
+            crate::SemanticNode::new(
+                "root",
+                crate::Role::Container,
+                crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(20.0, 20.0)),
+            ),
+            crate::SemanticNode::new(
+                "target",
+                crate::Role::Button,
+                crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(10.0, 10.0)),
+            )
+            .with_selector("target")
+            .with_parent("root", 0),
+            crate::SemanticNode::new(
+                "overlay",
+                crate::Role::Button,
+                crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(10.0, 10.0)),
+            )
+            .with_parent("root", 1),
+        ])]
+        .into_iter();
+
+        let resolved = wait_for_hit_testable(
+            PollOptions {
+                timeout: Duration::from_millis(20),
+                interval: Duration::from_millis(1),
+            },
+            || occluded_scenes.next(),
+            &crate::NodePredicate::selector_eq("target"),
+        )
+        .unwrap();
+        assert!(matches!(
+            resolved.interactability,
+            crate::Interactability::Occluded { .. }
+        ));
+
+        let non_hit_testable = SceneSnapshot::new(vec![crate::SemanticNode {
+            hit_testable: false,
+            ..crate::SemanticNode::new(
+                "target",
+                crate::Role::Button,
+                crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(10.0, 10.0)),
+            )
+            .with_selector("target")
+        }]);
+        let error = wait_for_hit_testable(
+            PollOptions {
+                timeout: Duration::from_millis(5),
+                interval: Duration::from_millis(1),
+            },
+            || Some(non_hit_testable.clone()),
+            &crate::NodePredicate::selector_eq("target"),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            WaitError::Timeout {
+                last_matches,
+                ..
+            } if last_matches.len() == 1
+                && matches!(
+                    last_matches[0].interactability,
+                    crate::Interactability::NotHitTestable
+                )
+        ));
+    }
+
+    #[test]
+    fn resolved_waits_do_not_succeed_while_predicate_is_ambiguous() {
+        let ambiguous_scene = SceneSnapshot::new(vec![
+            crate::SemanticNode::new(
+                "first",
+                crate::Role::Button,
+                crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(10.0, 10.0)),
+            )
+            .with_selector("target"),
+            crate::SemanticNode::new(
+                "second",
+                crate::Role::Button,
+                crate::Rect::new(crate::Point::new(20.0, 0.0), crate::Size::new(10.0, 10.0)),
+            )
+            .with_selector("target"),
+        ]);
+
+        let error = wait_for_visible(
+            PollOptions {
+                timeout: Duration::from_millis(5),
+                interval: Duration::from_millis(1),
+            },
+            || Some(ambiguous_scene.clone()),
+            &crate::NodePredicate::selector_eq("target"),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            WaitError::Timeout {
+                last_matches,
+                ..
+            } if last_matches.len() == 2
+        ));
     }
 }
