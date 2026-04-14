@@ -23,11 +23,20 @@ fn main() {}
 
 #[cfg(target_os = "linux")]
 fn main() {
+    if !native_gtk_session_available() {
+        eprintln!("skipping shared GTK facade contracts without a native GTK display session");
+        return;
+    }
     let harness = glasscheck::Harness::new();
     run_case("shared_window_host_surface_is_backend_neutral", || {
         let fixture = mount_fixture(&harness);
         exercise_host_contracts(&harness, &fixture.host);
     });
+}
+
+#[cfg(target_os = "linux")]
+fn native_gtk_session_available() -> bool {
+    std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 #[cfg(target_os = "linux")]
