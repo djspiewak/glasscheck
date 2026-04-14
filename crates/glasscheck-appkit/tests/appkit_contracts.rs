@@ -3,9 +3,7 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use glasscheck_appkit::{
-    AppKitHarness, HitPointSearch, HitPointStrategy, InstrumentedView,
-};
+use glasscheck_appkit::{AppKitHarness, HitPointSearch, HitPointStrategy, InstrumentedView};
 use glasscheck_core::{
     assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
     NodePredicate, NodeProvenanceKind, NodeRecipe, PixelMatch, PixelProbe, Point, PropertyValue,

@@ -7,9 +7,9 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use glasscheck::{
-    AnchoredTextExpectation, AnchoredTextHarness, InputDriver, NodePredicate, Point,
-    PollOptions, Rect, RegionSpec, RelativeBounds, RgbaColor, Role, SemanticNode,
-    SemanticProvider, Size, TextAssertionConfig,
+    AnchoredTextExpectation, AnchoredTextHarness, InputDriver, NodePredicate, Point, PollOptions,
+    Rect, RegionSpec, RelativeBounds, RgbaColor, Role, SemanticNode, SemanticProvider, Size,
+    TextAssertionConfig,
 };
 use gtk4::prelude::*;
 
@@ -31,15 +31,17 @@ struct ClickStateProvider {
 
 impl SemanticProvider for ClickStateProvider {
     fn snapshot_nodes(&self) -> Vec<SemanticNode> {
-        let label = if self.clicked.get() { "Clicked" } else { "Idle" };
-        vec![
-            SemanticNode::new(
-                "click-state",
-                Role::Label,
-                Rect::new(Point::new(24.0, 100.0), Size::new(120.0, 24.0)),
-            )
-            .with_label(label),
-        ]
+        let label = if self.clicked.get() {
+            "Clicked"
+        } else {
+            "Idle"
+        };
+        vec![SemanticNode::new(
+            "click-state",
+            Role::Label,
+            Rect::new(Point::new(24.0, 100.0), Size::new(120.0, 24.0)),
+        )
+        .with_label(label)]
     }
 }
 
@@ -139,10 +141,7 @@ fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::Win
 
     let input = host.input();
     assert_input_driver(&input);
-    input.move_mouse(Point::new(
-        resolved.origin.x + 2.0,
-        resolved.origin.y + 2.0,
-    ));
+    input.move_mouse(Point::new(resolved.origin.x + 2.0, resolved.origin.y + 2.0));
 
     let renderer = host.text_renderer();
     assert_text_harness(&renderer);
