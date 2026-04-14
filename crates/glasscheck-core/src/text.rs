@@ -1,7 +1,10 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::{compare_images, CompareConfig, CompareResult, Image, Point, Rect, RegionSpec, Size};
+use crate::{
+    color_match::transparent_reference_pixel_matches, compare_images, CompareConfig, CompareResult,
+    Image, Point, Rect, RegionSpec, Size,
+};
 
 /// An RGBA color used for text expectations and compositing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -731,35 +734,6 @@ fn compare_text_against_transparent_reference(
             diff.map(|data| Image::new(actual.width, actual.height, data))
         },
     }
-}
-
-fn transparent_reference_pixel_matches(actual: &[u8], expected: &[u8], tolerance: i16) -> bool {
-    if (i16::from(actual[3]) - 255).abs() > tolerance {
-        return false;
-    }
-
-    let alpha = expected[3];
-    channel_matches_transparent_reference(actual[0], expected[0], alpha, tolerance)
-        && channel_matches_transparent_reference(actual[1], expected[1], alpha, tolerance)
-        && channel_matches_transparent_reference(actual[2], expected[2], alpha, tolerance)
-}
-
-fn channel_matches_transparent_reference(
-    actual: u8,
-    foreground: u8,
-    alpha: u8,
-    tolerance: i16,
-) -> bool {
-    if alpha == 0 {
-        return true;
-    }
-
-    let alpha = f64::from(alpha) / 255.0;
-    let inverse = 1.0 - alpha;
-    let minimum = i16::from(composite_channel(foreground, 0, alpha, inverse));
-    let maximum = i16::from(composite_channel(foreground, 255, alpha, inverse));
-    let actual = i16::from(actual);
-    actual >= minimum - tolerance && actual <= maximum + tolerance
 }
 
 #[cfg(test)]

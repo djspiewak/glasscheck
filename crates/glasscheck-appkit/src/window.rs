@@ -1,7 +1,8 @@
 #[cfg(target_os = "macos")]
 mod imp {
     use glasscheck_core::{
-        NodePredicate, Point, QueryRoot, Rect, RegionResolveError, RegionSpec, Role, SceneSnapshot,
+        resolve_node_recipes, Image, NodePredicate, NodeProvenanceKind, NodeRecipe, Point,
+        PropertyValue, QueryRoot, Rect, RegionResolveError, RegionSpec, Role, SceneSnapshot,
         SemanticNode, SemanticProvider, Size, TextRange,
     };
     use objc2::runtime::AnyObject;
@@ -84,6 +85,8 @@ mod imp {
         snapshot_id: String,
         source_id: Option<String>,
     }
+
+    type ProviderSnapshot = (Vec<SemanticNode>, Vec<NodeRecipe>);
 
     /// AppKit window host used to build, capture, query, and drive a test scene.
     ///
@@ -214,6 +217,11 @@ mod imp {
             *self.provider.borrow_mut() = Some(provider);
         }
 
+        /// Preferred name for registering a pull-based scene source.
+        pub fn set_scene_source(&self, provider: Box<dyn SemanticProvider>) {
+            self.set_semantic_provider(provider);
+        }
+
         /// Captures the current root view as an image.
         #[must_use]
         pub fn capture(&self) -> Option<glasscheck_core::Image> {
@@ -238,10 +246,15 @@ mod imp {
             &self,
             region: &RegionSpec,
         ) -> Result<glasscheck_core::Image, RegionResolveError> {
-            let rect = self.resolve_region(region)?;
             let image = self
                 .capture()
                 .ok_or(RegionResolveError::CaptureUnavailable)?;
+            let view_image = image.flip_vertical();
+            let provider_snapshot = self.provider_snapshot();
+            let scene =
+                self.snapshot_scene_with_provider_snapshot(Some(&view_image), provider_snapshot);
+            let rect =
+                scene.resolve_region_with_image(self.root_bounds(), Some(&view_image), region)?;
             Ok(crop_image_in_view_coordinates(&image, rect))
         }
 
@@ -409,6 +422,15 @@ mod imp {
         /// Builds a merged scene snapshot from registered native views and virtual nodes.
         #[must_use]
         pub fn snapshot_scene(&self) -> SceneSnapshot {
+            let (provider_snapshot, image) = self.provider_snapshot_with_optional_capture(false);
+            self.snapshot_scene_with_provider_snapshot(image.as_ref(), provider_snapshot)
+        }
+
+        fn snapshot_scene_with_provider_snapshot(
+            &self,
+            image: Option<&Image>,
+            provider_snapshot: Option<ProviderSnapshot>,
+        ) -> SceneSnapshot {
             let root_view = self.root_view();
             let registry = self.active_registered_views(root_view.as_deref());
             let registered_ids = registered_node_ids(&registry);
@@ -429,7 +451,8 @@ mod imp {
                             .clone()
                             .unwrap_or_else(|| infer_role(&entry.view)),
                         rect_in_root(&entry.view, root_view.as_deref()),
-                    );
+                    )
+                    .with_provenance(NodeProvenanceKind::Native);
                     if let Some(source_id) = registered_ids
                         .get(&(&*entry.view as *const NSView))
                         .and_then(|registered| registered.source_id.clone())
@@ -438,6 +461,8 @@ mod imp {
                             "glasscheck:source_id".into(),
                             glasscheck_core::PropertyValue::String(source_id),
                         );
+                        node.property_provenance
+                            .insert("glasscheck:source_id".into(), NodeProvenanceKind::Native);
                     }
                     node.properties.insert(
                         "glasscheck:paint_order_path".into(),
@@ -445,6 +470,10 @@ mod imp {
                             &entry.view,
                             root_view.as_deref(),
                         )),
+                    );
+                    node.property_provenance.insert(
+                        "glasscheck:paint_order_path".into(),
+                        NodeProvenanceKind::Native,
                     );
                     let (visible, visible_rect, hit_testable) =
                         native_visibility(&entry.view, root_view.as_deref());
@@ -468,25 +497,38 @@ mod imp {
                 })
                 .collect();
 
-            if let Some(provider) = self.provider.borrow().as_ref() {
+            if let Some((provider_nodes, recipes)) = provider_snapshot {
                 let native_ids = nodes
                     .iter()
                     .map(|node| node.id.clone())
                     .collect::<BTreeSet<_>>();
-                let native_parent_ids = registered_ids
-                    .values()
-                    .map(|registered| {
-                        registered
+                let native_parent_id_counts = registered_ids.values().fold(
+                    BTreeMap::<String, usize>::new(),
+                    |mut counts, registered| {
+                        let raw_id = registered
                             .source_id
                             .clone()
-                            .unwrap_or_else(|| registered.snapshot_id.clone())
-                    })
+                            .unwrap_or_else(|| registered.snapshot_id.clone());
+                        *counts.entry(raw_id).or_default() += 1;
+                        counts
+                    },
+                );
+                let unique_native_parent_ids = native_parent_id_counts
+                    .iter()
+                    .filter_map(|(id, count)| (*count == 1).then_some(id.clone()))
                     .collect::<BTreeSet<_>>();
                 nodes.extend(normalize_provider_nodes(
-                    provider.snapshot_nodes(),
+                    provider_nodes,
                     &native_ids,
-                    &native_parent_ids,
+                    &unique_native_parent_ids,
                 ));
+                if recipes.is_empty() {
+                    return SceneSnapshot::new(nodes);
+                }
+                let resolved_recipes =
+                    resolve_node_recipes(nodes, self.root_bounds(), image, &recipes);
+                let recipe_errors = resolved_recipes.errors;
+                return SceneSnapshot::with_recipe_errors(resolved_recipes.nodes, recipe_errors);
             }
 
             SceneSnapshot::new(nodes)
@@ -500,8 +542,11 @@ mod imp {
 
         /// Resolves a semantic region against the current scene snapshot.
         pub fn resolve_region(&self, region: &RegionSpec) -> Result<Rect, RegionResolveError> {
+            let (provider_snapshot, image) =
+                self.provider_snapshot_with_optional_capture(region.requires_image());
             let root_bounds = self.root_bounds();
-            self.snapshot_scene().resolve_region(root_bounds, region)
+            self.snapshot_scene_with_provider_snapshot(image.as_ref(), provider_snapshot)
+                .resolve_region_with_image(root_bounds, image.as_ref(), region)
         }
 
         /// Sets the window title when a window is attached.
@@ -540,6 +585,29 @@ mod imp {
                 Retained::retain(&**view as *const NSView as *mut NSView)
                     .expect("root view should retain successfully")
             })
+        }
+
+        fn provider_snapshot(&self) -> Option<ProviderSnapshot> {
+            self.provider
+                .borrow()
+                .as_ref()
+                .map(|provider| (provider.snapshot_nodes(), provider.snapshot_recipes()))
+        }
+
+        fn provider_snapshot_with_optional_capture(
+            &self,
+            force_image: bool,
+        ) -> (Option<ProviderSnapshot>, Option<Image>) {
+            let mut provider_snapshot = self.provider_snapshot();
+            let needs_image = force_image
+                || provider_snapshot
+                    .as_ref()
+                    .is_some_and(|(_, recipes)| recipes.iter().any(NodeRecipe::requires_image));
+            let image = needs_image.then(|| self.capture()).flatten().map(|image| {
+                provider_snapshot = self.provider_snapshot();
+                image.flip_vertical()
+            });
+            (provider_snapshot, image)
         }
 
         fn root_bounds(&self) -> Rect {
@@ -589,8 +657,13 @@ mod imp {
             node: &SemanticNode,
             search: &HitPointSearch,
         ) -> Option<(NSPoint, Option<Retained<NSView>>)> {
-            let target_rect = node.visible_rect.unwrap_or(node.rect);
+            let target_rect = explicit_hit_rect(node)
+                .or(node.visible_rect)
+                .unwrap_or(node.rect);
             if rect_is_empty_rect(target_rect) {
+                if let Some(point) = explicit_hit_point(node) {
+                    return Some((NSPoint::new(point.x, point.y), None));
+                }
                 return None;
             }
             for point in hit_point_candidates(target_rect, search) {
@@ -947,6 +1020,9 @@ mod imp {
                 node.properties
                     .entry("glasscheck:source_id".into())
                     .or_insert_with(|| glasscheck_core::PropertyValue::String(node.id.clone()));
+                node.property_provenance
+                    .entry("glasscheck:source_id".into())
+                    .or_insert(node.provenance);
             }
             let identity_ids = provider_ids
                 .iter()
@@ -981,6 +1057,8 @@ mod imp {
                 "glasscheck:source_id".into(),
                 glasscheck_core::PropertyValue::String(original_id),
             );
+            node.property_provenance
+                .insert("glasscheck:source_id".into(), node.provenance);
         }
 
         for node in &nodes {
@@ -1023,6 +1101,8 @@ mod imp {
                         "glasscheck:ambiguous_parent_id".into(),
                         glasscheck_core::PropertyValue::String(parent_id.clone()),
                     );
+                    node.property_provenance
+                        .insert("glasscheck:ambiguous_parent_id".into(), node.provenance);
                     node.parent_id = None;
                 }
             }
@@ -1113,6 +1193,38 @@ mod imp {
                     count,
                 }
             }
+        }
+    }
+
+    fn explicit_hit_point(node: &SemanticNode) -> Option<Point> {
+        match (
+            node.properties.get("glasscheck:hit_point_x"),
+            node.properties.get("glasscheck:hit_point_y"),
+        ) {
+            (Some(PropertyValue::Integer(x)), Some(PropertyValue::Integer(y))) => {
+                Some(Point::new(*x as f64, *y as f64))
+            }
+            _ => None,
+        }
+    }
+
+    fn explicit_hit_rect(node: &SemanticNode) -> Option<Rect> {
+        match (
+            node.properties.get("glasscheck:hit_rect_x"),
+            node.properties.get("glasscheck:hit_rect_y"),
+            node.properties.get("glasscheck:hit_rect_width"),
+            node.properties.get("glasscheck:hit_rect_height"),
+        ) {
+            (
+                Some(PropertyValue::Integer(x)),
+                Some(PropertyValue::Integer(y)),
+                Some(PropertyValue::Integer(width)),
+                Some(PropertyValue::Integer(height)),
+            ) => Some(Rect::new(
+                Point::new(*x as f64, *y as f64),
+                Size::new(*width as f64, *height as f64),
+            )),
+            _ => None,
         }
     }
 }

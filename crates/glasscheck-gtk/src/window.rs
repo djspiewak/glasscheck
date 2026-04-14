@@ -4,8 +4,9 @@ mod imp {
     use std::collections::{BTreeSet, HashMap};
 
     use glasscheck_core::{
-        crop_image_bottom_left, normalize_provider_nodes, registered_node_id, InstrumentedNode,
-        NodePredicate, Point, QueryRoot, Rect, RegionResolveError, RegionSpec, Role, SceneSnapshot,
+        crop_image_bottom_left, normalize_provider_nodes, registered_node_id, resolve_node_recipes,
+        Image, InstrumentedNode, NodePredicate, NodeProvenanceKind, NodeRecipe, Point,
+        PropertyValue, QueryRoot, Rect, RegionResolveError, RegionSpec, Role, SceneSnapshot,
         SemanticNode, SemanticProvider, Size, TextRange,
     };
     use gtk4::graphene;
@@ -20,6 +21,8 @@ mod imp {
         widget: Widget,
         descriptor: InstrumentedNode,
     }
+
+    type ProviderSnapshot = (Vec<SemanticNode>, Vec<NodeRecipe>);
 
     /// GTK4 window host used to build, capture, query, and drive a test scene.
     ///
@@ -124,6 +127,11 @@ mod imp {
             *self.provider.borrow_mut() = Some(provider);
         }
 
+        /// Preferred name for registering a pull-based scene source.
+        pub fn set_scene_source(&self, provider: Box<dyn SemanticProvider>) {
+            self.set_semantic_provider(provider);
+        }
+
         /// Captures the current root widget as an image.
         #[must_use]
         pub fn capture(&self) -> Option<glasscheck_core::Image> {
@@ -155,10 +163,17 @@ mod imp {
             &self,
             region: &RegionSpec,
         ) -> Result<glasscheck_core::Image, RegionResolveError> {
-            let rect = self.resolve_region(region)?;
+            let provider_snapshot = self.provider_snapshot();
             let image = self
                 .capture()
                 .ok_or(RegionResolveError::CaptureUnavailable)?;
+            let view_image = image.flip_vertical();
+            let (scene, _) = self.snapshot_scene_with_registered_indices_and_provider_snapshot(
+                Some(&view_image),
+                provider_snapshot,
+            );
+            let rect =
+                scene.resolve_region_with_image(self.root_bounds(), Some(&view_image), region)?;
             Ok(crop_image_bottom_left(&image, rect))
         }
 
@@ -195,10 +210,14 @@ mod imp {
             if self.root_widget().is_none() {
                 return Err(RegionResolveError::InputUnavailable);
             }
-            self.input().click(Point::new(
-                node.rect.origin.x + node.rect.size.width / 2.0,
-                node.rect.origin.y + node.rect.size.height / 2.0,
-            ));
+            if let Some(point) = explicit_hit_point(node) {
+                self.input().click(point);
+            } else {
+                self.input().click(Point::new(
+                    node.rect.origin.x + node.rect.size.width / 2.0,
+                    node.rect.origin.y + node.rect.size.height / 2.0,
+                ));
+            }
             Ok(())
         }
 
@@ -273,6 +292,28 @@ mod imp {
         }
 
         fn snapshot_scene_with_registered_indices(&self) -> (SceneSnapshot, Vec<usize>) {
+            let provider_snapshot = self.provider_snapshot();
+            let image = provider_snapshot
+                .as_ref()
+                .and_then(|(_, recipes)| {
+                    recipes
+                        .iter()
+                        .any(NodeRecipe::requires_image)
+                        .then(|| self.capture())
+                })
+                .flatten()
+                .map(|image| image.flip_vertical());
+            self.snapshot_scene_with_registered_indices_and_provider_snapshot(
+                image.as_ref(),
+                provider_snapshot,
+            )
+        }
+
+        fn snapshot_scene_with_registered_indices_and_provider_snapshot(
+            &self,
+            image: Option<&Image>,
+            provider_snapshot: Option<ProviderSnapshot>,
+        ) -> (SceneSnapshot, Vec<usize>) {
             let root_widget = self.root_widget();
             let registry = self.registry.borrow();
             let registered_ids = registry
@@ -301,7 +342,8 @@ mod imp {
                             .clone()
                             .unwrap_or_else(|| infer_role(&entry.widget)),
                         rect,
-                    );
+                    )
+                    .with_provenance(NodeProvenanceKind::Native);
                     node.label = entry.descriptor.label.clone();
                     node.visible = entry.widget.is_visible();
                     node.visible_rect = Some(node.rect);
@@ -323,15 +365,24 @@ mod imp {
                 })
                 .collect();
 
-            if let Some(provider) = self.provider.borrow().as_ref() {
+            if let Some((provider_nodes, recipes)) = provider_snapshot {
                 let native_ids = nodes
                     .iter()
                     .map(|node| node.id.clone())
                     .collect::<BTreeSet<_>>();
-                nodes.extend(normalize_provider_nodes(
-                    provider.snapshot_nodes(),
-                    &native_ids,
-                ));
+                nodes.extend(normalize_provider_nodes(provider_nodes, &native_ids));
+                if recipes.is_empty() {
+                    return (SceneSnapshot::new(nodes), registered_indices);
+                }
+                let resolved_recipes =
+                    resolve_node_recipes(nodes, self.root_bounds(), image, &recipes);
+                return (
+                    SceneSnapshot::with_recipe_errors(
+                        resolved_recipes.nodes,
+                        resolved_recipes.errors,
+                    ),
+                    registered_indices,
+                );
             }
 
             (SceneSnapshot::new(nodes), registered_indices)
@@ -345,8 +396,20 @@ mod imp {
 
         /// Resolves a semantic region against the current scene snapshot.
         pub fn resolve_region(&self, region: &RegionSpec) -> Result<Rect, RegionResolveError> {
-            self.snapshot_scene()
-                .resolve_region(self.root_bounds(), region)
+            let provider_snapshot = self.provider_snapshot();
+            let image = (region.requires_image()
+                || provider_snapshot
+                    .as_ref()
+                    .is_some_and(|(_, recipes)| recipes.iter().any(NodeRecipe::requires_image)))
+            .then(|| self.capture())
+            .flatten()
+            .map(|image| image.flip_vertical());
+            self.snapshot_scene_with_registered_indices_and_provider_snapshot(
+                image.as_ref(),
+                provider_snapshot,
+            )
+            .0
+            .resolve_region_with_image(self.root_bounds(), image.as_ref(), region)
         }
 
         /// Sets the window title when a window is attached.
@@ -382,6 +445,13 @@ mod imp {
                     window.default_height().max(1) as f64,
                 ),
             )
+        }
+
+        fn provider_snapshot(&self) -> Option<ProviderSnapshot> {
+            self.provider
+                .borrow()
+                .as_ref()
+                .map(|provider| (provider.snapshot_nodes(), provider.snapshot_recipes()))
         }
 
         fn registered_widget_for_handle(
@@ -533,6 +603,18 @@ mod imp {
                     count,
                 }
             }
+        }
+    }
+
+    fn explicit_hit_point(node: &SemanticNode) -> Option<Point> {
+        match (
+            node.properties.get("glasscheck:hit_point_x"),
+            node.properties.get("glasscheck:hit_point_y"),
+        ) {
+            (Some(PropertyValue::Integer(x)), Some(PropertyValue::Integer(y))) => {
+                Some(Point::new(*x as f64, *y as f64))
+            }
+            _ => None,
         }
     }
 }

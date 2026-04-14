@@ -56,17 +56,13 @@ impl Image {
     /// Crops the image to `rect`, clamping out-of-bounds coordinates.
     #[must_use]
     pub fn crop(&self, rect: Rect) -> Self {
-        let start_x = rect.origin.x.max(0.0).floor() as u32;
-        let start_y = rect.origin.y.max(0.0).floor() as u32;
-        let end_x = (rect.origin.x + rect.size.width).max(0.0).ceil() as u32;
-        let end_y = (rect.origin.y + rect.size.height).max(0.0).ceil() as u32;
-
-        let bounded_end_x = end_x.min(self.width);
-        let bounded_end_y = end_y.min(self.height);
-        let bounded_start_x = start_x.min(bounded_end_x);
-        let bounded_start_y = start_y.min(bounded_end_y);
-        let width = bounded_end_x - bounded_start_x;
-        let height = bounded_end_y - bounded_start_y;
+        let bounded = self.clamped_crop_rect(rect);
+        let bounded_start_x = bounded.origin.x as u32;
+        let bounded_start_y = bounded.origin.y as u32;
+        let width = bounded.size.width as u32;
+        let height = bounded.size.height as u32;
+        let bounded_end_x = bounded_start_x + width;
+        let bounded_end_y = bounded_start_y + height;
 
         let mut data = Vec::with_capacity(width as usize * height as usize * 4);
         for y in bounded_start_y..bounded_end_y {
@@ -78,6 +74,27 @@ impl Image {
         }
 
         Self::new(width, height, data)
+    }
+
+    #[must_use]
+    pub(crate) fn clamped_crop_rect(&self, rect: Rect) -> Rect {
+        let start_x = rect.origin.x.max(0.0).floor() as u32;
+        let start_y = rect.origin.y.max(0.0).floor() as u32;
+        let end_x = (rect.origin.x + rect.size.width).max(0.0).ceil() as u32;
+        let end_y = (rect.origin.y + rect.size.height).max(0.0).ceil() as u32;
+
+        let bounded_end_x = end_x.min(self.width);
+        let bounded_end_y = end_y.min(self.height);
+        let bounded_start_x = start_x.min(bounded_end_x);
+        let bounded_start_y = start_y.min(bounded_end_y);
+
+        Rect::new(
+            Point::new(f64::from(bounded_start_x), f64::from(bounded_start_y)),
+            Size::new(
+                f64::from(bounded_end_x - bounded_start_x),
+                f64::from(bounded_end_y - bounded_start_y),
+            ),
+        )
     }
 
     /// Computes the average RGBA value over `rect`.
@@ -138,6 +155,19 @@ impl Image {
     #[must_use]
     pub fn center(&self) -> Point {
         Point::new(f64::from(self.width) / 2.0, f64::from(self.height) / 2.0)
+    }
+
+    /// Returns a copy of the image flipped vertically.
+    #[must_use]
+    pub fn flip_vertical(&self) -> Self {
+        let stride = self.width as usize * 4;
+        let mut data = vec![0u8; self.data.len()];
+        for row in 0..self.height as usize {
+            let source = row * stride;
+            let dest = (self.height as usize - row - 1) * stride;
+            data[dest..dest + stride].copy_from_slice(&self.data[source..source + stride]);
+        }
+        Self::new(self.width, self.height, data)
     }
 }
 
@@ -217,5 +247,21 @@ mod tests {
             Rect::new(Point::new(0.0, 0.0), Size::new(1.0, 1.0)),
         );
         assert_eq!(cropped.data, vec![30, 30, 30, 255]);
+    }
+
+    #[test]
+    fn flip_vertical_reverses_row_order() {
+        let image = Image::new(
+            2,
+            2,
+            vec![
+                10, 10, 10, 255, 20, 20, 20, 255, 30, 30, 30, 255, 40, 40, 40, 255,
+            ],
+        );
+        let flipped = image.flip_vertical();
+        assert_eq!(
+            flipped.data,
+            vec![30, 30, 30, 255, 40, 40, 40, 255, 10, 10, 10, 255, 20, 20, 20, 255,]
+        );
     }
 }

@@ -1,8 +1,8 @@
 #![cfg(target_os = "linux")]
 
 use glasscheck_core::{
-    KeyModifiers, NodePredicate, Point, PropertyValue, Rect, RegionResolveError, Role,
-    SemanticNode, SemanticProvider, Size, TextRange,
+    KeyModifiers, NodePredicate, NodeRecipe, PixelMatch, PixelProbe, Point, PropertyValue, Rect,
+    RegionResolveError, RegionSpec, Role, SemanticNode, SemanticProvider, Size, TextRange,
 };
 use glasscheck_gtk::{GtkHarness, GtkWindowHost, InstrumentedWidget};
 use gtk4::prelude::*;
@@ -49,6 +49,12 @@ fn main() {
     });
     run("insertion_caret_rect_converts_to_root_coordinates", || {
         insertion_caret_rect_converts_to_root_coordinates(harness)
+    });
+    run("visual_recipe_probe_builds_clickable_node", || {
+        visual_recipe_probe_builds_clickable_node(harness)
+    });
+    run("visual_recipe_probe_omits_missing_match", || {
+        visual_recipe_probe_omits_missing_match(harness)
     });
 }
 
@@ -345,6 +351,81 @@ fn insertion_caret_rect_converts_to_root_coordinates(harness: GtkHarness) {
     assert!(rect.size.height > 0.0);
 }
 
+fn visual_recipe_probe_builds_clickable_node(harness: GtkHarness) {
+    let host = harness.create_window(140.0, 100.0);
+    let area = gtk4::DrawingArea::new();
+    area.set_content_width(140);
+    area.set_content_height(100);
+    area.set_draw_func(|_, cr, _, _| {
+        cr.set_source_rgb(0.1, 0.1, 0.1);
+        let _ = cr.paint();
+        cr.set_source_rgb(1.0, 0.0, 0.0);
+        cr.rectangle(40.0, 30.0, 24.0, 12.0);
+        let _ = cr.fill();
+    });
+    let clicks = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let seen = clicks.clone();
+    let gesture = gtk4::GestureClick::new();
+    gesture.connect_pressed(move |_, _, x, y| {
+        if (40.0..=64.0).contains(&x) && (30.0..=42.0).contains(&y) {
+            seen.set(seen.get() + 1);
+        }
+    });
+    area.add_controller(gesture);
+    host.set_root(&area);
+    host.set_scene_source(Box::new(VisualProbeProvider));
+    harness.settle(4);
+
+    let scene = host.snapshot_scene();
+    assert!(scene.recipe_errors().is_empty());
+    let handle = scene
+        .find(&NodePredicate::selector_eq("visual.red-chip"))
+        .expect("visual recipe node should resolve");
+    let node = scene.node(handle).unwrap();
+    assert_eq!(
+        node.rect,
+        Rect::new(Point::new(40.0, 58.0), Size::new(24.0, 12.0))
+    );
+
+    host.click_node(&NodePredicate::selector_eq("visual.red-chip"))
+        .expect("visual recipe node should be clickable");
+    harness.settle(4);
+    assert_eq!(clicks.get(), 1);
+
+    let image = host
+        .capture_region(&RegionSpec::node(NodePredicate::selector_eq(
+            "visual.red-chip",
+        )))
+        .expect("visual recipe region should capture");
+    assert!(image.average_rgba(Rect::new(Point::new(0.0, 0.0), image.size()))[0] > 200.0);
+}
+
+fn visual_recipe_probe_omits_missing_match(harness: GtkHarness) {
+    let host = harness.create_window(140.0, 100.0);
+    let area = gtk4::DrawingArea::new();
+    area.set_content_width(140);
+    area.set_content_height(100);
+    area.set_draw_func(|_, cr, _, _| {
+        cr.set_source_rgb(0.1, 0.1, 0.1);
+        let _ = cr.paint();
+    });
+    host.set_root(&area);
+    host.set_scene_source(Box::new(VisualProbeProvider));
+    harness.settle(4);
+
+    let scene = host.snapshot_scene();
+    assert_eq!(scene.recipe_errors().len(), 1);
+    assert_eq!(scene.recipe_errors()[0].recipe_id, "visual.red-chip");
+    assert_eq!(
+        scene.recipe_errors()[0].error,
+        RegionResolveError::VisualMatchMissing
+    );
+    assert!(matches!(
+        scene.find(&NodePredicate::selector_eq("visual.red-chip")),
+        Err(_)
+    ));
+}
+
 fn fixed_root(width: i32, height: i32) -> gtk4::Fixed {
     let root = gtk4::Fixed::new();
     root.set_size_request(width, height);
@@ -388,6 +469,26 @@ impl SemanticProvider for CollidingProvider {
                 Rect::new(Point::new(0.0, 0.0), Size::new(80.0, 20.0)),
             )
             .with_parent("battlefield", 0),
+        ]
+    }
+}
+
+struct VisualProbeProvider;
+
+impl SemanticProvider for VisualProbeProvider {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        Vec::new()
+    }
+
+    fn snapshot_recipes(&self) -> Vec<NodeRecipe> {
+        let locator = RegionSpec::root().pixel_probe(PixelProbe::new(
+            PixelMatch::new([255, 0, 0, 255], 0, 255),
+            8,
+        ));
+        vec![
+            NodeRecipe::new("visual.red-chip", Role::Button, locator.clone())
+                .with_selector("visual.red-chip")
+                .with_hit_target(locator),
         ]
     }
 }

@@ -1,8 +1,19 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use crate::{Interactability, NodePredicate, Point, QueryError, QueryMatch, Rect};
+use crate::{
+    anchor::RegionSpec, image::Image, Interactability, NodePredicate, Point, QueryError,
+    QueryMatch, Rect,
+};
 
 const PAINT_ORDER_PATH_PROPERTY: &str = "glasscheck:paint_order_path";
+const SOURCE_ID_PROPERTY: &str = "glasscheck:source_id";
+const AMBIGUOUS_PARENT_ID_PROPERTY: &str = "glasscheck:ambiguous_parent_id";
+const HIT_POINT_X_PROPERTY: &str = "glasscheck:hit_point_x";
+const HIT_POINT_Y_PROPERTY: &str = "glasscheck:hit_point_y";
+const HIT_RECT_X_PROPERTY: &str = "glasscheck:hit_rect_x";
+const HIT_RECT_Y_PROPERTY: &str = "glasscheck:hit_rect_y";
+const HIT_RECT_WIDTH_PROPERTY: &str = "glasscheck:hit_rect_width";
+const HIT_RECT_HEIGHT_PROPERTY: &str = "glasscheck:hit_rect_height";
 
 /// A semantic role attached to a UI node under test.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -81,6 +92,16 @@ impl NodeHandle {
 /// Use this as the primary testing model for new code. Compared with the older
 /// flat `NodeMetadata` model, it supports hierarchy, selectors, properties,
 /// state, visibility, and hit-testing semantics in one snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NodeProvenanceKind {
+    Native,
+    Declared,
+    Geometric,
+    Probed,
+    Matched,
+    Custom,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SemanticNode {
     /// Semantic identifier for this snapshot.
@@ -127,6 +148,12 @@ pub struct SemanticNode {
     pub state: BTreeMap<String, PropertyValue>,
     /// Structured property payload.
     pub properties: BTreeMap<String, PropertyValue>,
+    /// How this node was constructed.
+    pub provenance: NodeProvenanceKind,
+    /// Per-state provenance metadata.
+    pub state_provenance: BTreeMap<String, NodeProvenanceKind>,
+    /// Per-property provenance metadata.
+    pub property_provenance: BTreeMap<String, NodeProvenanceKind>,
 }
 
 impl SemanticNode {
@@ -151,6 +178,9 @@ impl SemanticNode {
             tags: Vec::new(),
             state: BTreeMap::new(),
             properties: BTreeMap::new(),
+            provenance: NodeProvenanceKind::Declared,
+            state_provenance: BTreeMap::new(),
+            property_provenance: BTreeMap::new(),
         }
     }
 
@@ -190,14 +220,18 @@ impl SemanticNode {
     /// Adds a property entry.
     #[must_use]
     pub fn with_property(mut self, key: impl Into<String>, value: PropertyValue) -> Self {
-        self.properties.insert(key.into(), value);
+        let key = key.into();
+        self.properties.insert(key.clone(), value);
+        self.property_provenance.insert(key, self.provenance);
         self
     }
 
     /// Adds a state entry.
     #[must_use]
     pub fn with_state(mut self, key: impl Into<String>, value: PropertyValue) -> Self {
-        self.state.insert(key.into(), value);
+        let key = key.into();
+        self.state.insert(key.clone(), value);
+        self.state_provenance.insert(key, self.provenance);
         self
     }
 
@@ -214,6 +248,454 @@ impl SemanticNode {
         self.tags.push(tag.into());
         self
     }
+
+    /// Sets the node provenance.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: NodeProvenanceKind) -> Self {
+        self.provenance = provenance;
+        self.state_provenance
+            .values_mut()
+            .for_each(|field| *field = provenance);
+        self.property_provenance
+            .values_mut()
+            .for_each(|field| *field = provenance);
+        self
+    }
+}
+
+/// Declarative node recipe resolved against the current scene and live pixels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeRecipe {
+    pub id: String,
+    pub locator: RegionSpec,
+    pub hit_target: Option<RegionSpec>,
+    pub role: Role,
+    pub selectors: BTreeSet<String>,
+    pub label: Option<String>,
+    pub value: Option<String>,
+    pub parent_id: Option<String>,
+    pub child_index: usize,
+    pub z_index: i32,
+    pub visible: bool,
+    pub hit_testable: bool,
+    pub classes: Vec<String>,
+    pub tags: Vec<String>,
+    pub state: BTreeMap<String, PropertyValue>,
+    pub properties: BTreeMap<String, PropertyValue>,
+    pub provenance: NodeProvenanceKind,
+}
+
+impl NodeRecipe {
+    #[must_use]
+    pub fn new(id: impl Into<String>, role: Role, locator: RegionSpec) -> Self {
+        Self {
+            id: id.into(),
+            locator,
+            hit_target: None,
+            role,
+            selectors: BTreeSet::new(),
+            label: None,
+            value: None,
+            parent_id: None,
+            child_index: 0,
+            z_index: 0,
+            visible: true,
+            hit_testable: true,
+            classes: Vec::new(),
+            tags: Vec::new(),
+            state: BTreeMap::new(),
+            properties: BTreeMap::new(),
+            provenance: NodeProvenanceKind::Declared,
+        }
+    }
+
+    #[must_use]
+    pub fn with_selector(mut self, selector: impl Into<String>) -> Self {
+        self.selectors.insert(selector.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_value(mut self, value: impl Into<String>) -> Self {
+        self.value = Some(value.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_parent(mut self, parent_id: impl Into<String>, child_index: usize) -> Self {
+        self.parent_id = Some(parent_id.into());
+        self.child_index = child_index;
+        self
+    }
+
+    #[must_use]
+    pub fn with_hit_target(mut self, hit_target: RegionSpec) -> Self {
+        self.hit_target = Some(hit_target);
+        self
+    }
+
+    #[must_use]
+    pub fn with_property(mut self, key: impl Into<String>, value: PropertyValue) -> Self {
+        self.properties.insert(key.into(), value);
+        self
+    }
+
+    #[must_use]
+    pub fn with_state(mut self, key: impl Into<String>, value: PropertyValue) -> Self {
+        self.state.insert(key.into(), value);
+        self
+    }
+
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: NodeProvenanceKind) -> Self {
+        self.provenance = provenance;
+        self
+    }
+
+    #[must_use]
+    pub fn requires_image(&self) -> bool {
+        self.locator.requires_image()
+            || self
+                .hit_target
+                .as_ref()
+                .is_some_and(crate::RegionSpec::requires_image)
+    }
+
+    pub fn resolve(
+        &self,
+        scene: &SceneSnapshot,
+        root_bounds: Rect,
+        image: Option<&Image>,
+    ) -> Result<SemanticNode, crate::RegionResolveError> {
+        let rect = scene.resolve_region_with_image(root_bounds, image, &self.locator)?;
+        let mut node = SemanticNode::new(self.id.clone(), self.role.clone(), rect)
+            .with_provenance(self.provenance);
+        node.selectors = self.selectors.clone();
+        node.label = self.label.clone();
+        node.value = self.value.clone();
+        node.parent_id = self.parent_id.clone();
+        node.child_index = self.child_index;
+        node.z_index = self.z_index;
+        node.visible = self.visible;
+        node.hit_testable = self.hit_testable;
+        node.classes = self.classes.clone();
+        node.tags = self.tags.clone();
+        node.state = self.state.clone();
+        node.properties = self.properties.clone();
+        node.state_provenance = self
+            .state
+            .keys()
+            .cloned()
+            .map(|key| (key, self.provenance))
+            .collect();
+        node.property_provenance = self
+            .properties
+            .keys()
+            .cloned()
+            .map(|key| (key, self.provenance))
+            .collect();
+        if let Some(hit_target) = self.hit_target.as_ref() {
+            if let Ok(rect) = scene.resolve_region_with_image(root_bounds, image, hit_target) {
+                let point = Point::new(
+                    rect.origin.x + rect.size.width / 2.0,
+                    rect.origin.y + rect.size.height / 2.0,
+                );
+                node.properties.insert(
+                    HIT_POINT_X_PROPERTY.into(),
+                    PropertyValue::Integer(point.x.round() as i64),
+                );
+                node.properties.insert(
+                    HIT_POINT_Y_PROPERTY.into(),
+                    PropertyValue::Integer(point.y.round() as i64),
+                );
+                node.properties.insert(
+                    HIT_RECT_X_PROPERTY.into(),
+                    PropertyValue::Integer(rect.origin.x.round() as i64),
+                );
+                node.properties.insert(
+                    HIT_RECT_Y_PROPERTY.into(),
+                    PropertyValue::Integer(rect.origin.y.round() as i64),
+                );
+                node.properties.insert(
+                    HIT_RECT_WIDTH_PROPERTY.into(),
+                    PropertyValue::Integer(rect.size.width.round() as i64),
+                );
+                node.properties.insert(
+                    HIT_RECT_HEIGHT_PROPERTY.into(),
+                    PropertyValue::Integer(rect.size.height.round() as i64),
+                );
+                node.property_provenance
+                    .insert(HIT_POINT_X_PROPERTY.into(), self.provenance);
+                node.property_provenance
+                    .insert(HIT_POINT_Y_PROPERTY.into(), self.provenance);
+                node.property_provenance
+                    .insert(HIT_RECT_X_PROPERTY.into(), self.provenance);
+                node.property_provenance
+                    .insert(HIT_RECT_Y_PROPERTY.into(), self.provenance);
+                node.property_provenance
+                    .insert(HIT_RECT_WIDTH_PROPERTY.into(), self.provenance);
+                node.property_provenance
+                    .insert(HIT_RECT_HEIGHT_PROPERTY.into(), self.provenance);
+            }
+        }
+        Ok(node)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NodeRecipeResolutionError {
+    pub recipe_id: String,
+    pub error: crate::RegionResolveError,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedNodeRecipes {
+    pub nodes: Vec<SemanticNode>,
+    pub errors: Vec<NodeRecipeResolutionError>,
+}
+
+/// Resolves recipe nodes in declaration order, allowing later recipes to anchor
+/// against earlier resolved nodes from the same source.
+#[must_use]
+pub fn resolve_node_recipes(
+    existing_nodes: Vec<SemanticNode>,
+    root_bounds: Rect,
+    image: Option<&Image>,
+    recipes: &[NodeRecipe],
+) -> ResolvedNodeRecipes {
+    let mut nodes = existing_nodes;
+    let mut errors = Vec::new();
+    let recipe_id_counts = recipes.iter().fold(BTreeMap::new(), |mut counts, recipe| {
+        *counts.entry(recipe.id.clone()).or_default() += 1;
+        counts
+    });
+    let mut used_ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+
+    for recipe in recipes {
+        let normalized_recipe = normalize_recipe(recipe, &nodes, &recipe_id_counts, &mut used_ids);
+        let scene = SceneSnapshot::new(nodes.clone());
+        match normalized_recipe.resolve(&scene, root_bounds, image) {
+            Ok(node) => nodes.push(node),
+            Err(error) => errors.push(NodeRecipeResolutionError {
+                recipe_id: recipe.id.clone(),
+                error,
+            }),
+        }
+    }
+    ResolvedNodeRecipes { nodes, errors }
+}
+
+fn normalize_recipe(
+    recipe: &NodeRecipe,
+    existing_nodes: &[SemanticNode],
+    recipe_id_counts: &BTreeMap<String, usize>,
+    used_ids: &mut BTreeSet<String>,
+) -> NodeRecipe {
+    let mut normalized = recipe.clone();
+    let occupied_raw_ids = existing_nodes
+        .iter()
+        .filter_map(node_source_id)
+        .collect::<BTreeSet<_>>();
+    let needs_namespace = used_ids.contains(&recipe.id)
+        || occupied_raw_ids.contains(&recipe.id)
+        || recipe_id_counts.get(&recipe.id).copied().unwrap_or(0) > 1;
+    normalized.id = if needs_namespace {
+        unique_node_id(&format!("provider::{}", recipe.id), used_ids)
+    } else {
+        used_ids.insert(recipe.id.clone());
+        recipe.id.clone()
+    };
+    normalized
+        .properties
+        .entry(SOURCE_ID_PROPERTY.into())
+        .or_insert_with(|| PropertyValue::string(recipe.id.clone()));
+
+    let alias_map = recipe_aliases(existing_nodes);
+    normalized.locator = remap_region_spec_ids(&normalized.locator, &alias_map);
+    normalized.hit_target = normalized
+        .hit_target
+        .as_ref()
+        .map(|region| remap_region_spec_ids(region, &alias_map));
+    if let Some(parent_id) = normalized.parent_id.clone() {
+        if alias_map.exact_ids.contains(&parent_id) {
+            normalized.parent_id = Some(parent_id);
+        } else if let Some(mapped) = alias_map.aliases.get(&parent_id) {
+            normalized.parent_id = Some(mapped.clone());
+        } else if alias_map.ambiguous_aliases.contains(&parent_id) {
+            normalized.properties.insert(
+                AMBIGUOUS_PARENT_ID_PROPERTY.into(),
+                PropertyValue::string(parent_id),
+            );
+            normalized.parent_id = None;
+        }
+    }
+
+    normalized
+}
+
+struct RecipeAliasMap {
+    exact_ids: BTreeSet<String>,
+    aliases: BTreeMap<String, String>,
+    ambiguous_aliases: BTreeSet<String>,
+}
+
+fn recipe_aliases(nodes: &[SemanticNode]) -> RecipeAliasMap {
+    let mut counts = BTreeMap::<String, usize>::new();
+    let mut ids = BTreeMap::<String, String>::new();
+    let exact_ids = nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+
+    for node in nodes {
+        let Some(source_id) = node_source_id(node) else {
+            continue;
+        };
+        *counts.entry(source_id.clone()).or_default() += 1;
+        ids.insert(source_id, node.id.clone());
+    }
+
+    let aliases = counts
+        .iter()
+        .filter(|(_, count)| **count == 1)
+        .filter(|(source_id, _)| !exact_ids.contains(*source_id))
+        .filter_map(|(source_id, _)| ids.get(source_id).map(|id| (source_id.clone(), id.clone())))
+        .collect::<BTreeMap<_, _>>();
+    let ambiguous_aliases = counts
+        .into_iter()
+        .filter_map(|(source_id, count)| (count > 1).then_some(source_id))
+        .collect::<BTreeSet<_>>();
+
+    RecipeAliasMap {
+        exact_ids,
+        aliases,
+        ambiguous_aliases,
+    }
+}
+
+fn node_source_id(node: &SemanticNode) -> Option<String> {
+    let PropertyValue::String(source_id) = node.properties.get(SOURCE_ID_PROPERTY)? else {
+        return None;
+    };
+    Some(source_id.clone())
+}
+
+fn unique_node_id(base_id: &str, used_ids: &mut BTreeSet<String>) -> String {
+    if used_ids.insert(base_id.to_string()) {
+        return base_id.to_string();
+    }
+
+    let mut suffix = 1usize;
+    loop {
+        let candidate = format!("{base_id}#{suffix}");
+        if used_ids.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn remap_region_spec_ids(region: &RegionSpec, aliases: &RecipeAliasMap) -> RegionSpec {
+    RegionSpec {
+        anchor: remap_anchor_ids(&region.anchor, aliases),
+        bounds: region.bounds,
+        absolute: region.absolute,
+    }
+}
+
+fn remap_anchor_ids(
+    anchor: &crate::anchor::Anchor,
+    aliases: &RecipeAliasMap,
+) -> crate::anchor::Anchor {
+    match anchor {
+        crate::anchor::Anchor::Root => crate::anchor::Anchor::Root,
+        crate::anchor::Anchor::Rect(rect) => crate::anchor::Anchor::Rect(*rect),
+        crate::anchor::Anchor::Node(predicate) => {
+            crate::anchor::Anchor::Node(remap_node_predicate_ids(predicate, aliases))
+        }
+        crate::anchor::Anchor::Handle(handle) => crate::anchor::Anchor::Handle(*handle),
+        crate::anchor::Anchor::Region(region) => {
+            crate::anchor::Anchor::Region(Box::new(remap_region_spec_ids(region, aliases)))
+        }
+        crate::anchor::Anchor::PixelProbe { region, probe } => crate::anchor::Anchor::PixelProbe {
+            region: Box::new(remap_region_spec_ids(region, aliases)),
+            probe: *probe,
+        },
+        crate::anchor::Anchor::RegionProbe { region, probe } => {
+            crate::anchor::Anchor::RegionProbe {
+                region: Box::new(remap_region_spec_ids(region, aliases)),
+                probe: *probe,
+            }
+        }
+        crate::anchor::Anchor::ImageMatch { region, matcher } => {
+            crate::anchor::Anchor::ImageMatch {
+                region: Box::new(remap_region_spec_ids(region, aliases)),
+                matcher: matcher.clone(),
+            }
+        }
+        crate::anchor::Anchor::Custom { region, refiner } => crate::anchor::Anchor::Custom {
+            region: Box::new(remap_region_spec_ids(region, aliases)),
+            refiner: refiner.clone(),
+        },
+    }
+}
+
+fn remap_node_predicate_ids(predicate: &NodePredicate, aliases: &RecipeAliasMap) -> NodePredicate {
+    match predicate {
+        NodePredicate::IdEq(id) => {
+            if aliases.exact_ids.contains(id) {
+                NodePredicate::IdEq(id.clone())
+            } else {
+                aliases
+                    .aliases
+                    .get(id)
+                    .cloned()
+                    .map(NodePredicate::IdEq)
+                    .unwrap_or_else(|| NodePredicate::IdEq(id.clone()))
+            }
+        }
+        NodePredicate::SelectorEq(selector) => NodePredicate::SelectorEq(selector.clone()),
+        NodePredicate::AnySelector(matcher) => NodePredicate::AnySelector(matcher.clone()),
+        NodePredicate::RoleEq(role) => NodePredicate::RoleEq(role.clone()),
+        NodePredicate::Label(matcher) => NodePredicate::Label(matcher.clone()),
+        NodePredicate::Value(matcher) => NodePredicate::Value(matcher.clone()),
+        NodePredicate::ClassEq(class) => NodePredicate::ClassEq(class.clone()),
+        NodePredicate::TagEq(tag) => NodePredicate::TagEq(tag.clone()),
+        NodePredicate::PropertyEq(key, value) => {
+            NodePredicate::PropertyEq(key.clone(), value.clone())
+        }
+        NodePredicate::StateEq(key, value) => NodePredicate::StateEq(key.clone(), value.clone()),
+        NodePredicate::Parent(inner) => {
+            NodePredicate::Parent(Box::new(remap_node_predicate_ids(inner, aliases)))
+        }
+        NodePredicate::Ancestor(inner) => {
+            NodePredicate::Ancestor(Box::new(remap_node_predicate_ids(inner, aliases)))
+        }
+        NodePredicate::Not(inner) => {
+            NodePredicate::Not(Box::new(remap_node_predicate_ids(inner, aliases)))
+        }
+        NodePredicate::And(predicates) => NodePredicate::And(
+            predicates
+                .iter()
+                .map(|predicate| remap_node_predicate_ids(predicate, aliases))
+                .collect(),
+        ),
+        NodePredicate::Or(predicates) => NodePredicate::Or(
+            predicates
+                .iter()
+                .map(|predicate| remap_node_predicate_ids(predicate, aliases))
+                .collect(),
+        ),
+    }
 }
 
 /// Serializable snapshot of the semantic scene under test.
@@ -223,6 +705,7 @@ impl SemanticNode {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneSnapshot {
     nodes: Vec<SemanticNode>,
+    recipe_errors: Vec<NodeRecipeResolutionError>,
     id_index: BTreeMap<String, Vec<usize>>,
     selector_index: BTreeMap<String, Vec<usize>>,
     children_index: BTreeMap<String, Vec<usize>>,
@@ -241,6 +724,15 @@ impl SceneSnapshot {
     /// parent-child traversal.
     #[must_use]
     pub fn new(nodes: Vec<SemanticNode>) -> Self {
+        Self::with_recipe_errors(nodes, Vec::new())
+    }
+
+    /// Creates a scene snapshot from collected semantic nodes and recipe diagnostics.
+    #[must_use]
+    pub fn with_recipe_errors(
+        nodes: Vec<SemanticNode>,
+        recipe_errors: Vec<NodeRecipeResolutionError>,
+    ) -> Self {
         let mut id_index = BTreeMap::<String, Vec<usize>>::new();
         let mut selector_index = BTreeMap::<String, Vec<usize>>::new();
         let mut children_index = BTreeMap::<String, Vec<usize>>::new();
@@ -270,6 +762,7 @@ impl SceneSnapshot {
 
         Self {
             nodes,
+            recipe_errors,
             id_index,
             selector_index,
             children_index,
@@ -280,6 +773,12 @@ impl SceneSnapshot {
     #[must_use]
     pub fn all(&self) -> &[SemanticNode] {
         &self.nodes
+    }
+
+    /// Returns non-fatal recipe resolution failures captured during snapshot construction.
+    #[must_use]
+    pub fn recipe_errors(&self) -> &[NodeRecipeResolutionError] {
+        &self.recipe_errors
     }
 
     /// Returns the node referenced by `handle`.
@@ -458,7 +957,7 @@ impl SceneSnapshot {
             .iter()
             .enumerate()
             .filter_map(|(index, node)| {
-                let rect = node.visible_rect.unwrap_or(node.rect);
+                let rect = hit_test_bounds_for_node(node)?;
                 (node.visible
                     && node.hit_testable
                     && rect.size.width > 0.0
@@ -484,7 +983,9 @@ impl SceneSnapshot {
     fn resolve_handle(&self, handle: NodeHandle) -> Option<QueryMatch<'_>> {
         let node = self.node(handle)?;
         let interactability = classify_interactability(self, handle, node);
-        let preferred_hit_point = interactability.preferred_hit_point();
+        let preferred_hit_point = interactability
+            .preferred_hit_point()
+            .or_else(|| explicit_hit_point(node));
         Some(QueryMatch {
             handle,
             node,
@@ -500,6 +1001,11 @@ impl SceneSnapshot {
 pub trait SemanticProvider {
     /// Produces the current semantic nodes for the live scene.
     fn snapshot_nodes(&self) -> Vec<SemanticNode>;
+
+    /// Produces declarative node recipes resolved against the live scene and pixels.
+    fn snapshot_recipes(&self) -> Vec<NodeRecipe> {
+        Vec::new()
+    }
 }
 
 fn classify_interactability(
@@ -510,13 +1016,14 @@ fn classify_interactability(
     if !node.visible {
         return Interactability::Hidden;
     }
-    if node.rect.size.width <= 0.0 || node.rect.size.height <= 0.0 {
+    if explicit_hit_rect(node).is_none()
+        && (node.rect.size.width <= 0.0 || node.rect.size.height <= 0.0)
+    {
         return Interactability::ZeroSized;
     }
-    let visible_bounds = node.visible_rect.unwrap_or(node.rect);
-    if visible_bounds.size.width <= 0.0 || visible_bounds.size.height <= 0.0 {
+    let Some(hit_bounds) = hit_test_bounds_for_node(node) else {
         return Interactability::FullyClipped;
-    }
+    };
     if node.state.get("disabled") == Some(&PropertyValue::Bool(true))
         || node.properties.get("disabled") == Some(&PropertyValue::Bool(true))
     {
@@ -526,7 +1033,13 @@ fn classify_interactability(
         return Interactability::NotHitTestable;
     }
     let mut occluded = None;
-    for hit_point in interactability_probe_points(visible_bounds) {
+    let mut probe_points = explicit_hit_point(node).into_iter().collect::<Vec<_>>();
+    for point in interactability_probe_points(hit_bounds) {
+        if !probe_points.contains(&point) {
+            probe_points.push(point);
+        }
+    }
+    for hit_point in probe_points {
         match scene.topmost_at(hit_point) {
             Some(topmost) if topmost == handle => {
                 return Interactability::Interactable { hit_point };
@@ -549,6 +1062,45 @@ fn rect_center(rect: Rect) -> Point {
         rect.origin.x + rect.size.width / 2.0,
         rect.origin.y + rect.size.height / 2.0,
     )
+}
+
+fn explicit_hit_point(node: &SemanticNode) -> Option<Point> {
+    match (
+        node.properties.get(HIT_POINT_X_PROPERTY),
+        node.properties.get(HIT_POINT_Y_PROPERTY),
+    ) {
+        (Some(PropertyValue::Integer(x)), Some(PropertyValue::Integer(y))) => {
+            Some(Point::new(*x as f64, *y as f64))
+        }
+        _ => None,
+    }
+}
+
+fn explicit_hit_rect(node: &SemanticNode) -> Option<Rect> {
+    match (
+        node.properties.get(HIT_RECT_X_PROPERTY),
+        node.properties.get(HIT_RECT_Y_PROPERTY),
+        node.properties.get(HIT_RECT_WIDTH_PROPERTY),
+        node.properties.get(HIT_RECT_HEIGHT_PROPERTY),
+    ) {
+        (
+            Some(PropertyValue::Integer(x)),
+            Some(PropertyValue::Integer(y)),
+            Some(PropertyValue::Integer(width)),
+            Some(PropertyValue::Integer(height)),
+        ) if *width > 0 && *height > 0 => Some(Rect::new(
+            Point::new(*x as f64, *y as f64),
+            crate::Size::new(*width as f64, *height as f64),
+        )),
+        _ => None,
+    }
+}
+
+fn hit_test_bounds_for_node(node: &SemanticNode) -> Option<Rect> {
+    explicit_hit_rect(node).or_else(|| {
+        let rect = node.visible_rect.unwrap_or(node.rect);
+        (rect.size.width > 0.0 && rect.size.height > 0.0).then_some(rect)
+    })
 }
 
 fn visible_bounds_for_node(node: &SemanticNode) -> Option<Rect> {
@@ -725,7 +1277,7 @@ pub(crate) fn scene_context(scene: &SceneSnapshot, index: usize) -> impl Predica
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NodePredicate, Point, QueryError, Size};
+    use crate::{NodePredicate, Point, QueryError, RegionResolveError, RegionSpec, Size};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -1060,5 +1612,255 @@ mod tests {
             Ok(Interactability::Interactable { hit_point })
                 if hit_point != Point::new(6.0, 6.0)
         ));
+    }
+
+    #[test]
+    fn explicit_hit_targets_drive_hit_testing_and_interactability() {
+        let resolved = resolve_node_recipes(
+            Vec::new(),
+            Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 40.0)),
+            None,
+            &[NodeRecipe::new(
+                "outside-hit",
+                Role::Button,
+                RegionSpec::rect(Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0))),
+            )
+            .with_hit_target(RegionSpec::rect(Rect::new(
+                Point::new(20.0, 20.0),
+                Size::new(4.0, 4.0),
+            )))],
+        );
+        let scene = SceneSnapshot::new(resolved.nodes);
+        let handle = scene.find(&NodePredicate::id_eq("outside-hit")).unwrap();
+        let hit_point = Point::new(22.0, 22.0);
+
+        assert_eq!(scene.hit_path_at(hit_point), vec![handle]);
+        assert_eq!(scene.topmost_at(hit_point), Some(handle));
+        assert_eq!(
+            scene
+                .preferred_hit_point(&NodePredicate::id_eq("outside-hit"))
+                .unwrap(),
+            hit_point
+        );
+        assert!(matches!(
+            scene.interactability(&NodePredicate::id_eq("outside-hit")),
+            Ok(Interactability::Interactable { hit_point: actual }) if actual == hit_point
+        ));
+        assert!(scene.hit_path_at(Point::new(5.0, 5.0)).is_empty());
+    }
+
+    #[test]
+    fn preferred_hit_point_tracks_fallback_probe_when_explicit_point_is_occluded() {
+        let scene = SceneSnapshot::new(vec![
+            SemanticNode::new(
+                "target",
+                Role::Button,
+                Rect::new(Point::new(0.0, 0.0), Size::new(12.0, 12.0)),
+            )
+            .with_property(HIT_POINT_X_PROPERTY, PropertyValue::Integer(6))
+            .with_property(HIT_POINT_Y_PROPERTY, PropertyValue::Integer(6)),
+            SemanticNode::new(
+                "overlay",
+                Role::Button,
+                Rect::new(Point::new(4.0, 4.0), Size::new(4.0, 4.0)),
+            )
+            .with_property(PAINT_ORDER_PATH_PROPERTY, PropertyValue::string("1")),
+        ]);
+
+        let preferred = scene
+            .preferred_hit_point(&NodePredicate::id_eq("target"))
+            .expect("scene should report the usable fallback hit point");
+
+        assert_ne!(preferred, Point::new(6.0, 6.0));
+        assert!(matches!(
+            scene.interactability(&NodePredicate::id_eq("target")),
+            Ok(Interactability::Interactable { hit_point }) if hit_point == preferred
+        ));
+    }
+
+    #[test]
+    fn with_provenance_updates_existing_field_provenance() {
+        let node = SemanticNode::new(
+            "node",
+            Role::Button,
+            Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0)),
+        )
+        .with_property("kind", PropertyValue::string("button"))
+        .with_state("enabled", PropertyValue::Bool(true))
+        .with_provenance(NodeProvenanceKind::Matched);
+
+        assert_eq!(node.provenance, NodeProvenanceKind::Matched);
+        assert_eq!(
+            node.property_provenance.get("kind"),
+            Some(&NodeProvenanceKind::Matched)
+        );
+        assert_eq!(
+            node.state_provenance.get("enabled"),
+            Some(&NodeProvenanceKind::Matched)
+        );
+    }
+
+    #[test]
+    fn missing_hit_target_refinement_falls_back_to_locator_bounds() {
+        let resolved = resolve_node_recipes(
+            Vec::new(),
+            Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 40.0)),
+            None,
+            &[NodeRecipe::new(
+                "fallback-hit",
+                Role::Button,
+                RegionSpec::rect(Rect::new(Point::new(4.0, 6.0), Size::new(12.0, 8.0))),
+            )
+            .with_hit_target(RegionSpec::node(NodePredicate::id_eq("missing-hit-target")))],
+        );
+        let scene = SceneSnapshot::with_recipe_errors(resolved.nodes, resolved.errors.clone());
+        let handle = scene.find(&NodePredicate::id_eq("fallback-hit")).unwrap();
+
+        assert!(scene.recipe_errors().is_empty());
+        assert!(scene
+            .node(handle)
+            .unwrap()
+            .properties
+            .get(HIT_POINT_X_PROPERTY)
+            .is_none());
+        assert_eq!(
+            scene
+                .preferred_hit_point(&NodePredicate::id_eq("fallback-hit"))
+                .unwrap(),
+            Point::new(10.0, 10.0)
+        );
+        assert_eq!(scene.hit_path_at(Point::new(10.0, 10.0)), vec![handle]);
+        assert!(matches!(
+            scene.interactability(&NodePredicate::id_eq("fallback-hit")),
+            Ok(Interactability::Interactable { hit_point }) if hit_point == Point::new(10.0, 10.0)
+        ));
+    }
+
+    #[test]
+    fn resolve_node_recipes_normalizes_provider_references_and_ids() {
+        let resolved = resolve_node_recipes(
+            vec![SemanticNode::new(
+                "provider::anchor",
+                Role::Container,
+                Rect::new(Point::new(0.0, 0.0), Size::new(20.0, 10.0)),
+            )
+            .with_property("glasscheck:source_id", PropertyValue::string("anchor"))],
+            Rect::new(Point::new(0.0, 0.0), Size::new(80.0, 40.0)),
+            None,
+            &[NodeRecipe::new(
+                "anchor",
+                Role::Button,
+                RegionSpec::node(NodePredicate::id_eq("anchor")).right_of(10.0, 12.0),
+            )
+            .with_parent("anchor", 0)],
+        );
+
+        assert!(resolved.errors.is_empty());
+        let node = resolved.nodes.last().unwrap();
+        assert_eq!(node.id, "provider::anchor#1");
+        assert_eq!(node.parent_id.as_deref(), Some("provider::anchor"));
+        assert_eq!(
+            node.properties.get("glasscheck:source_id"),
+            Some(&PropertyValue::string("anchor"))
+        );
+        assert_eq!(
+            node.rect,
+            Rect::new(Point::new(30.0, 0.0), Size::new(12.0, 10.0))
+        );
+    }
+
+    #[test]
+    fn resolve_node_recipes_keeps_exact_ids_reachable_when_provider_source_ids_collide() {
+        let resolved = resolve_node_recipes(
+            vec![
+                SemanticNode::new(
+                    "anchor",
+                    Role::Container,
+                    Rect::new(Point::new(0.0, 0.0), Size::new(20.0, 10.0)),
+                ),
+                SemanticNode::new(
+                    "provider::anchor",
+                    Role::Container,
+                    Rect::new(Point::new(40.0, 0.0), Size::new(20.0, 10.0)),
+                )
+                .with_property("glasscheck:source_id", PropertyValue::string("anchor")),
+            ],
+            Rect::new(Point::new(0.0, 0.0), Size::new(80.0, 40.0)),
+            None,
+            &[NodeRecipe::new(
+                "child",
+                Role::Button,
+                RegionSpec::node(NodePredicate::id_eq("anchor")).right_of(5.0, 12.0),
+            )
+            .with_parent("anchor", 0)],
+        );
+
+        assert!(resolved.errors.is_empty());
+        let node = resolved.nodes.last().unwrap();
+        assert_eq!(node.parent_id.as_deref(), Some("anchor"));
+        assert_eq!(
+            node.rect,
+            Rect::new(Point::new(25.0, 0.0), Size::new(12.0, 10.0))
+        );
+    }
+
+    #[test]
+    fn resolve_node_recipes_rejects_ambiguous_raw_provider_references() {
+        let resolved = resolve_node_recipes(
+            vec![
+                SemanticNode::new(
+                    "provider::anchor",
+                    Role::Container,
+                    Rect::new(Point::new(0.0, 0.0), Size::new(20.0, 10.0)),
+                )
+                .with_property("glasscheck:source_id", PropertyValue::string("anchor")),
+                SemanticNode::new(
+                    "provider::anchor#1",
+                    Role::Container,
+                    Rect::new(Point::new(30.0, 0.0), Size::new(20.0, 10.0)),
+                )
+                .with_property("glasscheck:source_id", PropertyValue::string("anchor")),
+            ],
+            Rect::new(Point::new(0.0, 0.0), Size::new(80.0, 40.0)),
+            None,
+            &[NodeRecipe::new(
+                "child",
+                Role::Button,
+                RegionSpec::node(NodePredicate::id_eq("anchor")).right_of(10.0, 12.0),
+            )],
+        );
+
+        assert_eq!(resolved.errors.len(), 1);
+        assert_eq!(resolved.errors[0].recipe_id, "child");
+        assert!(matches!(
+            resolved.errors[0].error,
+            RegionResolveError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn resolve_node_recipes_preserves_resolution_errors() {
+        let resolved = resolve_node_recipes(
+            Vec::new(),
+            Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 20.0)),
+            None,
+            &[NodeRecipe::new(
+                "missing-anchor",
+                Role::Button,
+                RegionSpec::node(NodePredicate::selector_eq("provider.anchor")),
+            )
+            .with_selector("provider.missing")],
+        );
+
+        assert!(resolved.nodes.is_empty());
+        assert_eq!(resolved.errors.len(), 1);
+        assert_eq!(resolved.errors[0].recipe_id, "missing-anchor");
+        assert!(matches!(
+            resolved.errors[0].error,
+            RegionResolveError::NotFound(_)
+        ));
+
+        let scene = SceneSnapshot::with_recipe_errors(resolved.nodes, resolved.errors.clone());
+        assert_eq!(scene.recipe_errors(), resolved.errors.as_slice());
     }
 }

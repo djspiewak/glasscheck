@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::Image;
 
 /// Configuration for pixel-by-pixel image comparison.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompareConfig {
     /// Maximum allowed absolute per-channel difference for a pixel to match.
     pub channel_tolerance: u8,
