@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::{
-    anchor::RegionSpec, image::Image, Interactability, NodePredicate, Point, QueryError,
-    QueryMatch, Rect,
+    anchor::RegionSpec, image::Image, Interactability, Point, QueryError, QueryMatch, Rect,
+    Selector,
 };
 
 const PAINT_ORDER_PATH_PROPERTY: &str = "glasscheck:paint_order_path";
@@ -73,7 +73,7 @@ impl PropertyValue {
     }
 }
 
-/// Immutable handle to a node within a specific scene snapshot.
+/// Immutable handle to a node within a specific scene.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeHandle {
     index: usize,
@@ -89,9 +89,8 @@ impl NodeHandle {
 
 /// Rich semantic metadata captured for a UI node under test.
 ///
-/// Use this as the primary testing model for new code. Compared with the older
-/// flat `NodeMetadata` model, it supports hierarchy, selectors, properties,
-/// state, visibility, and hit-testing semantics in one snapshot.
+/// Use this as the primary testing model. It supports hierarchy, selectors,
+/// properties, state, visibility, and hit-testing semantics in one snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NodeProvenanceKind {
     Native,
@@ -158,6 +157,10 @@ pub struct SemanticNode {
 
 impl SemanticNode {
     /// Creates a node with the required fields and sensible defaults.
+    ///
+    /// `id` is the scene-local identity for this node instance. Use it for
+    /// exact lookup within one scene and for structural relationships such as
+    /// `parent_id`, but prefer selectors for stable cross-scene queries.
     #[must_use]
     pub fn new(id: impl Into<String>, role: Role, rect: Rect) -> Self {
         Self {
@@ -192,6 +195,10 @@ impl SemanticNode {
     }
 
     /// Adds a stable test-facing selector.
+    ///
+    /// Selectors are the preferred query surface for tests because they are
+    /// caller-defined and remain stable even when snapshot-local IDs must be
+    /// disambiguated during scene construction.
     #[must_use]
     pub fn with_selector(mut self, selector: impl Into<String>) -> Self {
         self.selectors.insert(selector.into());
@@ -210,6 +217,9 @@ impl SemanticNode {
     }
 
     /// Sets the parent node identifier and child ordering.
+    ///
+    /// `parent_id` refers to the scene-local `id` of the parent node, not one
+    /// of its selectors.
     #[must_use]
     pub fn with_parent(mut self, parent_id: impl Into<String>, child_index: usize) -> Self {
         self.parent_id = Some(parent_id.into());
@@ -286,6 +296,10 @@ pub struct NodeRecipe {
 }
 
 impl NodeRecipe {
+    /// Creates a declarative recipe for a node resolved from `locator`.
+    ///
+    /// `id` becomes the scene-local identity of the resolved node. Use
+    /// `with_selector` to attach stable test-facing query names.
     #[must_use]
     pub fn new(id: impl Into<String>, role: Role, locator: RegionSpec) -> Self {
         Self {
@@ -309,6 +323,11 @@ impl NodeRecipe {
         }
     }
 
+    /// Adds a stable test-facing selector to the resolved node.
+    ///
+    /// This is separate from the recipe `id`: the `id` is scene-local
+    /// structural identity, while selectors are the preferred public query
+    /// names for tests and waits.
     #[must_use]
     pub fn with_selector(mut self, selector: impl Into<String>) -> Self {
         self.selectors.insert(selector.into());
@@ -369,7 +388,7 @@ impl NodeRecipe {
 
     pub fn resolve(
         &self,
-        scene: &SceneSnapshot,
+        scene: &Scene,
         root_bounds: Rect,
         image: Option<&Image>,
     ) -> Result<SemanticNode, crate::RegionResolveError> {
@@ -482,7 +501,7 @@ pub fn resolve_node_recipes(
 
     for recipe in recipes {
         let normalized_recipe = normalize_recipe(recipe, &nodes, &recipe_id_counts, &mut used_ids);
-        let scene = SceneSnapshot::new(nodes.clone());
+        let scene = Scene::new(nodes.clone());
         match normalized_recipe.resolve(&scene, root_bounds, image) {
             Ok(node) => nodes.push(node),
             Err(error) => errors.push(NodeRecipeResolutionError {
@@ -649,47 +668,43 @@ fn remap_anchor_ids(
     }
 }
 
-fn remap_node_predicate_ids(predicate: &NodePredicate, aliases: &RecipeAliasMap) -> NodePredicate {
+fn remap_node_predicate_ids(predicate: &Selector, aliases: &RecipeAliasMap) -> Selector {
     match predicate {
-        NodePredicate::IdEq(id) => {
+        Selector::IdEq(id) => {
             if aliases.exact_ids.contains(id) {
-                NodePredicate::IdEq(id.clone())
+                Selector::IdEq(id.clone())
             } else {
                 aliases
                     .aliases
                     .get(id)
                     .cloned()
-                    .map(NodePredicate::IdEq)
-                    .unwrap_or_else(|| NodePredicate::IdEq(id.clone()))
+                    .map(Selector::IdEq)
+                    .unwrap_or_else(|| Selector::IdEq(id.clone()))
             }
         }
-        NodePredicate::SelectorEq(selector) => NodePredicate::SelectorEq(selector.clone()),
-        NodePredicate::AnySelector(matcher) => NodePredicate::AnySelector(matcher.clone()),
-        NodePredicate::RoleEq(role) => NodePredicate::RoleEq(role.clone()),
-        NodePredicate::Label(matcher) => NodePredicate::Label(matcher.clone()),
-        NodePredicate::Value(matcher) => NodePredicate::Value(matcher.clone()),
-        NodePredicate::ClassEq(class) => NodePredicate::ClassEq(class.clone()),
-        NodePredicate::TagEq(tag) => NodePredicate::TagEq(tag.clone()),
-        NodePredicate::PropertyEq(key, value) => {
-            NodePredicate::PropertyEq(key.clone(), value.clone())
+        Selector::SelectorEq(selector) => Selector::SelectorEq(selector.clone()),
+        Selector::AnySelector(matcher) => Selector::AnySelector(matcher.clone()),
+        Selector::RoleEq(role) => Selector::RoleEq(role.clone()),
+        Selector::Label(matcher) => Selector::Label(matcher.clone()),
+        Selector::Value(matcher) => Selector::Value(matcher.clone()),
+        Selector::ClassEq(class) => Selector::ClassEq(class.clone()),
+        Selector::TagEq(tag) => Selector::TagEq(tag.clone()),
+        Selector::PropertyEq(key, value) => Selector::PropertyEq(key.clone(), value.clone()),
+        Selector::StateEq(key, value) => Selector::StateEq(key.clone(), value.clone()),
+        Selector::Parent(inner) => {
+            Selector::Parent(Box::new(remap_node_predicate_ids(inner, aliases)))
         }
-        NodePredicate::StateEq(key, value) => NodePredicate::StateEq(key.clone(), value.clone()),
-        NodePredicate::Parent(inner) => {
-            NodePredicate::Parent(Box::new(remap_node_predicate_ids(inner, aliases)))
+        Selector::Ancestor(inner) => {
+            Selector::Ancestor(Box::new(remap_node_predicate_ids(inner, aliases)))
         }
-        NodePredicate::Ancestor(inner) => {
-            NodePredicate::Ancestor(Box::new(remap_node_predicate_ids(inner, aliases)))
-        }
-        NodePredicate::Not(inner) => {
-            NodePredicate::Not(Box::new(remap_node_predicate_ids(inner, aliases)))
-        }
-        NodePredicate::And(predicates) => NodePredicate::And(
+        Selector::Not(inner) => Selector::Not(Box::new(remap_node_predicate_ids(inner, aliases))),
+        Selector::And(predicates) => Selector::And(
             predicates
                 .iter()
                 .map(|predicate| remap_node_predicate_ids(predicate, aliases))
                 .collect(),
         ),
-        NodePredicate::Or(predicates) => NodePredicate::Or(
+        Selector::Or(predicates) => Selector::Or(
             predicates
                 .iter()
                 .map(|predicate| remap_node_predicate_ids(predicate, aliases))
@@ -698,12 +713,12 @@ fn remap_node_predicate_ids(predicate: &NodePredicate, aliases: &RecipeAliasMap)
     }
 }
 
-/// Serializable snapshot of the semantic scene under test.
+/// Serializable semantic scene under test.
 ///
-/// A snapshot is the main query surface for semantic assertions, waits, and
+/// A scene is the main query surface for semantic assertions, waits, and
 /// scene diffs. Build one per assertion step when the UI can change over time.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SceneSnapshot {
+pub struct Scene {
     nodes: Vec<SemanticNode>,
     recipe_errors: Vec<NodeRecipeResolutionError>,
     id_index: BTreeMap<String, Vec<usize>>,
@@ -711,14 +726,14 @@ pub struct SceneSnapshot {
     children_index: BTreeMap<String, Vec<usize>>,
 }
 
-impl Default for SceneSnapshot {
+impl Default for Scene {
     fn default() -> Self {
         Self::new(Vec::new())
     }
 }
 
-impl SceneSnapshot {
-    /// Creates a scene snapshot from collected semantic nodes.
+impl Scene {
+    /// Creates a scene from collected semantic nodes.
     ///
     /// The constructor builds indexes for exact ID lookup, selector lookup, and
     /// parent-child traversal.
@@ -727,7 +742,7 @@ impl SceneSnapshot {
         Self::with_recipe_errors(nodes, Vec::new())
     }
 
-    /// Creates a scene snapshot from collected semantic nodes and recipe diagnostics.
+    /// Creates a scene from collected semantic nodes and recipe diagnostics.
     #[must_use]
     pub fn with_recipe_errors(
         nodes: Vec<SemanticNode>,
@@ -789,9 +804,9 @@ impl SceneSnapshot {
 
     /// Finds all handles matching `predicate`.
     #[must_use]
-    pub fn find_all(&self, predicate: &crate::NodePredicate) -> Vec<NodeHandle> {
+    pub fn find_all(&self, predicate: &crate::Selector) -> Vec<NodeHandle> {
         match predicate {
-            crate::NodePredicate::IdEq(id) => {
+            crate::Selector::IdEq(id) => {
                 return self
                     .id_index
                     .get(id)
@@ -800,7 +815,7 @@ impl SceneSnapshot {
                     .map(|index| NodeHandle { index })
                     .collect();
             }
-            crate::NodePredicate::SelectorEq(selector) => {
+            crate::Selector::SelectorEq(selector) => {
                 return self
                     .selector_index
                     .get(selector)
@@ -824,13 +839,13 @@ impl SceneSnapshot {
     }
 
     /// Finds exactly one handle matching `predicate`.
-    pub fn find(&self, predicate: &crate::NodePredicate) -> Result<NodeHandle, crate::QueryError> {
+    pub fn find(&self, predicate: &crate::Selector) -> Result<NodeHandle, crate::QueryError> {
         let matches = self.find_all(predicate);
         match matches.as_slice() {
-            [] => Err(crate::QueryError::NotFoundPredicate(predicate.clone())),
+            [] => Err(crate::QueryError::NotFound(predicate.clone())),
             [handle] => Ok(*handle),
-            _ => Err(crate::QueryError::MultiplePredicateMatches {
-                predicate: predicate.clone(),
+            _ => Err(crate::QueryError::MultipleMatches {
+                selector: predicate.clone(),
                 count: matches.len(),
             }),
         }
@@ -870,15 +885,15 @@ impl SceneSnapshot {
     }
 
     /// Resolves exactly one semantic match with rich metadata.
-    pub fn resolve(&self, predicate: &NodePredicate) -> Result<QueryMatch<'_>, QueryError> {
+    pub fn resolve(&self, predicate: &Selector) -> Result<QueryMatch<'_>, QueryError> {
         let handle = self.find(predicate)?;
         self.resolve_handle(handle)
-            .ok_or(QueryError::NotFoundPredicate(predicate.clone()))
+            .ok_or(QueryError::NotFound(predicate.clone()))
     }
 
     /// Resolves all semantic matches with rich metadata.
     #[must_use]
-    pub fn resolve_all(&self, predicate: &NodePredicate) -> Vec<QueryMatch<'_>> {
+    pub fn resolve_all(&self, predicate: &Selector) -> Vec<QueryMatch<'_>> {
         self.find_all(predicate)
             .into_iter()
             .filter_map(|handle| self.resolve_handle(handle))
@@ -887,41 +902,41 @@ impl SceneSnapshot {
 
     /// Returns whether the predicate matches any nodes.
     #[must_use]
-    pub fn exists(&self, predicate: &NodePredicate) -> bool {
+    pub fn exists(&self, predicate: &Selector) -> bool {
         !self.find_all(predicate).is_empty()
     }
 
     /// Returns the number of nodes matching the predicate.
     #[must_use]
-    pub fn count(&self, predicate: &NodePredicate) -> usize {
+    pub fn count(&self, predicate: &Selector) -> usize {
         self.find_all(predicate).len()
     }
 
     /// Returns the raw bounds of the unique match.
-    pub fn bounds(&self, predicate: &NodePredicate) -> Result<Rect, QueryError> {
+    pub fn bounds(&self, predicate: &Selector) -> Result<Rect, QueryError> {
         Ok(self.resolve(predicate)?.bounds)
     }
 
     /// Returns the visible bounds of the unique match.
-    pub fn visible_bounds(&self, predicate: &NodePredicate) -> Result<Rect, QueryError> {
+    pub fn visible_bounds(&self, predicate: &Selector) -> Result<Rect, QueryError> {
         self.resolve(predicate)?
             .visible_bounds
-            .ok_or(QueryError::NotFoundPredicate(predicate.clone()))
+            .ok_or(QueryError::NotFound(predicate.clone()))
     }
 
     /// Returns the center point of the unique match's raw bounds.
-    pub fn center(&self, predicate: &NodePredicate) -> Result<Point, QueryError> {
+    pub fn center(&self, predicate: &Selector) -> Result<Point, QueryError> {
         Ok(rect_center(self.bounds(predicate)?))
     }
 
     /// Returns the center point of the unique match's visible bounds.
-    pub fn visible_center(&self, predicate: &NodePredicate) -> Result<Point, QueryError> {
+    pub fn visible_center(&self, predicate: &Selector) -> Result<Point, QueryError> {
         Ok(rect_center(self.visible_bounds(predicate)?))
     }
 
     /// Returns all raw bounds for all matches.
     #[must_use]
-    pub fn all_bounds(&self, predicate: &NodePredicate) -> Vec<Rect> {
+    pub fn all_bounds(&self, predicate: &Selector) -> Vec<Rect> {
         self.resolve_all(predicate)
             .into_iter()
             .map(|resolved| resolved.bounds)
@@ -929,18 +944,15 @@ impl SceneSnapshot {
     }
 
     /// Returns the interactability classification for the unique match.
-    pub fn interactability(
-        &self,
-        predicate: &NodePredicate,
-    ) -> Result<Interactability, QueryError> {
+    pub fn interactability(&self, predicate: &Selector) -> Result<Interactability, QueryError> {
         Ok(self.resolve(predicate)?.interactability)
     }
 
     /// Returns the preferred hit point for the unique match.
-    pub fn preferred_hit_point(&self, predicate: &NodePredicate) -> Result<Point, QueryError> {
+    pub fn preferred_hit_point(&self, predicate: &Selector) -> Result<Point, QueryError> {
         self.interactability(predicate)?
             .preferred_hit_point()
-            .ok_or(QueryError::NotFoundPredicate(predicate.clone()))
+            .ok_or(QueryError::NotFound(predicate.clone()))
     }
 
     /// Returns the topmost node at `point`, when any semantic hit exists.
@@ -1009,7 +1021,7 @@ pub trait SemanticProvider {
 }
 
 fn classify_interactability(
-    scene: &SceneSnapshot,
+    scene: &Scene,
     handle: NodeHandle,
     node: &SemanticNode,
 ) -> Interactability {
@@ -1140,7 +1152,7 @@ fn interactability_probe_points(rect: Rect) -> Vec<Point> {
 }
 
 fn compare_paint_order(
-    scene: &SceneSnapshot,
+    scene: &Scene,
     left: (usize, usize, i32),
     right: (usize, usize, i32),
 ) -> std::cmp::Ordering {
@@ -1173,7 +1185,7 @@ fn compare_paint_order(
 }
 
 fn compare_explicit_paint_paths(
-    scene: &SceneSnapshot,
+    scene: &Scene,
     left_index: usize,
     right_index: usize,
 ) -> Option<std::cmp::Ordering> {
@@ -1204,7 +1216,7 @@ fn explicit_paint_path(node: &SemanticNode) -> Option<Vec<usize>> {
         .ok()
 }
 
-fn paint_order_path(scene: &SceneSnapshot, index: usize) -> Vec<(i32, usize, usize)> {
+fn paint_order_path(scene: &Scene, index: usize) -> Vec<(i32, usize, usize)> {
     let mut path = Vec::new();
     let mut current = Some(NodeHandle { index });
 
@@ -1220,7 +1232,7 @@ fn paint_order_path(scene: &SceneSnapshot, index: usize) -> Vec<(i32, usize, usi
     path
 }
 
-fn is_ancestor(scene: &SceneSnapshot, ancestor_index: usize, descendant_index: usize) -> bool {
+fn is_ancestor(scene: &Scene, ancestor_index: usize, descendant_index: usize) -> bool {
     let mut current = scene.parent_of(NodeHandle {
         index: descendant_index,
     });
@@ -1236,11 +1248,11 @@ fn is_ancestor(scene: &SceneSnapshot, ancestor_index: usize, descendant_index: u
 /// Context exposed to predicates for relationship-aware matching.
 pub(crate) trait PredicateContext {
     fn parent_of(&self, node: &SemanticNode) -> Option<&SemanticNode>;
-    fn has_ancestor_matching(&self, node: &SemanticNode, predicate: &crate::NodePredicate) -> bool;
+    fn has_ancestor_matching(&self, node: &SemanticNode, predicate: &crate::Selector) -> bool;
 }
 
 struct ScenePredicateContext<'a> {
-    scene: &'a SceneSnapshot,
+    scene: &'a Scene,
 }
 
 impl PredicateContext for ScenePredicateContext<'_> {
@@ -1253,7 +1265,7 @@ impl PredicateContext for ScenePredicateContext<'_> {
             .and_then(|index| self.scene.all().get(index))
     }
 
-    fn has_ancestor_matching(&self, node: &SemanticNode, predicate: &crate::NodePredicate) -> bool {
+    fn has_ancestor_matching(&self, node: &SemanticNode, predicate: &crate::Selector) -> bool {
         let mut parent = self.parent_of(node);
         let mut visited = HashSet::new();
         while let Some(current) = parent {
@@ -1269,7 +1281,7 @@ impl PredicateContext for ScenePredicateContext<'_> {
     }
 }
 
-pub(crate) fn scene_context(scene: &SceneSnapshot, index: usize) -> impl PredicateContext + '_ {
+pub(crate) fn scene_context(scene: &Scene, index: usize) -> impl PredicateContext + '_ {
     let _ = index;
     ScenePredicateContext { scene }
 }
@@ -1278,8 +1290,8 @@ pub(crate) fn scene_context(scene: &SceneSnapshot, index: usize) -> impl Predica
 mod tests {
     use super::*;
     use crate::{
-        Image, NodePredicate, PixelMatch, PixelProbe, Point, QueryError, RegionResolveError,
-        RegionSpec, Size,
+        Image, PixelMatch, PixelProbe, Point, QueryError, RegionResolveError, RegionSpec, Selector,
+        Size,
     };
     use std::sync::mpsc;
     use std::time::Duration;
@@ -1301,25 +1313,25 @@ mod tests {
 
     #[test]
     fn ancestor_predicates_follow_parent_chains() {
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new("root", Role::Container, rect()),
             SemanticNode::new("branch", Role::Container, rect()).with_parent("root", 0),
             SemanticNode::new("leaf", Role::Label, rect()).with_parent("branch", 0),
         ]);
 
         let handle = scene
-            .find(&NodePredicate::ancestor(NodePredicate::id_eq("branch")))
+            .find(&Selector::ancestor(Selector::id_eq("branch")))
             .unwrap();
         assert_eq!(scene.node(handle).unwrap().id, "leaf");
     }
 
     #[test]
     fn ancestor_predicates_stop_on_parent_cycles() {
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new("a", Role::Container, rect()).with_parent("b", 0),
             SemanticNode::new("b", Role::Container, rect()).with_parent("a", 0),
         ]);
-        let predicate = NodePredicate::ancestor(NodePredicate::id_eq("missing"));
+        let predicate = Selector::ancestor(Selector::id_eq("missing"));
         let (tx, rx) = mpsc::channel();
 
         std::thread::spawn(move || {
@@ -1330,18 +1342,18 @@ mod tests {
         let result = rx
             .recv_timeout(Duration::from_millis(200))
             .expect("ancestor lookup should terminate even on cycles");
-        assert!(matches!(result, Err(QueryError::NotFoundPredicate(_))));
+        assert!(matches!(result, Err(QueryError::NotFound(_))));
     }
 
     #[test]
     fn children_and_parent_queries_use_indexes() {
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new("root", Role::Container, rect()),
             SemanticNode::new("first", Role::Label, rect()).with_parent("root", 0),
             SemanticNode::new("second", Role::Label, rect()).with_parent("root", 1),
         ]);
 
-        let root = scene.find(&NodePredicate::id_eq("root")).unwrap();
+        let root = scene.find(&Selector::id_eq("root")).unwrap();
         let children = scene.children_of(root);
 
         assert_eq!(children.len(), 2);
@@ -1352,47 +1364,45 @@ mod tests {
 
     #[test]
     fn duplicate_parent_ids_do_not_merge_children() {
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new("root", Role::Container, rect()),
             SemanticNode::new("root", Role::Container, rect()),
             SemanticNode::new("child", Role::Label, rect()).with_parent("root", 0),
         ]);
 
-        let duplicates = scene.find_all(&NodePredicate::id_eq("root"));
+        let duplicates = scene.find_all(&Selector::id_eq("root"));
 
         assert_eq!(duplicates.len(), 2);
         assert!(scene.children_of(duplicates[0]).is_empty());
         assert_eq!(
-            scene.parent_of(scene.find(&NodePredicate::id_eq("child")).unwrap()),
+            scene.parent_of(scene.find(&Selector::id_eq("child")).unwrap()),
             None
         );
     }
 
     #[test]
     fn selector_indexes_support_exact_and_fuzzy_lookup() {
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new("run", Role::Button, rect())
                 .with_selector("toolbar.run")
                 .with_selector("run"),
             SemanticNode::new("stop", Role::Button, rect()).with_selector("toolbar.stop"),
         ]);
 
-        assert_eq!(scene.count(&NodePredicate::selector_eq("toolbar.run")), 1);
+        assert_eq!(scene.count(&Selector::selector_eq("toolbar.run")), 1);
         assert_eq!(
             scene
-                .find(&NodePredicate::any_selector(crate::TextMatch::contains(
-                    "stop"
-                )))
+                .find(&Selector::any_selector(crate::TextMatch::contains("stop")))
                 .unwrap()
                 .index(),
             1
         );
-        assert!(!scene.exists(&NodePredicate::selector_eq("missing")));
+        assert!(!scene.exists(&Selector::selector_eq("missing")));
     }
 
     #[test]
     fn resolve_helpers_expose_bounds_centers_and_counts() {
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new("run", Role::Button, rect()).with_selector("toolbar.run"),
             SemanticNode::new(
                 "secondary",
@@ -1401,57 +1411,48 @@ mod tests {
             ),
         ]);
 
-        assert_eq!(scene.count(&NodePredicate::role_eq(Role::Button)), 2);
+        assert_eq!(scene.count(&Selector::role_eq(Role::Button)), 2);
         assert_eq!(
-            scene
-                .bounds(&NodePredicate::selector_eq("toolbar.run"))
-                .unwrap(),
+            scene.bounds(&Selector::selector_eq("toolbar.run")).unwrap(),
             rect()
         );
         assert_eq!(
-            scene
-                .center(&NodePredicate::selector_eq("toolbar.run"))
-                .unwrap(),
+            scene.center(&Selector::selector_eq("toolbar.run")).unwrap(),
             Point::new(5.0, 5.0)
         );
-        assert_eq!(
-            scene
-                .all_bounds(&NodePredicate::role_eq(Role::Button))
-                .len(),
-            2
-        );
+        assert_eq!(scene.all_bounds(&Selector::role_eq(Role::Button)).len(), 2);
     }
 
     #[test]
     fn visible_bounds_fall_back_to_raw_bounds_when_visible_rect_is_unknown() {
         let visible =
-            SceneSnapshot::new(vec![SemanticNode::new("provider", Role::Button, rect())
+            Scene::new(vec![SemanticNode::new("provider", Role::Button, rect())
                 .with_selector("provider.button")]);
 
         assert_eq!(
             visible
-                .visible_bounds(&NodePredicate::selector_eq("provider.button"))
+                .visible_bounds(&Selector::selector_eq("provider.button"))
                 .unwrap(),
             rect()
         );
         assert_eq!(
             visible
-                .resolve(&NodePredicate::selector_eq("provider.button"))
+                .resolve(&Selector::selector_eq("provider.button"))
                 .unwrap()
                 .visible_bounds,
             Some(rect())
         );
 
-        let hidden = SceneSnapshot::new(vec![SemanticNode {
+        let hidden = Scene::new(vec![SemanticNode {
             visible: false,
             ..SemanticNode::new("provider", Role::Button, rect()).with_selector("provider.button")
         }]);
         assert!(hidden
-            .visible_bounds(&NodePredicate::selector_eq("provider.button"))
+            .visible_bounds(&Selector::selector_eq("provider.button"))
             .is_err());
         assert_eq!(
             hidden
-                .resolve(&NodePredicate::selector_eq("provider.button"))
+                .resolve(&Selector::selector_eq("provider.button"))
                 .unwrap()
                 .visible_bounds,
             None
@@ -1460,7 +1461,7 @@ mod tests {
 
     #[test]
     fn hit_path_orders_descendants_above_their_ancestors_within_one_subtree() {
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new(
                 "parent",
                 Role::Container,
@@ -1481,7 +1482,7 @@ mod tests {
 
     #[test]
     fn hit_path_prefers_later_painted_sibling_subtrees_over_deeper_descendants() {
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new(
                 "root",
                 Role::Container,
@@ -1526,7 +1527,7 @@ mod tests {
 
     #[test]
     fn hit_path_prefers_explicit_native_paint_paths_when_registered_parent_chain_is_reduced() {
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new(
                 "root",
                 Role::Container,
@@ -1558,7 +1559,7 @@ mod tests {
         assert_eq!(hit_ids[0], "right-overlay");
         assert_eq!(hit_ids[1], "left-leaf");
         assert!(matches!(
-            scene.interactability(&NodePredicate::id_eq("left-leaf")),
+            scene.interactability(&Selector::id_eq("left-leaf")),
             Ok(Interactability::Occluded { topmost, .. })
                 if scene.node(topmost).unwrap().id == "right-overlay"
         ));
@@ -1571,13 +1572,13 @@ mod tests {
             Role::Button,
             Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0)),
         );
-        let interactable_scene = SceneSnapshot::new(vec![target.clone()]);
+        let interactable_scene = Scene::new(vec![target.clone()]);
         assert!(matches!(
-            interactable_scene.interactability(&NodePredicate::id_eq("target")),
+            interactable_scene.interactability(&Selector::id_eq("target")),
             Ok(Interactability::Interactable { .. })
         ));
 
-        let occluded_scene = SceneSnapshot::new(vec![
+        let occluded_scene = Scene::new(vec![
             SemanticNode::new(
                 "root",
                 Role::Container,
@@ -1599,7 +1600,7 @@ mod tests {
         ]);
 
         assert!(matches!(
-            occluded_scene.interactability(&NodePredicate::id_eq("target")),
+            occluded_scene.interactability(&Selector::id_eq("target")),
             Ok(Interactability::Occluded { topmost, .. })
                 if occluded_scene.node(topmost).unwrap().id == "overlay"
         ));
@@ -1607,7 +1608,7 @@ mod tests {
 
     #[test]
     fn interactability_uses_fallback_probe_points_when_center_is_occluded() {
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new(
                 "target",
                 Role::Button,
@@ -1622,7 +1623,7 @@ mod tests {
         ]);
 
         assert!(matches!(
-            scene.interactability(&NodePredicate::id_eq("target")),
+            scene.interactability(&Selector::id_eq("target")),
             Ok(Interactability::Interactable { hit_point })
                 if hit_point != Point::new(6.0, 6.0)
         ));
@@ -1644,20 +1645,20 @@ mod tests {
                 Size::new(4.0, 4.0),
             )))],
         );
-        let scene = SceneSnapshot::new(resolved.nodes);
-        let handle = scene.find(&NodePredicate::id_eq("outside-hit")).unwrap();
+        let scene = Scene::new(resolved.nodes);
+        let handle = scene.find(&Selector::id_eq("outside-hit")).unwrap();
         let hit_point = Point::new(22.0, 22.0);
 
         assert_eq!(scene.hit_path_at(hit_point), vec![handle]);
         assert_eq!(scene.topmost_at(hit_point), Some(handle));
         assert_eq!(
             scene
-                .preferred_hit_point(&NodePredicate::id_eq("outside-hit"))
+                .preferred_hit_point(&Selector::id_eq("outside-hit"))
                 .unwrap(),
             hit_point
         );
         assert!(matches!(
-            scene.interactability(&NodePredicate::id_eq("outside-hit")),
+            scene.interactability(&Selector::id_eq("outside-hit")),
             Ok(Interactability::Interactable { hit_point: actual }) if actual == hit_point
         ));
         assert!(scene.hit_path_at(Point::new(5.0, 5.0)).is_empty());
@@ -1665,7 +1666,7 @@ mod tests {
 
     #[test]
     fn preferred_hit_point_tracks_fallback_probe_when_explicit_point_is_occluded() {
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new(
                 "target",
                 Role::Button,
@@ -1682,12 +1683,12 @@ mod tests {
         ]);
 
         let preferred = scene
-            .preferred_hit_point(&NodePredicate::id_eq("target"))
+            .preferred_hit_point(&Selector::id_eq("target"))
             .expect("scene should report the usable fallback hit point");
 
         assert_ne!(preferred, Point::new(6.0, 6.0));
         assert!(matches!(
-            scene.interactability(&NodePredicate::id_eq("target")),
+            scene.interactability(&Selector::id_eq("target")),
             Ok(Interactability::Interactable { hit_point }) if hit_point == preferred
         ));
     }
@@ -1725,10 +1726,10 @@ mod tests {
                 Role::Button,
                 RegionSpec::rect(Rect::new(Point::new(4.0, 6.0), Size::new(12.0, 8.0))),
             )
-            .with_hit_target(RegionSpec::node(NodePredicate::id_eq("missing-hit-target")))],
+            .with_hit_target(RegionSpec::node(Selector::id_eq("missing-hit-target")))],
         );
-        let scene = SceneSnapshot::with_recipe_errors(resolved.nodes, resolved.errors.clone());
-        let handle = scene.find(&NodePredicate::id_eq("fallback-hit")).unwrap();
+        let scene = Scene::with_recipe_errors(resolved.nodes, resolved.errors.clone());
+        let handle = scene.find(&Selector::id_eq("fallback-hit")).unwrap();
 
         assert!(scene.recipe_errors().is_empty());
         assert!(scene
@@ -1739,13 +1740,13 @@ mod tests {
             .is_none());
         assert_eq!(
             scene
-                .preferred_hit_point(&NodePredicate::id_eq("fallback-hit"))
+                .preferred_hit_point(&Selector::id_eq("fallback-hit"))
                 .unwrap(),
             Point::new(10.0, 10.0)
         );
         assert_eq!(scene.hit_path_at(Point::new(10.0, 10.0)), vec![handle]);
         assert!(matches!(
-            scene.interactability(&NodePredicate::id_eq("fallback-hit")),
+            scene.interactability(&Selector::id_eq("fallback-hit")),
             Ok(Interactability::Interactable { hit_point }) if hit_point == Point::new(10.0, 10.0)
         ));
     }
@@ -1767,9 +1768,9 @@ mod tests {
                     .with_hit_target(locator),
             ],
         );
-        let scene = SceneSnapshot::with_recipe_errors(resolved.nodes, resolved.errors.clone());
+        let scene = Scene::with_recipe_errors(resolved.nodes, resolved.errors.clone());
         let handle = scene
-            .find(&NodePredicate::selector_eq("visual.red-chip"))
+            .find(&Selector::selector_eq("visual.red-chip"))
             .unwrap();
 
         assert!(scene.recipe_errors().is_empty());
@@ -1779,13 +1780,13 @@ mod tests {
         );
         assert_eq!(
             scene
-                .preferred_hit_point(&NodePredicate::selector_eq("visual.red-chip"))
+                .preferred_hit_point(&Selector::selector_eq("visual.red-chip"))
                 .unwrap(),
             Point::new(5.0, 4.0)
         );
         assert_eq!(scene.hit_path_at(Point::new(5.0, 4.0)), vec![handle]);
         assert!(matches!(
-            scene.interactability(&NodePredicate::selector_eq("visual.red-chip")),
+            scene.interactability(&Selector::selector_eq("visual.red-chip")),
             Ok(Interactability::Interactable { hit_point }) if hit_point == Point::new(5.0, 4.0)
         ));
     }
@@ -1804,7 +1805,7 @@ mod tests {
             &[NodeRecipe::new(
                 "anchor",
                 Role::Button,
-                RegionSpec::node(NodePredicate::id_eq("anchor")).right_of(10.0, 12.0),
+                RegionSpec::node(Selector::id_eq("anchor")).right_of(10.0, 12.0),
             )
             .with_parent("anchor", 0)],
         );
@@ -1844,7 +1845,7 @@ mod tests {
             &[NodeRecipe::new(
                 "child",
                 Role::Button,
-                RegionSpec::node(NodePredicate::id_eq("anchor")).right_of(5.0, 12.0),
+                RegionSpec::node(Selector::id_eq("anchor")).right_of(5.0, 12.0),
             )
             .with_parent("anchor", 0)],
         );
@@ -1880,7 +1881,7 @@ mod tests {
             &[NodeRecipe::new(
                 "child",
                 Role::Button,
-                RegionSpec::node(NodePredicate::id_eq("anchor")).right_of(10.0, 12.0),
+                RegionSpec::node(Selector::id_eq("anchor")).right_of(10.0, 12.0),
             )],
         );
 
@@ -1901,7 +1902,7 @@ mod tests {
             &[NodeRecipe::new(
                 "missing-anchor",
                 Role::Button,
-                RegionSpec::node(NodePredicate::selector_eq("provider.anchor")),
+                RegionSpec::node(Selector::selector_eq("provider.anchor")),
             )
             .with_selector("provider.missing")],
         );
@@ -1914,7 +1915,7 @@ mod tests {
             RegionResolveError::NotFound(_)
         ));
 
-        let scene = SceneSnapshot::with_recipe_errors(resolved.nodes, resolved.errors.clone());
+        let scene = Scene::with_recipe_errors(resolved.nodes, resolved.errors.clone());
         assert_eq!(scene.recipe_errors(), resolved.errors.as_slice());
     }
 }

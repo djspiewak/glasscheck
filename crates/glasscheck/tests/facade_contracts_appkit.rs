@@ -7,8 +7,8 @@ use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use glasscheck::{
-    AnchoredTextExpectation, AnchoredTextHarness, InputDriver, NodePredicate, Point, Rect,
-    RegionSpec, RelativeBounds, RgbaColor, Role, SemanticNode, SemanticProvider, Size,
+    AnchoredTextExpectation, AnchoredTextHarness, InputDriver, Point, Rect, RegionSpec,
+    RelativeBounds, RgbaColor, Role, Selector, SemanticNode, SemanticProvider, Size,
     TextAssertionConfig,
 };
 use objc2::rc::Retained;
@@ -137,7 +137,7 @@ fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::Win
     assert!(image.width > 0);
     assert!(image.height > 0);
 
-    let text_region = RegionSpec::node(NodePredicate::id_eq("status-text"));
+    let text_region = RegionSpec::node(Selector::id_eq("status-text"));
     let resolved = host
         .resolve_region(&text_region)
         .expect("status text should resolve to a region");
@@ -164,7 +164,7 @@ fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::Win
         )
         .expect("shared text renderer should work without backend-specific arguments");
 
-    host.click_node(&NodePredicate::id_eq("run-button"))
+    host.click_node(&Selector::id_eq("run-button"))
         .expect("semantic click should succeed");
     harness.settle(2);
 
@@ -175,15 +175,15 @@ fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::Win
 fn status_expectation(content: &str) -> AnchoredTextExpectation {
     AnchoredTextExpectation::new(
         content,
-        RegionSpec::node(NodePredicate::id_eq("status-text")).subregion(RelativeBounds::full()),
+        RegionSpec::node(Selector::id_eq("status-text")).subregion(RelativeBounds::full()),
     )
     .with_point_size(14.0)
     .with_foreground(RgbaColor::new(0, 0, 0, 255))
     .with_background(RgbaColor::new(255, 255, 255, 255))
 }
 
-fn node_label<'a>(scene: &'a glasscheck::SceneSnapshot, id: &str) -> Option<&'a str> {
-    let handle = scene.find(&NodePredicate::id_eq(id)).ok()?;
+fn node_label<'a>(scene: &'a glasscheck::Scene, id: &str) -> Option<&'a str> {
+    let handle = scene.find(&Selector::id_eq(id)).ok()?;
     scene.node(handle)?.label.as_deref()
 }
 

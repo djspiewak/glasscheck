@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use glasscheck_core::{
-    KeyModifiers, NodePredicate, NodeRecipe, PixelMatch, PixelProbe, Point, PollOptions,
-    PropertyValue, Rect, RegionResolveError, RegionSpec, Role, SemanticNode, SemanticProvider,
-    Size, TextRange,
+    KeyModifiers, NodeRecipe, PixelMatch, PixelProbe, Point, PollOptions, PropertyValue, Rect,
+    RegionResolveError, RegionSpec, Role, Selector, SemanticNode, SemanticProvider, Size,
+    TextRange,
 };
 use glasscheck_gtk::{GtkHarness, GtkWindowHost, InstrumentedWidget};
 use gtk4::prelude::*;
@@ -106,7 +106,7 @@ fn attach_to_existing_window_builds_scene_snapshot(harness: GtkHarness) {
     );
 
     let scene = attached.snapshot_scene();
-    let row = scene.find(&NodePredicate::id_eq("row")).unwrap();
+    let row = scene.find(&Selector::id_eq("row")).unwrap();
     assert_eq!(scene.node(row).unwrap().label.as_deref(), Some("Draft"));
 }
 
@@ -118,7 +118,7 @@ fn provider_only_scene_without_root_is_usable(harness: GtkHarness) {
 
     let scene = attached.snapshot_scene();
     let node = scene
-        .find(&NodePredicate::id_eq("provider-node"))
+        .find(&Selector::id_eq("provider-node"))
         .expect("provider node should be queryable without a root widget");
     assert_eq!(
         scene.node(node).unwrap().label.as_deref(),
@@ -133,7 +133,7 @@ fn provider_only_region_capture_fails_cleanly(harness: GtkHarness) {
     attached.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
 
     let error = attached
-        .capture_region(&glasscheck_core::RegionSpec::node(NodePredicate::id_eq(
+        .capture_region(&glasscheck_core::RegionSpec::node(Selector::id_eq(
             "provider-node",
         )))
         .unwrap_err();
@@ -155,7 +155,7 @@ fn root_widget_only_host_without_window_is_safe(harness: GtkHarness) {
     harness.settle(2);
 
     assert!(host.window().child().is_some());
-    let error = host.click_node(&NodePredicate::id_eq("root")).unwrap_err();
+    let error = host.click_node(&Selector::id_eq("root")).unwrap_err();
     assert!(matches!(error, RegionResolveError::DetachedRootView));
 }
 
@@ -179,9 +179,9 @@ fn registered_native_hierarchy_supports_parent_and_child_indexes(harness: GtkHar
     harness.settle(4);
 
     let scene = host.snapshot_scene();
-    let left = scene.find(&NodePredicate::id_eq("left")).unwrap();
-    let right = scene.find(&NodePredicate::id_eq("right")).unwrap();
-    let label = scene.find(&NodePredicate::id_eq("label")).unwrap();
+    let left = scene.find(&Selector::id_eq("left")).unwrap();
+    let right = scene.find(&Selector::id_eq("right")).unwrap();
+    let label = scene.find(&Selector::id_eq("label")).unwrap();
     assert_eq!(scene.node(left).unwrap().parent_id.as_deref(), Some("root"));
     assert_eq!(
         scene.node(right).unwrap().parent_id.as_deref(),
@@ -206,7 +206,7 @@ fn provider_ids_are_namespaced_when_they_collide_with_native_ids(harness: GtkHar
 
     let scene = host.snapshot_scene();
     let provider = scene
-        .find(&NodePredicate::property_eq(
+        .find(&Selector::property_eq(
             "glasscheck:source_id",
             PropertyValue::string("battlefield"),
         ))
@@ -227,7 +227,7 @@ fn semantic_click_targets_registered_node(harness: GtkHarness) {
     host.register_node(&button, node("click-target", Role::Button, "Click"));
     harness.settle(4);
 
-    host.click_node(&NodePredicate::id_eq("click-target"))
+    host.click_node(&Selector::id_eq("click-target"))
         .expect("semantic click should succeed");
     harness.settle(2);
 
@@ -253,7 +253,7 @@ fn semantic_click_skips_unrealized_registrations_when_mapping_handles(harness: G
     host.register_node(&target, node("target", Role::Button, "Target"));
     harness.settle(4);
 
-    host.click_node(&NodePredicate::id_eq("target"))
+    host.click_node(&Selector::id_eq("target"))
         .expect("semantic click should resolve the realized target widget");
     harness.settle(2);
 
@@ -276,7 +276,7 @@ fn semantic_click_dispatches_gesture_click_for_non_button_targets(harness: GtkHa
     host.register_node(&area, node("gesture", Role::Button, "Gesture"));
     harness.settle(4);
 
-    host.click_node(&NodePredicate::id_eq("gesture"))
+    host.click_node(&Selector::id_eq("gesture"))
         .expect("semantic click should dispatch to gesture-driven targets");
     harness.settle(2);
 
@@ -394,7 +394,7 @@ fn visual_recipe_probe_builds_clickable_node(harness: GtkHarness) {
     let scene = host.snapshot_scene();
     assert!(scene.recipe_errors().is_empty());
     let handle = scene
-        .find(&NodePredicate::selector_eq("visual.red-chip"))
+        .find(&Selector::selector_eq("visual.red-chip"))
         .expect("visual recipe node should resolve");
     let node = scene.node(handle).unwrap();
     assert_eq!(
@@ -402,15 +402,13 @@ fn visual_recipe_probe_builds_clickable_node(harness: GtkHarness) {
         Rect::new(Point::new(40.0, 58.0), Size::new(24.0, 12.0))
     );
 
-    host.click_node(&NodePredicate::selector_eq("visual.red-chip"))
+    host.click_node(&Selector::selector_eq("visual.red-chip"))
         .expect("visual recipe node should be clickable");
     harness.settle(4);
     assert_eq!(clicks.get(), 1);
 
     let image = host
-        .capture_region(&RegionSpec::node(NodePredicate::selector_eq(
-            "visual.red-chip",
-        )))
+        .capture_region(&RegionSpec::node(Selector::selector_eq("visual.red-chip")))
         .expect("visual recipe region should capture");
     assert!(image.average_rgba(Rect::new(Point::new(0.0, 0.0), image.size()))[0] > 200.0);
 }
@@ -430,7 +428,7 @@ fn visual_recipe_probe_omits_missing_match(harness: GtkHarness) {
         RegionResolveError::VisualMatchMissing | RegionResolveError::CaptureUnavailable
     ));
     assert!(matches!(
-        scene.find(&NodePredicate::selector_eq("visual.red-chip")),
+        scene.find(&Selector::selector_eq("visual.red-chip")),
         Err(_)
     ));
 }

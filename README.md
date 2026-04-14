@@ -4,7 +4,7 @@ Functional testing primitives for graphical native Rust UIs.
 
 `glasscheck` is for in-process tests of graphical native UIs, not browser-based UIs. It is for tests that need more than string checks and less than full external automation. It focuses on three things:
 
-- node queries over a scene snapshot
+- node queries over a scene
 - image and rendered-text assertions against live UI pixels
 - polling helpers for asynchronous UI state
 
@@ -31,7 +31,7 @@ That shared post-mount surface is intentionally aligned across GTK and AppKit fo
 - `capture()`
 - `capture_region(&RegionSpec)`
 - `resolve_region(&RegionSpec)`
-- `click_node(&NodePredicate)`
+- `click_node(&Selector)`
 - `input()`
 - `text_renderer()`
 
@@ -48,7 +48,7 @@ Use `glasscheck` unless you are building a new backend or integrating with an ex
 glasscheck = { path = "crates/glasscheck" }
 ```
 
-Use `glasscheck-core` only when you already have your own scene snapshot and pixel capture integration and do not want the built-in native backends.
+Use `glasscheck-core` only when you already have your own scene and pixel capture integration and do not want the built-in native backends.
 
 ```toml
 [dependencies]
@@ -59,20 +59,20 @@ For AppKit-specific setup, prefer `AppKitHarness::create_window`, `attach_window
 
 ## Pick An API
 
-Use `SceneSnapshot` and `NodePredicate` for most new tests. They support hierarchy, selectors, properties, state, hit testing, and scene diffs.
-
-Use `QueryRoot` and `Selector` only when you need the older flat metadata model or want a very small compatibility layer. The tradeoff is less expressive matching.
+Use `Scene` and `Selector` for most new tests. They support hierarchy, selectors, properties, state, hit testing, and scene diffs.
 
 Prefer stable selectors and roles over snapshot-local IDs. IDs are exact, but they can be disambiguated during snapshot construction and should not be treated as cross-snapshot identities.
+
+Use scene-local `id`s for structural relationships inside one scene, such as parent/child wiring. Use selectors for the public test-facing names you query across fresh scene captures.
 
 ## Scene Queries
 
 ```rust
 use glasscheck_core::{
-    Node, NodePredicate, Point, PropertyValue, Rect, Role, SceneSnapshot, Size,
+    Node, Selector, Point, PropertyValue, Rect, Role, Scene, Size,
 };
 
-let scene = SceneSnapshot::new(vec![
+let scene = Scene::new(vec![
     Node::new(
         "save-button",
         Role::Button,
@@ -83,7 +83,7 @@ let scene = SceneSnapshot::new(vec![
     .with_state("enabled", PropertyValue::Bool(true)),
 ]);
 
-let save = scene.resolve(&NodePredicate::selector_eq("toolbar.save")).unwrap();
+let save = scene.resolve(&Selector::selector_eq("toolbar.save")).unwrap();
 assert_eq!(save.node.label.as_deref(), Some("Save"));
 ```
 
@@ -99,12 +99,14 @@ Use this when you already know the exact bounds.
 use glasscheck_core::{NodeRecipe, RegionLocator, Rect, Point, Role, Size};
 
 let recipe = NodeRecipe::new(
-    "browser.nav.back",
+    "back-button",
     Role::Button,
     RegionLocator::rect(Rect::new(Point::new(20.0, 20.0), Size::new(28.0, 28.0))),
 )
 .with_selector("browser.nav.back");
 ```
+
+Here `id` and `selector` serve different purposes: the recipe `id` is the scene-local node identity used for parent/child relationships and internal resolution, while the selector is the stable test-facing query name.
 
 Failure mode: the node still resolves, but later assertions fail if the real UI no longer draws or behaves correctly in that region.
 
@@ -113,9 +115,9 @@ Failure mode: the node still resolves, but later assertions fail if the real UI 
 Use this when you know a stable outer node but want a tighter child region.
 
 ```rust
-use glasscheck_core::{NodePredicate, RegionLocator, RelativeBounds};
+use glasscheck_core::{Selector, RegionLocator, RelativeBounds};
 
-let title_region = RegionLocator::node(NodePredicate::selector_eq("card"))
+let title_region = RegionLocator::node(Selector::selector_eq("card"))
     .subregion(RelativeBounds::inset(0.1, 0.1, 0.1, 0.6));
 ```
 
@@ -126,9 +128,9 @@ Failure mode: if the outer node moves or disappears, region resolution fails at 
 Use this for “nearby but not inside” regions, such as an affordance expected to appear 50px to the right of another node.
 
 ```rust
-use glasscheck_core::{NodePredicate, RegionLocator};
+use glasscheck_core::{Selector, RegionLocator};
 
-let search_space = RegionLocator::node(NodePredicate::selector_eq("sidebar.item"))
+let search_space = RegionLocator::node(Selector::selector_eq("sidebar.item"))
     .right_of(50.0, 120.0);
 ```
 
@@ -224,16 +226,16 @@ Failure mode: when the hit target cannot be refined, clicks fall back to the nod
 Use waits when the UI changes across frames or event-loop turns. The helpers return the last scene or match data on timeout, which is more useful than a bare sleep.
 
 ```rust
-use glasscheck_core::{wait_for_exists, NodePredicate, PollOptions, Role};
+use glasscheck_core::{wait_for_exists, Selector, PollOptions, Role};
 
 let scene = wait_for_exists(
     PollOptions::default(),
     || app.snapshot_scene(),
-    &NodePredicate::role_eq(Role::Button),
+    &Selector::role_eq(Role::Button),
 )
 .unwrap();
 
-assert!(scene.count(&NodePredicate::role_eq(Role::Button)) >= 1);
+assert!(scene.count(&Selector::role_eq(Role::Button)) >= 1);
 ```
 
 ## Rendered Text
@@ -244,14 +246,14 @@ Prefer anchored expectations over fixed rectangles when the layout can move.
 
 ```rust
 use glasscheck_core::{
-    AnchoredTextExpectation, NodePredicate, RegionLocator, RelativeBounds, Role, TextMatch,
+    AnchoredTextExpectation, Selector, RegionLocator, RelativeBounds, Role, TextMatch,
 };
 
 let expectation = AnchoredTextExpectation::new(
     "Run",
-    RegionLocator::node(NodePredicate::and(vec![
-        NodePredicate::role_eq(Role::Button),
-        NodePredicate::label(TextMatch::contains("Run")),
+    RegionLocator::node(Selector::and(vec![
+        Selector::role_eq(Role::Button),
+        Selector::label(TextMatch::contains("Run")),
     ]))
     .subregion(RelativeBounds::inset(0.1, 0.1, 0.1, 0.1)),
 );
@@ -274,7 +276,7 @@ assert!(compare_images(&actual, &expected, &CompareConfig::default()).passed);
 
 Only AppKit on macOS and GTK4 on Linux are supported native backends today.
 
-`glasscheck-appkit` is for in-process AppKit tests on macOS. It provides window hosting, pixel capture, scene snapshots, hit-point-based clicks, and text rendering.
+`glasscheck-appkit` is for in-process AppKit tests on macOS. It provides window hosting, pixel capture, scenes, hit-point-based clicks, and text rendering.
 
 `glasscheck-gtk` is the Linux GTK4 backend. It provides the same overall testing model, but some low-level input paths remain best-effort and may fall back to widget activation or focus routing.
 

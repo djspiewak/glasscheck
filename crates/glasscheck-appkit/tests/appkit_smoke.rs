@@ -4,10 +4,9 @@ use std::cell::Cell;
 
 use glasscheck_appkit::{AppKitHarness, InstrumentedView};
 use glasscheck_core::{
-    assert_text_renders, compare_images, load_png, AnchoredTextExpectation, CompareConfig,
-    NodePredicate, Point, PollOptions, Rect, RegionResolveError, RegionSpec, RelativeBounds,
-    RgbaColor, Role, Selector, Size, TextAssertionConfig, TextAssertionError, TextExpectation,
-    TextMatch,
+    assert_text_renders, compare_images, load_png, AnchoredTextExpectation, CompareConfig, Point,
+    PollOptions, Rect, RegionResolveError, RegionSpec, RelativeBounds, RgbaColor, Role, Selector,
+    Size, TextAssertionConfig, TextAssertionError, TextExpectation, TextMatch,
 };
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadOnly};
@@ -190,10 +189,14 @@ fn query_reports_registered_view_geometry(harness: AppKitHarness) {
         },
     );
 
-    let query_root = host.query_root();
-    let node = query_root
-        .find(&Selector::by_id("root"))
-        .expect("registered view should exist");
+    let scene = host.snapshot_scene();
+    let node = scene
+        .node(
+            scene
+                .find(&Selector::id_eq("root"))
+                .expect("registered view should exist"),
+        )
+        .unwrap();
     let content_view = host
         .window()
         .contentView()
@@ -270,9 +273,9 @@ fn capture_region_matches_registered_view_bounds(harness: AppKitHarness) {
         .capture_view(&view)
         .expect("registered view should capture directly");
     let actual = host
-        .capture_region(&RegionSpec::node(NodePredicate::label(
-            TextMatch::contains("Panel"),
-        )))
+        .capture_region(&RegionSpec::node(Selector::label(TextMatch::contains(
+            "Panel",
+        ))))
         .expect("semantic region capture should succeed");
 
     let result = compare_images(
@@ -297,9 +300,9 @@ fn capture_region_reports_missing_semantic_match(harness: AppKitHarness) {
     harness.settle(2);
 
     let error = host
-        .capture_region(&RegionSpec::node(NodePredicate::label(
-            TextMatch::contains("Missing"),
-        )))
+        .capture_region(&RegionSpec::node(Selector::label(TextMatch::contains(
+            "Missing",
+        ))))
         .unwrap_err();
 
     assert!(matches!(error, RegionResolveError::NotFound(_)));
@@ -452,7 +455,7 @@ fn anchored_text_assertion_reports_ambiguous_match(harness: AppKitHarness) {
 
     let expectation = AnchoredTextExpectation::new(
         "Functional UI",
-        RegionSpec::node(NodePredicate::label(TextMatch::exact("Editor"))),
+        RegionSpec::node(Selector::label(TextMatch::exact("Editor"))),
     );
 
     let artifact_dir = unique_temp_dir("anchored-rendered-text-ambiguous");
@@ -499,9 +502,9 @@ fn anchored_text_assertion_matches_semantic_region(harness: AppKitHarness) {
 
     let expectation = AnchoredTextExpectation::new(
         "Functional UI",
-        RegionSpec::node(NodePredicate::and(vec![
-            NodePredicate::role_eq(Role::TextInput),
-            NodePredicate::label(TextMatch::contains("Canvas")),
+        RegionSpec::node(Selector::and(vec![
+            Selector::role_eq(Role::TextInput),
+            Selector::label(TextMatch::contains("Canvas")),
         ])),
     )
     .with_point_size(18.0)
@@ -555,9 +558,9 @@ fn anchored_text_assertion_reports_visual_regression(harness: AppKitHarness) {
 
     let expectation = AnchoredTextExpectation::new(
         "XXXXXXXXXXXX",
-        RegionSpec::node(NodePredicate::and(vec![
-            NodePredicate::role_eq(Role::TextInput),
-            NodePredicate::label(TextMatch::contains("Canvas")),
+        RegionSpec::node(Selector::and(vec![
+            Selector::role_eq(Role::TextInput),
+            Selector::label(TextMatch::contains("Canvas")),
         ])),
     )
     .with_point_size(18.0)
@@ -875,12 +878,12 @@ fn capture_region_matches_negative_origin_region(harness: AppKitHarness) {
 
     let window = host.capture().expect("window capture should succeed");
     let rect = host
-        .resolve_region(&RegionSpec::node(NodePredicate::label(TextMatch::exact(
+        .resolve_region(&RegionSpec::node(Selector::label(TextMatch::exact(
             "Negative Origin",
         ))))
         .expect("negative-origin region should resolve");
     let region = host
-        .capture_region(&RegionSpec::node(NodePredicate::label(TextMatch::exact(
+        .capture_region(&RegionSpec::node(Selector::label(TextMatch::exact(
             "Negative Origin",
         ))))
         .expect("negative-origin region capture should succeed");
@@ -959,14 +962,14 @@ fn click_hotspot_reveals_rounded_gradient_and_anchored_text(harness: AppKitHarne
     harness.settle(2);
 
     let before = host
-        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .capture_region(&RegionSpec::node(Selector::id_eq("gradient-card")))
         .expect("gradient card region should capture before click");
 
     host.input().click(Point::new(332.0, 70.0));
     harness.settle(2);
 
     let after = host
-        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .capture_region(&RegionSpec::node(Selector::id_eq("gradient-card")))
         .expect("gradient card region should capture after click");
 
     assert_gradient_card_rendering(&after);
@@ -987,7 +990,7 @@ fn click_hotspot_reveals_rounded_gradient_and_anchored_text(harness: AppKitHarne
 
     let expectation = AnchoredTextExpectation::new(
         "Connected",
-        RegionSpec::node(NodePredicate::id_eq("gradient-card")).subregion(title_region_bounds()),
+        RegionSpec::node(Selector::id_eq("gradient-card")).subregion(title_region_bounds()),
     )
     .with_font_name("Helvetica-BoldOblique")
     .with_point_size(18.0)
@@ -1013,14 +1016,14 @@ fn click_outside_hotspot_does_not_activate_gradient_scene(harness: AppKitHarness
     harness.settle(2);
 
     let before = host
-        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .capture_region(&RegionSpec::node(Selector::id_eq("gradient-card")))
         .expect("gradient card region should capture before click");
 
     host.input().click(Point::new(60.0, 60.0));
     harness.settle(2);
 
     let after = host
-        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .capture_region(&RegionSpec::node(Selector::id_eq("gradient-card")))
         .expect("gradient card region should capture after outside click");
     let result = compare_images(
         &before,
@@ -1076,13 +1079,13 @@ fn repeated_hotspot_clicks_leave_gradient_scene_stable(harness: AppKitHarness) {
     host.input().click(Point::new(332.0, 70.0));
     harness.settle(2);
     let first = host
-        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .capture_region(&RegionSpec::node(Selector::id_eq("gradient-card")))
         .expect("gradient card region should capture after first click");
 
     host.input().click(Point::new(332.0, 70.0));
     harness.settle(2);
     let second = host
-        .capture_region(&RegionSpec::node(NodePredicate::id_eq("gradient-card")))
+        .capture_region(&RegionSpec::node(Selector::id_eq("gradient-card")))
         .expect("gradient card region should capture after second click");
 
     let result = compare_images(
@@ -1422,7 +1425,7 @@ fn register_gradient_scene(host: &glasscheck_appkit::AppKitWindowHost, scene: &G
 fn interactive_gradient_scene_expectation(content: &str) -> AnchoredTextExpectation {
     AnchoredTextExpectation::new(
         content,
-        RegionSpec::node(NodePredicate::id_eq("gradient-card")).subregion(title_region_bounds()),
+        RegionSpec::node(Selector::id_eq("gradient-card")).subregion(title_region_bounds()),
     )
 }
 
