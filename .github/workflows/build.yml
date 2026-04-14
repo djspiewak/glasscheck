@@ -60,6 +60,10 @@ jobs:
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: GDK_BACKEND=x11 xvfb-run -a cargo test -p glasscheck-gtk --features native-contract-tests --test gtk_contracts
 
+      - name: Run shared GTK facade contracts on hidden X11 display
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: GDK_BACKEND=x11 xvfb-run -a cargo test -p glasscheck --features gtk --test facade_contracts_gtk
+
       - name: Start direct X11 server
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: |
@@ -84,3 +88,7 @@ jobs:
       - name: Run GTK contracts test on direct X11 display
         if: ${{ matrix.os == 'ubuntu-latest' }}
         run: GDK_BACKEND=x11 cargo test -p glasscheck-gtk --features native-contract-tests --test gtk_contracts
+
+      - name: Run shared GTK facade contracts on direct X11 display
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: GDK_BACKEND=x11 cargo test -p glasscheck --features gtk --test facade_contracts_gtk
