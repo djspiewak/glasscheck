@@ -31,8 +31,8 @@ pub use assertions::{
 };
 pub use backend::{
     assert_anchored_text_renders, crop_image_bottom_left, normalize_provider_nodes,
-    registered_node_id, AnchoredTextAssertionError, AnchoredTextHarness, Harness, InputDriver,
-    InstrumentedNode, KeyModifiers, TextRange,
+    registered_node_id, AnchoredTextAssertionError, AnchoredTextHarness, Harness, HitPointSearch,
+    HitPointStrategy, InputDriver, InputSynthesisError, InstrumentedNode, KeyModifiers, TextRange,
 };
 pub use geometry::{Point, Rect, Size};
 pub use image::Image;

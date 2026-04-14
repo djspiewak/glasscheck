@@ -1,9 +1,9 @@
 #[cfg(target_os = "macos")]
 mod imp {
     use glasscheck_core::{
-        resolve_node_recipes, Image, NodeProvenanceKind, NodeRecipe, Point, PropertyValue, Rect,
-        RegionResolveError, RegionSpec, Role, Scene, Selector, SemanticNode, SemanticProvider,
-        Size, TextRange,
+        resolve_node_recipes, HitPointSearch, HitPointStrategy, Image, InputSynthesisError,
+        NodeProvenanceKind, NodeRecipe, Point, PropertyValue, Rect, RegionResolveError, RegionSpec,
+        Role, Scene, Selector, SemanticNode, SemanticProvider, Size, TextRange,
     };
     use objc2::runtime::AnyObject;
     use objc2::{msg_send, rc::Retained, ClassType, MainThreadOnly};
@@ -45,35 +45,6 @@ mod imp {
         pub selectors: Vec<String>,
     }
 
-    /// Search strategy for semantic hit-point resolution.
-    ///
-    /// Use the default first. Increase sampling only when controls have
-    /// irregular hit regions and a single center point is not reliable.
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub struct HitPointSearch {
-        pub strategy: HitPointStrategy,
-        pub sample_count: usize,
-    }
-
-    impl Default for HitPointSearch {
-        fn default() -> Self {
-            Self {
-                strategy: HitPointStrategy::VisibleCenterFirst,
-                sample_count: 9,
-            }
-        }
-    }
-
-    /// Candidate generation strategy for semantic hit-point resolution.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum HitPointStrategy {
-        /// Try the visible center before sampling other points.
-        VisibleCenterFirst,
-        /// Sample a regular grid inside the visible region.
-        Grid,
-        /// Sample the corners and center of the visible region.
-        CornersAndCenter,
-    }
     #[derive(Clone, Debug)]
     struct RegisteredView {
         view: Retained<NSView>,
@@ -92,10 +63,12 @@ mod imp {
     ///
     /// This is the main AppKit integration surface. Use it to attach semantic
     /// metadata to native views, capture pixels, query the current scene, and
-    /// drive best-effort native input. AppKit construction and attachment APIs
-    /// remain explicitly main-thread-bound, but once a host has been created it
-    /// carries that capability internally so common post-mount operations such
-    /// as `input()` and `text_renderer()` stay marker-free.
+    /// drive AppKit-mediated input. Standard `NSControl` clicks may be
+    /// activated through `performClick:` instead of raw pointer-event
+    /// injection. AppKit construction and attachment APIs remain explicitly
+    /// main-thread-bound, but once a host has been created it carries that
+    /// capability internally so common post-mount operations such as `input()`
+    /// and `text_renderer()` stay marker-free.
     pub struct AppKitWindowHost {
         mtm: MainThreadMarker,
         window: Retained<NSWindow>,
@@ -324,6 +297,9 @@ mod imp {
         }
 
         /// Clicks the unique node matching `predicate` using semantic hit-point search.
+        ///
+        /// Standard `NSControl` targets are activated via `performClick:` when
+        /// available; other views use point-based input dispatch.
         pub fn click_node_with_search(
             &self,
             predicate: &Selector,
@@ -354,14 +330,18 @@ mod imp {
                         let () = msg_send![&*view, performClick: std::ptr::null::<AnyObject>()];
                     }
                 } else {
-                    self.input().click_target(&view, point);
+                    self.input()
+                        .click_target(&view, point)
+                        .map_err(map_input_error)?;
                 }
                 return Ok(());
             }
             if self.window.contentView().is_none() {
                 return Err(RegionResolveError::InputUnavailable);
             }
-            self.input().click(Point::new(point.x, point.y));
+            self.input()
+                .click(Point::new(point.x, point.y))
+                .map_err(map_input_error)?;
             Ok(())
         }
 
@@ -1203,6 +1183,10 @@ mod imp {
         }
     }
 
+    fn map_input_error(_error: InputSynthesisError) -> RegionResolveError {
+        RegionResolveError::InputUnavailable
+    }
+
     fn explicit_hit_point(node: &SemanticNode) -> Option<Point> {
         match (
             node.properties.get("glasscheck:hit_point_x"),
@@ -1246,29 +1230,7 @@ mod imp {
         pub selectors: Vec<String>,
     }
     pub struct AppKitWindowHost;
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub struct HitPointSearch {
-        pub strategy: HitPointStrategy,
-        pub sample_count: usize,
-    }
-
-    impl Default for HitPointSearch {
-        fn default() -> Self {
-            Self {
-                strategy: HitPointStrategy::VisibleCenterFirst,
-                sample_count: 9,
-            }
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum HitPointStrategy {
-        VisibleCenterFirst,
-        Grid,
-        CornersAndCenter,
-    }
 }
 
 #[allow(unused_imports)]
-pub use imp::{AppKitWindowHost, HitPointSearch, HitPointStrategy, InstrumentedView};
+pub use imp::{AppKitWindowHost, InstrumentedView};

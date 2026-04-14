@@ -8,7 +8,7 @@ mod imp {
     };
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSString};
 
-    use glasscheck_core::{InputDriver, KeyModifiers, Point, Rect, TextRange};
+    use glasscheck_core::{InputDriver, InputSynthesisError, KeyModifiers, Point, Rect, TextRange};
 
     pub struct AppKitInputDriver<'a> {
         window: &'a NSWindow,
@@ -23,7 +23,7 @@ mod imp {
         }
 
         /// Synthesizes a left mouse click at `point` in window coordinates.
-        pub fn click(&self, point: Point) {
+        pub fn click(&self, point: Point) -> Result<(), InputSynthesisError> {
             self.activate_window();
             let point = ns_point(point);
             let target = self.target_view(point);
@@ -33,20 +33,24 @@ mod imp {
                         let () = msg_send![target, performClick: std::ptr::null::<AnyObject>()];
                     }
                 }
-                return;
+                return Ok(());
             }
-            let window_number = self.window.windowNumber();
             if let Some(target) = target.as_deref() {
-                self.click_target(target, point);
+                self.click_target(target, point)?;
             } else if let Some(content) = self.window.contentView() {
-                self.click_target(&content, point);
+                self.click_target(&content, point)?;
             } else {
-                let _ = window_number;
+                return Err(InputSynthesisError::MissingTarget);
             }
+            Ok(())
         }
 
         /// Synthesizes a left click targeted directly at `view`.
-        pub fn click_target(&self, view: &NSView, point: NSPoint) {
+        pub fn click_target(
+            &self,
+            view: &NSView,
+            point: NSPoint,
+        ) -> Result<(), InputSynthesisError> {
             self.activate_window();
             let window_number = self.window.windowNumber();
             if let Some(down) =
@@ -63,6 +67,8 @@ mod imp {
                 )
             {
                 view.mouseDown(&down);
+            } else {
+                return Err(InputSynthesisError::TransportFailure("mouse-down event creation"));
             }
             if let Some(up) =
                 NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
@@ -77,19 +83,22 @@ mod imp {
                 1.0,
             ) {
                 view.mouseUp(&up);
+            } else {
+                return Err(InputSynthesisError::TransportFailure("mouse-up event creation"));
             }
+            Ok(())
         }
 
         /// Synthesizes a left click at the center of `rect`.
-        pub fn click_rect_center(&self, rect: Rect) {
+        pub fn click_rect_center(&self, rect: Rect) -> Result<(), InputSynthesisError> {
             self.click(Point::new(
                 rect.origin.x + rect.size.width / 2.0,
                 rect.origin.y + rect.size.height / 2.0,
-            ));
+            ))
         }
 
         /// Synthesizes a mouse-move event at `point` in window coordinates.
-        pub fn move_mouse(&self, point: Point) {
+        pub fn move_mouse(&self, point: Point) -> Result<(), InputSynthesisError> {
             self.activate_window();
             let point = ns_point(point);
             let window_number = self.window.windowNumber();
@@ -105,6 +114,9 @@ mod imp {
                 0.0,
             ) {
                 self.window.sendEvent(&event);
+                Ok(())
+            } else {
+                Err(InputSynthesisError::TransportFailure("mouse-move event creation"))
             }
         }
 
@@ -114,7 +126,7 @@ mod imp {
             key_code: u16,
             modifiers: NSEventModifierFlags,
             characters: &str,
-        ) {
+        ) -> Result<(), InputSynthesisError> {
             let chars = NSString::from_str(characters);
             let chars_ignoring = NSString::from_str(characters);
             let point = NSPoint::new(0.0, 0.0);
@@ -134,6 +146,8 @@ mod imp {
                 key_code,
             ) {
                 self.window.sendEvent(&down);
+            } else {
+                return Err(InputSynthesisError::TransportFailure("key-down event creation"));
             }
             if let Some(up) = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
                 NSEventType::KeyUp,
@@ -148,12 +162,19 @@ mod imp {
                 key_code,
             ) {
                 self.window.sendEvent(&up);
+            } else {
+                return Err(InputSynthesisError::TransportFailure("key-up event creation"));
             }
+            Ok(())
         }
 
         /// Synthesizes a key press and release using backend-neutral modifiers.
-        pub fn key_press(&self, characters: &str, modifiers: KeyModifiers) {
-            self.key_press_raw(0, ns_modifiers(modifiers), characters);
+        pub fn key_press(
+            &self,
+            characters: &str,
+            modifiers: KeyModifiers,
+        ) -> Result<(), InputSynthesisError> {
+            self.key_press_raw(0, ns_modifiers(modifiers), characters)
         }
 
         /// Inserts `text` directly through the `NSTextInputClient` API.
@@ -220,16 +241,16 @@ mod imp {
     impl InputDriver for AppKitInputDriver<'_> {
         type NativeText = NSTextView;
 
-        fn click(&self, point: Point) {
-            Self::click(self, point);
+        fn click(&self, point: Point) -> Result<(), InputSynthesisError> {
+            Self::click(self, point)
         }
 
-        fn move_mouse(&self, point: Point) {
-            Self::move_mouse(self, point);
+        fn move_mouse(&self, point: Point) -> Result<(), InputSynthesisError> {
+            Self::move_mouse(self, point)
         }
 
-        fn key_press(&self, key: &str, modifiers: KeyModifiers) {
-            Self::key_press(self, key, modifiers);
+        fn key_press(&self, key: &str, modifiers: KeyModifiers) -> Result<(), InputSynthesisError> {
+            Self::key_press(self, key, modifiers)
         }
 
         fn type_text_direct(&self, view: &Self::NativeText, text: &str) {
