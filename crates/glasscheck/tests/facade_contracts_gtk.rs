@@ -27,7 +27,8 @@ fn main() {
         eprintln!("skipping shared GTK facade contracts without a native GTK display session");
         return;
     }
-    let harness = glasscheck::Harness::new();
+    let harness =
+        glasscheck::Harness::new().expect("GTK should initialize for shared facade contract tests");
     run_case("shared_window_host_surface_is_backend_neutral", || {
         let fixture = mount_fixture(&harness);
         exercise_host_contracts(&harness, &fixture.host);
