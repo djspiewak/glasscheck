@@ -101,7 +101,9 @@ fn input_activation_keeps_window_offscreen_for_all_connected_displays(harness: G
     host.set_root(&root);
     wait_for_window_map(harness, host.window());
 
-    host.input().move_mouse(Point::new(24.0, 24.0));
+    host.input()
+        .move_mouse(Point::new(24.0, 24.0))
+        .expect("strict pointer move should succeed on X11");
     wait_for_window_map(harness, host.window());
 
     let display = gtk4::prelude::WidgetExt::display(host.window());

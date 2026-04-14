@@ -49,6 +49,77 @@ impl TextRange {
     }
 }
 
+/// Search strategy for semantic hit-point resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HitPointSearch {
+    pub strategy: HitPointStrategy,
+    pub sample_count: usize,
+}
+
+impl Default for HitPointSearch {
+    fn default() -> Self {
+        Self {
+            strategy: HitPointStrategy::VisibleCenterFirst,
+            sample_count: 9,
+        }
+    }
+}
+
+/// Candidate generation strategy for semantic hit-point resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HitPointStrategy {
+    /// Try the visible center before sampling other points.
+    VisibleCenterFirst,
+    /// Sample a regular grid inside the visible region.
+    Grid,
+    /// Sample the corners and center of the visible region.
+    CornersAndCenter,
+}
+
+/// Errors returned by backend input-dispatch APIs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InputSynthesisError {
+    /// The active backend cannot provide this input API on the current platform.
+    UnsupportedBackend,
+    /// No attached native window is available for input dispatch.
+    MissingWindow,
+    /// The native surface required for input dispatch is unavailable.
+    MissingSurface,
+    /// The native backend-specific window identifier is unavailable.
+    MissingWindowId,
+    /// The backend could not obtain a target widget or responder for input dispatch.
+    MissingTarget,
+    /// The requested key could not be mapped to a native key code.
+    UnsupportedKey(String),
+    /// The backend does not have a focused target for keyboard input.
+    MissingFocusTarget,
+    /// The native transport reported an operation failure.
+    TransportFailure(&'static str),
+}
+
+impl std::fmt::Display for InputSynthesisError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedBackend => write!(f, "input dispatch is unsupported"),
+            Self::MissingWindow => write!(f, "input dispatch requires an attached window"),
+            Self::MissingSurface => write!(f, "input dispatch requires a native surface"),
+            Self::MissingWindowId => write!(f, "input dispatch requires a native window id"),
+            Self::MissingTarget => write!(f, "input dispatch could not resolve a target"),
+            Self::UnsupportedKey(key) => {
+                write!(f, "input dispatch does not support key {key:?}")
+            }
+            Self::MissingFocusTarget => {
+                write!(f, "keyboard input dispatch requires a focused target")
+            }
+            Self::TransportFailure(operation) => {
+                write!(f, "native transport failed during {operation}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for InputSynthesisError {}
+
 /// Shared error type for anchored text assertions.
 #[derive(Debug)]
 pub enum AnchoredTextAssertionError<E> {
@@ -110,28 +181,28 @@ pub trait InputDriver {
     /// Native text widget type used by the backend.
     type NativeText;
 
-    /// Performs the backend's best-effort click interaction at `point`.
+    /// Dispatches a backend click interaction at `point`.
     ///
-    /// Backends may synthesize native pointer events, invoke an activation path,
-    /// or fall back to focus routing when full event synthesis is unavailable.
-    fn click(&self, point: Point);
+    /// Backends may route this through platform control activation instead of
+    /// raw pointer-event injection when that matches native behavior.
+    fn click(&self, point: Point) -> Result<(), InputSynthesisError>;
 
     /// Synthesizes a pointer click at the center of `rect`.
-    fn click_rect_center(&self, rect: Rect) {
+    fn click_rect_center(&self, rect: Rect) -> Result<(), InputSynthesisError> {
         self.click(Point::new(
             rect.origin.x + rect.size.width / 2.0,
             rect.origin.y + rect.size.height / 2.0,
-        ));
+        ))
     }
 
-    /// Performs the backend's best-effort pointer-move interaction at `point`.
-    fn move_mouse(&self, point: Point);
+    /// Dispatches a backend pointer-move interaction at `point`.
+    fn move_mouse(&self, point: Point) -> Result<(), InputSynthesisError>;
 
-    /// Performs the backend's best-effort key interaction.
+    /// Dispatches a backend key interaction.
     ///
-    /// Some backends may ignore unsupported modifier combinations or route text
-    /// input through native text APIs instead of low-level key events.
-    fn key_press(&self, key: &str, modifiers: KeyModifiers);
+    /// Backends may use responder, controller, or text-insertion APIs instead
+    /// of raw native key-event synthesis.
+    fn key_press(&self, key: &str, modifiers: KeyModifiers) -> Result<(), InputSynthesisError>;
 
     /// Inserts text directly into a native text widget.
     fn type_text_direct(&self, view: &Self::NativeText, text: &str);

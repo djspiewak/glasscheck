@@ -274,9 +274,9 @@ assert!(compare_images(&actual, &expected, &CompareConfig::default()).passed);
 
 Only AppKit on macOS and GTK4 on Linux are supported native backends today.
 
-`glasscheck-appkit` is for in-process AppKit tests on macOS. It provides window hosting, pixel capture, scene snapshots, hit-point-based clicks, and text rendering.
+`glasscheck-appkit` is for in-process AppKit tests on macOS. It provides window hosting, pixel capture, scene snapshots, hit-point-based interaction, and text rendering. Standard `NSControl` clicks are activated through AppKit control APIs when available.
 
-`glasscheck-gtk` is the Linux GTK4 backend. It provides the same overall testing model, but some low-level input paths remain best-effort and may fall back to widget activation or focus routing.
+`glasscheck-gtk` is the Linux GTK4 backend. It provides the same overall testing model. Higher-level semantic interactions such as `GtkWindowHost::click_node(...)` are best-effort and may use GTK widget/controller activation for registered widgets before falling back to native input synthesis. Direct pointer synthesis through `GtkInputDriver` uses native X11 dispatch on X11-backed windows, while keyboard and text input still follow GTK controller and text APIs. Outside that direct-input support surface, the native input driver reports unavailability instead of silently degrading.
 
 ## GTK Verification
 

@@ -5,9 +5,10 @@ mod imp {
 
     use glasscheck_core::{
         crop_image_bottom_left, normalize_provider_nodes, registered_node_id, resolve_node_recipes,
-        Image, InstrumentedNode, NodePredicate, NodeProvenanceKind, NodeRecipe, Point,
-        PropertyValue, QueryRoot, Rect, RegionResolveError, RegionSpec, Role, SceneSnapshot,
-        SemanticNode, SemanticProvider, Size, TextRange,
+        HitPointSearch, HitPointStrategy, Image, InputSynthesisError, InstrumentedNode,
+        NodePredicate, NodeProvenanceKind, NodeRecipe, Point, PropertyValue, QueryRoot, Rect,
+        RegionResolveError, RegionSpec, Role, SceneSnapshot, SemanticNode, SemanticProvider, Size,
+        TextRange,
     };
     use gtk4::graphene;
     use gtk4::prelude::*;
@@ -23,6 +24,12 @@ mod imp {
     }
 
     type ProviderSnapshot = (Vec<SemanticNode>, Vec<NodeRecipe>);
+
+    struct ResolvedClickTarget {
+        root_widget: Widget,
+        registered_widget: Option<Widget>,
+        point: Point,
+    }
 
     /// GTK4 window host used to build, capture, query, and drive a test scene.
     ///
@@ -187,37 +194,43 @@ mod imp {
             GtkInputDriver::new(window)
         }
 
-        /// Clicks the visual center of the unique node matching `predicate`.
+        /// Clicks the unique node matching `predicate`.
         ///
-        /// GTK input synthesis is still best-effort in some paths. Prefer
-        /// semantic assertions and direct widget APIs when interaction fidelity
-        /// matters more than exercising the click route itself.
+        /// GTK semantic clicks are best-effort. Registered widgets may be
+        /// activated through GTK controller or widget APIs before falling back
+        /// to native pointer synthesis. Prefer `input().click(...)` when strict
+        /// X11 pointer fidelity matters more than semantic activation.
         pub fn click_node(&self, predicate: &NodePredicate) -> Result<(), RegionResolveError> {
-            if self.detached_root_widget {
-                return Err(RegionResolveError::DetachedRootView);
-            }
-            let (scene, registered_indices) = self.snapshot_scene_with_registered_indices();
-            let handle = scene.find(predicate).map_err(map_query_error)?;
-            let node = scene
-                .node(handle)
-                .ok_or(RegionResolveError::InvalidHandle(handle))?;
-            if let Some(widget) = self.registered_widget_for_handle(handle, &registered_indices) {
-                if let Ok(button) = widget.clone().downcast::<gtk4::Button>() {
-                    button.emit_clicked();
+            self.click_node_with_search(predicate, &HitPointSearch::default())
+        }
+
+        /// Resolves a semantic hit point for the unique node matching `predicate`.
+        pub fn resolve_hit_point(
+            &self,
+            predicate: &NodePredicate,
+            search: &HitPointSearch,
+        ) -> Result<Point, RegionResolveError> {
+            self.resolve_click_target(predicate, search)
+                .map(|target| target.point)
+        }
+
+        /// Clicks the unique node matching `predicate` using semantic hit-point search.
+        ///
+        /// This is a best-effort semantic interaction helper. It may use
+        /// widget-local GTK activation and gesture dispatch for registered
+        /// widgets before falling back to native pointer synthesis.
+        pub fn click_node_with_search(
+            &self,
+            predicate: &NodePredicate,
+            search: &HitPointSearch,
+        ) -> Result<(), RegionResolveError> {
+            let target = self.resolve_click_target(predicate, search)?;
+            if let Some(registered_widget) = target.registered_widget.as_ref() {
+                if dispatch_semantic_click(&target.root_widget, registered_widget, target.point) {
                     return Ok(());
                 }
             }
-            if self.root_widget().is_none() {
-                return Err(RegionResolveError::InputUnavailable);
-            }
-            if let Some(point) = explicit_hit_point(node) {
-                self.input().click(point);
-            } else {
-                self.input().click(Point::new(
-                    node.rect.origin.x + node.rect.size.width / 2.0,
-                    node.rect.origin.y + node.rect.size.height / 2.0,
-                ));
-            }
+            self.input().click(target.point).map_err(map_input_error)?;
             Ok(())
         }
 
@@ -334,6 +347,7 @@ mod imp {
                 .filter_map(|(index, entry)| {
                     let rect = rect_of_widget(&entry.widget, root_widget.as_ref())?;
                     let id = registered_node_id(index, entry.descriptor.id.as_deref(), "widget");
+                    let visible_rect = visible_rect_of_widget(&entry.widget, root_widget.as_ref());
                     let mut node = SemanticNode::new(
                         id,
                         entry
@@ -346,7 +360,7 @@ mod imp {
                     .with_provenance(NodeProvenanceKind::Native);
                     node.label = entry.descriptor.label.clone();
                     node.visible = entry.widget.is_visible();
-                    node.visible_rect = Some(node.rect);
+                    node.visible_rect = visible_rect;
                     node.hit_testable = entry.widget.can_target();
                     node.opacity = entry.widget.opacity() as f64;
                     if let Some(parent) = entry.widget.parent() {
@@ -465,6 +479,41 @@ mod imp {
                 .get(registry_index)
                 .map(|entry| entry.widget.clone())
         }
+
+        fn resolve_click_target(
+            &self,
+            predicate: &NodePredicate,
+            search: &HitPointSearch,
+        ) -> Result<ResolvedClickTarget, RegionResolveError> {
+            if self.detached_root_widget {
+                return Err(RegionResolveError::DetachedRootView);
+            }
+
+            let (scene, registered_indices) = self.snapshot_scene_with_registered_indices();
+            let handle = scene.find(predicate).map_err(map_query_error)?;
+            let node = scene
+                .node(handle)
+                .ok_or(RegionResolveError::InvalidHandle(handle))?;
+            let root_widget = self
+                .root_widget()
+                .ok_or(RegionResolveError::InputUnavailable)?;
+            let registered_widget = self.registered_widget_for_handle(handle, &registered_indices);
+            let point = resolve_hit_point_for_node(
+                &scene,
+                handle,
+                &root_widget,
+                node,
+                registered_widget.as_ref(),
+                search,
+            )
+            .ok_or(RegionResolveError::InputUnavailable)?;
+
+            Ok(ResolvedClickTarget {
+                root_widget,
+                registered_widget,
+                point,
+            })
+        }
     }
 
     impl Drop for GtkWindowHost {
@@ -543,6 +592,193 @@ mod imp {
         ))
     }
 
+    fn visible_rect_of_widget(widget: &Widget, root_widget: Option<&Widget>) -> Option<Rect> {
+        let mut visible_rect = rect_of_widget(widget, root_widget)?;
+        let root_widget = root_widget?;
+        let mut current = Some(widget.clone());
+        while let Some(candidate) = current {
+            let parent = candidate.parent();
+            let clip_source = parent.as_ref().unwrap_or(root_widget);
+            let clip_rect = rect_of_widget(clip_source, Some(root_widget))?;
+            visible_rect = intersect_rects(visible_rect, clip_rect)?;
+            if clip_source == root_widget {
+                break;
+            }
+            current = parent;
+        }
+        Some(visible_rect)
+    }
+
+    fn resolve_hit_point_for_node(
+        scene: &SceneSnapshot,
+        handle: glasscheck_core::NodeHandle,
+        root_widget: &Widget,
+        node: &SemanticNode,
+        registered_widget: Option<&Widget>,
+        search: &HitPointSearch,
+    ) -> Option<Point> {
+        let mut candidates = explicit_hit_point(node).into_iter().collect::<Vec<_>>();
+        if let Some(hit_bounds) = hit_test_bounds_for_node(node) {
+            for point in hit_point_candidates(hit_bounds, search) {
+                if !candidates.contains(&point) {
+                    candidates.push(point);
+                }
+            }
+        }
+        candidates
+            .into_iter()
+            .find(|point| point_targets_node(scene, handle, root_widget, registered_widget, *point))
+    }
+
+    fn point_targets_node(
+        scene: &SceneSnapshot,
+        handle: glasscheck_core::NodeHandle,
+        root_widget: &Widget,
+        registered_widget: Option<&Widget>,
+        point: Point,
+    ) -> bool {
+        if let Some(widget) = registered_widget {
+            return widget_accepts_point(root_widget, widget, point);
+        }
+        scene.topmost_at(point) == Some(handle)
+    }
+
+    fn widget_accepts_point(root_widget: &Widget, widget: &Widget, point: Point) -> bool {
+        let (x, y) = root_top_left_point(root_widget, point);
+        root_widget
+            .pick(x, y, gtk4::PickFlags::DEFAULT)
+            .is_some_and(|picked| picked == *widget || is_descendant_of_widget(&picked, widget))
+    }
+
+    fn dispatch_semantic_click(
+        root_widget: &Widget,
+        registered_widget: &Widget,
+        point: Point,
+    ) -> bool {
+        let (x, y) = root_top_left_point(root_widget, point);
+        let Some(picked) = root_widget.pick(x, y, gtk4::PickFlags::DEFAULT) else {
+            return false;
+        };
+        if !is_descendant_of_widget(&picked, registered_widget) {
+            return false;
+        }
+        let mut current = Some(picked.clone());
+        while let Some(candidate) = current {
+            let gestures_fired = dispatch_click_to_widget_gestures(root_widget, &candidate, x, y);
+            let activated = candidate.activate();
+            if gestures_fired || activated {
+                return true;
+            }
+            if candidate == *registered_widget {
+                break;
+            }
+            current = candidate.parent();
+        }
+        false
+    }
+
+    fn dispatch_click_to_widget_gestures(
+        root_widget: &Widget,
+        widget: &Widget,
+        x: f64,
+        y: f64,
+    ) -> bool {
+        let Some((local_x, local_y)) = root_widget.translate_coordinates(widget, x, y) else {
+            return false;
+        };
+        let mut fired = false;
+        for object in widget.observe_controllers().snapshot() {
+            let Ok(controller) = object.downcast::<gtk4::GestureClick>() else {
+                continue;
+            };
+            let button = controller.button();
+            if button != 0 && button != 1 {
+                continue;
+            }
+            controller.emit_by_name::<()>("pressed", &[&1i32, &local_x, &local_y]);
+            controller.emit_by_name::<()>("released", &[&1i32, &local_x, &local_y]);
+            fired = true;
+        }
+        fired
+    }
+
+    fn is_descendant_of_widget(widget: &Widget, ancestor: &Widget) -> bool {
+        let mut current = Some(widget.clone());
+        while let Some(candidate) = current {
+            if candidate == *ancestor {
+                return true;
+            }
+            current = candidate.parent();
+        }
+        false
+    }
+
+    fn hit_point_candidates(rect: Rect, search: &HitPointSearch) -> Vec<Point> {
+        match search.strategy {
+            HitPointStrategy::VisibleCenterFirst => {
+                let center = rect_center(rect);
+                let mut points = vec![center];
+                for point in hit_point_candidates(
+                    rect,
+                    &HitPointSearch {
+                        strategy: HitPointStrategy::Grid,
+                        sample_count: search.sample_count.max(9),
+                    },
+                ) {
+                    if !points.contains(&point) {
+                        points.push(point);
+                    }
+                }
+                points
+            }
+            HitPointStrategy::CornersAndCenter => vec![
+                Point::new(rect.origin.x, rect.origin.y),
+                Point::new(rect.origin.x + rect.size.width, rect.origin.y),
+                Point::new(rect.origin.x, rect.origin.y + rect.size.height),
+                Point::new(
+                    rect.origin.x + rect.size.width,
+                    rect.origin.y + rect.size.height,
+                ),
+                rect_center(rect),
+            ],
+            HitPointStrategy::Grid => {
+                let dimension = (search.sample_count.max(4) as f64).sqrt().ceil() as usize;
+                let mut points = Vec::new();
+                for row in 0..dimension {
+                    for column in 0..dimension {
+                        points.push(Point::new(
+                            rect.origin.x
+                                + rect.size.width * ((column as f64 + 0.5) / dimension as f64),
+                            rect.origin.y
+                                + rect.size.height * ((row as f64 + 0.5) / dimension as f64),
+                        ));
+                    }
+                }
+                points
+            }
+        }
+    }
+
+    fn rect_center(rect: Rect) -> Point {
+        Point::new(
+            rect.origin.x + rect.size.width / 2.0,
+            rect.origin.y + rect.size.height / 2.0,
+        )
+    }
+
+    fn root_top_left_point(root_widget: &Widget, point: Point) -> (f64, f64) {
+        let height = root_widget.allocated_height().max(1) as f64;
+        (point.x, height - point.y)
+    }
+
+    fn intersect_rects(left: Rect, right: Rect) -> Option<Rect> {
+        let x1 = left.origin.x.max(right.origin.x);
+        let y1 = left.origin.y.max(right.origin.y);
+        let x2 = (left.origin.x + left.size.width).min(right.origin.x + right.size.width);
+        let y2 = (left.origin.y + left.size.height).min(right.origin.y + right.size.height);
+        (x2 > x1 && y2 > y1).then_some(Rect::new(Point::new(x1, y1), Size::new(x2 - x1, y2 - y1)))
+    }
+
     fn infer_role(widget: &Widget) -> Role {
         if widget.is::<gtk4::TextView>() {
             Role::TextInput
@@ -606,6 +842,17 @@ mod imp {
         }
     }
 
+    fn map_input_error(_error: InputSynthesisError) -> RegionResolveError {
+        RegionResolveError::InputUnavailable
+    }
+
+    fn hit_test_bounds_for_node(node: &SemanticNode) -> Option<Rect> {
+        explicit_hit_rect(node).or_else(|| {
+            let rect = node.visible_rect.unwrap_or(node.rect);
+            (rect.size.width > 0.0 && rect.size.height > 0.0).then_some(rect)
+        })
+    }
+
     fn explicit_hit_point(node: &SemanticNode) -> Option<Point> {
         match (
             node.properties.get("glasscheck:hit_point_x"),
@@ -614,6 +861,26 @@ mod imp {
             (Some(PropertyValue::Integer(x)), Some(PropertyValue::Integer(y))) => {
                 Some(Point::new(*x as f64, *y as f64))
             }
+            _ => None,
+        }
+    }
+
+    fn explicit_hit_rect(node: &SemanticNode) -> Option<Rect> {
+        match (
+            node.properties.get("glasscheck:hit_rect_x"),
+            node.properties.get("glasscheck:hit_rect_y"),
+            node.properties.get("glasscheck:hit_rect_width"),
+            node.properties.get("glasscheck:hit_rect_height"),
+        ) {
+            (
+                Some(PropertyValue::Integer(x)),
+                Some(PropertyValue::Integer(y)),
+                Some(PropertyValue::Integer(width)),
+                Some(PropertyValue::Integer(height)),
+            ) if *width > 0 && *height > 0 => Some(Rect::new(
+                Point::new(*x as f64, *y as f64),
+                Size::new(*width as f64, *height as f64),
+            )),
             _ => None,
         }
     }

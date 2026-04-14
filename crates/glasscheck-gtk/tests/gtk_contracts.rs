@@ -7,7 +7,9 @@ use glasscheck_core::{
     PropertyValue, Rect, RegionResolveError, RegionSpec, Role, SemanticNode, SemanticProvider,
     Size, TextRange,
 };
-use glasscheck_gtk::{GtkHarness, GtkWindowHost, InstrumentedWidget};
+use glasscheck_gtk::{
+    GtkHarness, GtkWindowHost, HitPointSearch, HitPointStrategy, InstrumentedWidget,
+};
 use gtk4::prelude::*;
 
 fn main() {
@@ -37,13 +39,37 @@ fn main() {
         semantic_click_targets_registered_node(harness)
     });
     run(
+        "resolve_hit_point_supports_selector_lookup_and_search_strategy",
+        || resolve_hit_point_supports_selector_lookup_and_search_strategy(harness),
+    );
+    run(
         "semantic_click_dispatches_gesture_click_for_non_button_targets",
         || semantic_click_dispatches_gesture_click_for_non_button_targets(harness),
     );
+    run("semantic_click_dispatches_button_gesture_handlers", || {
+        semantic_click_dispatches_button_gesture_handlers(harness)
+    });
     run(
         "semantic_click_skips_unrealized_registrations_when_mapping_handles",
         || semantic_click_skips_unrealized_registrations_when_mapping_handles(harness),
     );
+    run("semantic_click_respects_gesture_button_filters", || {
+        semantic_click_respects_gesture_button_filters(harness)
+    });
+    run(
+        "semantic_click_on_registered_ancestor_routes_to_descendant_hit_widget",
+        || semantic_click_on_registered_ancestor_routes_to_descendant_hit_widget(harness),
+    );
+    run("semantic_click_reports_unhittable_registered_node", || {
+        semantic_click_reports_unhittable_registered_node(harness)
+    });
+    run(
+        "semantic_click_uses_recipe_hit_target_when_locator_bounds_are_empty",
+        || semantic_click_uses_recipe_hit_target_when_locator_bounds_are_empty(harness),
+    );
+    run("semantic_click_uses_single_scene_snapshot", || {
+        semantic_click_uses_single_scene_snapshot(harness)
+    });
     run("key_press_dispatches_modifiers_to_event_controller", || {
         key_press_dispatches_modifiers_to_event_controller(harness)
     });
@@ -234,6 +260,41 @@ fn semantic_click_targets_registered_node(harness: GtkHarness) {
     assert_eq!(activations.get(), 1);
 }
 
+fn resolve_hit_point_supports_selector_lookup_and_search_strategy(harness: GtkHarness) {
+    let host = harness.create_window(140.0, 120.0);
+    let root = fixed_root(140, 120);
+    let clipping_parent = gtk4::Fixed::new();
+    clipping_parent.set_size_request(30, 30);
+    let target = gtk4::Button::with_label("Hit");
+    target.set_size_request(40, 40);
+    clipping_parent.put(&target, 20.0, 20.0);
+    root.put(&clipping_parent, 10.0, 10.0);
+    host.set_root(&root);
+    host.register_node(&target, node("hit-target", Role::Button, "Hit"));
+    harness.settle(4);
+
+    let default_hit = host
+        .resolve_hit_point(
+            &NodePredicate::id_eq("hit-target"),
+            &HitPointSearch::default(),
+        )
+        .expect("default hit-point search should resolve a visible target");
+    assert!((30.0..=60.0).contains(&default_hit.x));
+    assert!((30.0..=70.0).contains(&default_hit.y));
+
+    let grid_hit = host
+        .resolve_hit_point(
+            &NodePredicate::id_eq("hit-target"),
+            &HitPointSearch {
+                strategy: HitPointStrategy::Grid,
+                sample_count: 16,
+            },
+        )
+        .expect("grid hit-point search should resolve a visible target");
+    assert!((30.0..=60.0).contains(&grid_hit.x));
+    assert!((30.0..=70.0).contains(&grid_hit.y));
+}
+
 fn semantic_click_skips_unrealized_registrations_when_mapping_handles(harness: GtkHarness) {
     let host = harness.create_window(180.0, 120.0);
     let root = fixed_root(180, 120);
@@ -283,6 +344,163 @@ fn semantic_click_dispatches_gesture_click_for_non_button_targets(harness: GtkHa
     assert_eq!(activations.get(), 1);
 }
 
+fn semantic_click_dispatches_button_gesture_handlers(harness: GtkHarness) {
+    let host = harness.create_window(200.0, 140.0);
+    let root = fixed_root(200, 140);
+    let button = gtk4::Button::with_label("Gesture");
+    button.set_size_request(90, 40);
+    let clicked = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let clicked_seen = clicked.clone();
+    button.connect_clicked(move |_| clicked_seen.set(clicked_seen.get() + 1));
+    let gesture_releases = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let gesture_seen = gesture_releases.clone();
+    let gesture = gtk4::GestureClick::new();
+    gesture.connect_released(move |_, _, _, _| gesture_seen.set(gesture_seen.get() + 1));
+    button.add_controller(gesture);
+    root.put(&button, 20.0, 20.0);
+    host.set_root(&root);
+    host.register_node(&button, node("button-gesture", Role::Button, "Gesture"));
+    harness.settle(4);
+
+    host.click_node(&NodePredicate::id_eq("button-gesture"))
+        .expect("semantic click should use native pointer dispatch for buttons");
+    harness.settle(2);
+
+    assert_eq!(clicked.get(), 1);
+    assert_eq!(gesture_releases.get(), 1);
+}
+
+fn semantic_click_on_registered_ancestor_routes_to_descendant_hit_widget(harness: GtkHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = fixed_root(220, 140);
+    let container = gtk4::Fixed::new();
+    container.set_size_request(120, 80);
+    let child = gtk4::Button::with_label("Child");
+    child.set_size_request(80, 36);
+    let activations = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let seen = activations.clone();
+    child.connect_clicked(move |_| seen.set(seen.get() + 1));
+    container.put(&child, 20.0, 20.0);
+    root.put(&container, 30.0, 24.0);
+    host.set_root(&root);
+    host.register_node(&container, node("container", Role::Container, "Container"));
+    harness.settle(4);
+
+    host.click_node(&NodePredicate::id_eq("container"))
+        .expect("semantic click on a registered ancestor should route to the hit descendant");
+    harness.settle(4);
+
+    assert_eq!(activations.get(), 1);
+}
+
+fn semantic_click_respects_gesture_button_filters(harness: GtkHarness) {
+    let host = harness.create_window(220.0, 160.0);
+    let root = fixed_root(220, 160);
+    let container = gtk4::Fixed::new();
+    container.set_size_request(140, 90);
+    let area = gtk4::DrawingArea::new();
+    area.set_size_request(90, 40);
+    let child_releases = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let child_seen = child_releases.clone();
+    let child_gesture = gtk4::GestureClick::new();
+    child_gesture.connect_released(move |_, _, _, _| child_seen.set(child_seen.get() + 1));
+    area.add_controller(child_gesture);
+    let ancestor_releases = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let ancestor_seen = ancestor_releases.clone();
+    let ancestor_gesture = gtk4::GestureClick::new();
+    ancestor_gesture.set_button(2);
+    ancestor_gesture.connect_released(move |_, _, _, _| ancestor_seen.set(ancestor_seen.get() + 1));
+    container.add_controller(ancestor_gesture);
+    container.put(&area, 20.0, 20.0);
+    root.put(&container, 30.0, 24.0);
+    host.set_root(&root);
+    host.register_node(
+        &area,
+        node("gesture-filter-target", Role::Button, "Gesture Filter"),
+    );
+    harness.settle(4);
+
+    host.click_node(&NodePredicate::id_eq("gesture-filter-target"))
+        .expect("semantic click should dispatch a primary-button click");
+    harness.settle(2);
+
+    assert_eq!(child_releases.get(), 1);
+    assert_eq!(ancestor_releases.get(), 0);
+}
+
+fn semantic_click_reports_unhittable_registered_node(harness: GtkHarness) {
+    let host = harness.create_window(180.0, 120.0);
+    let root = fixed_root(180, 120);
+    let target = gtk4::Button::with_label("Covered");
+    target.set_size_request(120, 60);
+    let occluder = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    occluder.set_size_request(120, 60);
+    root.put(&target, 20.0, 20.0);
+    root.put(&occluder, 20.0, 20.0);
+    host.set_root(&root);
+    host.register_node(&target, node("covered-target", Role::Button, "Covered"));
+    harness.settle(4);
+
+    let scene = host.snapshot_scene();
+    let handle = scene.find(&NodePredicate::id_eq("covered-target")).unwrap();
+    let node = scene.node(handle).unwrap();
+    assert!(node.hit_testable);
+
+    let error = host
+        .click_node(&NodePredicate::id_eq("covered-target"))
+        .unwrap_err();
+    assert!(matches!(error, RegionResolveError::InputUnavailable));
+}
+
+fn semantic_click_uses_recipe_hit_target_when_locator_bounds_are_empty(harness: GtkHarness) {
+    let host = harness.create_window(140.0, 100.0);
+    let root = fixed_root(140, 100);
+    let target = gtk4::DrawingArea::new();
+    target.set_size_request(60, 30);
+    let occluder = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    occluder.set_size_request(20, 10);
+    root.put(&target, 40.0, 30.0);
+    root.put(&occluder, 60.0, 40.0);
+    host.set_root(&root);
+    host.register_node(
+        &occluder,
+        node("recipe-occluder", Role::Container, "Occluder"),
+    );
+    host.set_scene_source(Box::new(HitTargetOnlyRecipeProvider));
+    harness.settle(4);
+
+    let point = host
+        .resolve_hit_point(
+            &NodePredicate::selector_eq("recipe.hit-target"),
+            &HitPointSearch::default(),
+        )
+        .expect("recipe hit target should provide a usable fallback point");
+    assert_ne!(point, Point::new(70.0, 55.0));
+    assert!((40.0..=100.0).contains(&point.x));
+    assert!((40.0..=70.0).contains(&point.y));
+    assert!(!(60.0..=80.0).contains(&point.x) || !(50.0..=60.0).contains(&point.y));
+}
+
+fn semantic_click_uses_single_scene_snapshot(harness: GtkHarness) {
+    let host = harness.create_window(220.0, 120.0);
+    let root = fixed_root(220, 120);
+    let target = gtk4::DrawingArea::new();
+    target.set_size_request(80, 40);
+    root.put(&target, 20.0, 20.0);
+    host.set_root(&root);
+    let snapshot_calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    host.set_scene_source(Box::new(FlippingSelectorProvider {
+        snapshot_calls: snapshot_calls.clone(),
+    }));
+    harness.settle(4);
+
+    host.click_node(&NodePredicate::selector_eq("moving.target"))
+        .expect("semantic click should stay bound to one provider snapshot");
+    harness.settle(4);
+
+    assert_eq!(snapshot_calls.get(), 1);
+}
+
 fn key_press_dispatches_modifiers_to_event_controller(harness: GtkHarness) {
     let host = harness.create_window(220.0, 140.0);
     let root = fixed_root(220, 140);
@@ -303,13 +521,15 @@ fn key_press_dispatches_modifiers_to_event_controller(harness: GtkHarness) {
 
     entry.grab_focus();
     harness.settle(2);
-    host.input().key_press(
-        "a",
-        KeyModifiers {
-            control: true,
-            ..KeyModifiers::default()
-        },
-    );
+    host.input()
+        .key_press(
+            "a",
+            KeyModifiers {
+                control: true,
+                ..KeyModifiers::default()
+            },
+        )
+        .expect("strict key synthesis should deliver the key event");
     harness.settle(2);
 
     let states = states.borrow();
@@ -535,5 +755,52 @@ impl SemanticProvider for VisualProbeProvider {
                 .with_selector("visual.red-chip")
                 .with_hit_target(locator),
         ]
+    }
+}
+
+struct HitTargetOnlyRecipeProvider;
+
+impl SemanticProvider for HitTargetOnlyRecipeProvider {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        Vec::new()
+    }
+
+    fn snapshot_recipes(&self) -> Vec<NodeRecipe> {
+        vec![NodeRecipe::new(
+            "recipe-hit-target",
+            Role::Button,
+            RegionSpec::rect(Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 0.0))),
+        )
+        .with_selector("recipe.hit-target")
+        .with_hit_target(RegionSpec::rect(Rect::new(
+            Point::new(40.0, 40.0),
+            Size::new(60.0, 30.0),
+        )))]
+    }
+}
+
+struct FlippingSelectorProvider {
+    snapshot_calls: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl SemanticProvider for FlippingSelectorProvider {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        Vec::new()
+    }
+
+    fn snapshot_recipes(&self) -> Vec<NodeRecipe> {
+        let call = self.snapshot_calls.get();
+        self.snapshot_calls.set(call + 1);
+        (call == 0)
+            .then(|| {
+                NodeRecipe::new(
+                    "moving-target",
+                    Role::Button,
+                    RegionSpec::rect(Rect::new(Point::new(20.0, 60.0), Size::new(80.0, 40.0))),
+                )
+                .with_selector("moving.target")
+            })
+            .into_iter()
+            .collect()
     }
 }
