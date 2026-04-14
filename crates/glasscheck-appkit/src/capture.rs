@@ -14,9 +14,9 @@ mod imp {
     const DEFAULT_CAPTURE_FRAME: NSRect =
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(800.0, 600.0));
 
-    pub fn capture_view_image(view: &NSView) -> Option<Image> {
+    pub fn capture_view_image(view: &NSView, mtm: MainThreadMarker) -> Option<Image> {
         if let Some(window) = view.window() {
-            ensure_window_has_frame(&window);
+            ensure_window_has_frame(&window, mtm);
             window.display();
         }
 
@@ -28,11 +28,9 @@ mod imp {
         crop_image_bottom_left(image, rect)
     }
 
-    fn ensure_window_has_frame(window: &NSWindow) {
+    fn ensure_window_has_frame(window: &NSWindow, mtm: MainThreadMarker) {
         let frame = window.frame();
         if frame.size.width < MIN_CAPTURE_DIM || frame.size.height < MIN_CAPTURE_DIM {
-            let mtm = MainThreadMarker::new()
-                .expect("capture-time window repair should run on the main thread");
             let repaired = offscreen_window_frame_rect(
                 mtm,
                 window.styleMask(),
@@ -177,7 +175,9 @@ mod imp {
 #[cfg(not(target_os = "macos"))]
 mod imp {
     pub struct NSView;
-    pub fn capture_view_image(_: &NSView) -> Option<glasscheck_core::Image> {
+    pub struct MainThreadMarker;
+
+    pub fn capture_view_image(_: &NSView, _: MainThreadMarker) -> Option<glasscheck_core::Image> {
         None
     }
 }

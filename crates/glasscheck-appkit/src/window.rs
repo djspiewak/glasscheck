@@ -92,8 +92,12 @@ mod imp {
     ///
     /// This is the main AppKit integration surface. Use it to attach semantic
     /// metadata to native views, capture pixels, query the current scene, and
-    /// drive best-effort native input.
+    /// drive best-effort native input. AppKit construction and attachment APIs
+    /// remain explicitly main-thread-bound, but once a host has been created it
+    /// carries that capability internally so common post-mount operations such
+    /// as `input()` and `text_renderer()` stay marker-free.
     pub struct AppKitWindowHost {
+        mtm: MainThreadMarker,
         window: Option<Retained<NSWindow>>,
         root_view: RefCell<Option<Retained<NSView>>>,
         registry: RefCell<Vec<RegisteredView>>,
@@ -104,6 +108,9 @@ mod imp {
 
     impl AppKitWindowHost {
         /// Creates a window host with a new `NSWindow`.
+        ///
+        /// Most downstream tests should call `AppKitHarness::create_window`
+        /// instead of constructing hosts directly.
         #[must_use]
         pub fn new(mtm: MainThreadMarker, width: f64, height: f64) -> Self {
             let rect = offscreen_window_content_rect(mtm, width, height);
@@ -121,6 +128,7 @@ mod imp {
             };
             unsafe { window.setReleasedWhenClosed(false) };
             Self {
+                mtm,
                 window: Some(window),
                 root_view: RefCell::new(None),
                 registry: RefCell::new(Vec::new()),
@@ -131,8 +139,12 @@ mod imp {
         }
 
         /// Attaches a host to an existing `NSWindow`.
+        ///
+        /// Prefer `AppKitHarness::attach_window` when a harness is already in
+        /// scope so the harness remains the public carrier for the main-thread
+        /// capability.
         #[must_use]
-        pub fn from_window(window: &NSWindow) -> Self {
+        pub fn from_window(window: &NSWindow, mtm: MainThreadMarker) -> Self {
             let retained = unsafe {
                 Retained::retain(window as *const NSWindow as *mut NSWindow)
                     .expect("window attachment should retain successfully")
@@ -142,6 +154,7 @@ mod imp {
                     .expect("content view attachment should retain successfully")
             });
             Self {
+                mtm,
                 window: Some(retained),
                 root_view: RefCell::new(root_view),
                 registry: RefCell::new(Vec::new()),
@@ -156,8 +169,9 @@ mod imp {
         /// When no window is supplied, the host installs the view into a managed offscreen
         /// window so capture and low-level input APIs remain usable. Semantic click APIs still
         /// report `DetachedRootView` because the supplied root is not treated as window-rooted.
+        /// Prefer `AppKitHarness::attach_root_view` when a harness is already in scope.
         #[must_use]
-        pub fn from_root(view: &NSView, window: Option<&NSWindow>) -> Self {
+        pub fn from_root(view: &NSView, window: Option<&NSWindow>, mtm: MainThreadMarker) -> Self {
             let root = unsafe {
                 Retained::retain(view as *const NSView as *mut NSView)
                     .expect("root view attachment should retain successfully")
@@ -167,8 +181,9 @@ mod imp {
                     Retained::retain(window as *const NSWindow as *mut NSWindow)
                         .expect("window attachment should retain successfully")
                 })
-                .or_else(|| Some(managed_window_for_root_view(view)));
+                .or_else(|| Some(managed_window_for_root_view(view, mtm)));
             Self {
+                mtm,
                 window: attached_window,
                 root_view: RefCell::new(Some(root)),
                 registry: RefCell::new(Vec::new()),
@@ -180,8 +195,12 @@ mod imp {
 
         /// Compatibility wrapper for the legacy name.
         #[must_use]
-        pub fn from_root_view(view: &NSView, window: Option<&NSWindow>) -> Self {
-            Self::from_root(view, window)
+        pub fn from_root_view(
+            view: &NSView,
+            window: Option<&NSWindow>,
+            mtm: MainThreadMarker,
+        ) -> Self {
+            Self::from_root(view, window, mtm)
         }
 
         /// Returns the underlying `NSWindow`.
@@ -226,13 +245,13 @@ mod imp {
         #[must_use]
         pub fn capture(&self) -> Option<glasscheck_core::Image> {
             let root = self.root_view()?;
-            capture_view_image(&root)
+            capture_view_image(&root, self.mtm)
         }
 
         /// Captures a specific view as an image.
         #[must_use]
         pub fn capture_subtree(&self, view: &NSView) -> Option<glasscheck_core::Image> {
-            capture_view_image(view)
+            capture_view_image(view, self.mtm)
         }
 
         /// Compatibility wrapper for the legacy name.
@@ -259,13 +278,17 @@ mod imp {
         }
 
         /// Returns an input driver scoped to this window.
+        ///
+        /// The returned driver still satisfies the shared `InputDriver` trait,
+        /// but the main-thread capability is taken from the host rather than a
+        /// call-site argument.
         #[must_use]
         pub fn input(&self) -> AppKitInputDriver<'_> {
             let window = self
                 .window
                 .as_deref()
                 .expect("input requires an attached window");
-            AppKitInputDriver::new(window)
+            AppKitInputDriver::new(window, self.mtm)
         }
 
         /// Clicks the semantic hit point of the unique node matching `predicate`.
@@ -352,9 +375,12 @@ mod imp {
         }
 
         /// Returns a text-rendering harness that uses this host for live capture.
+        ///
+        /// This method is intentionally marker-free so a shared post-mount test
+        /// body can call `host.text_renderer()` unchanged across backends.
         #[must_use]
-        pub fn text_renderer(&self, mtm: MainThreadMarker) -> AppKitTextHarness<'_> {
-            AppKitTextHarness::new(self, mtm)
+        pub fn text_renderer(&self) -> AppKitTextHarness<'_> {
+            AppKitTextHarness::new(self)
         }
 
         /// Returns the bounding rect for a character range in a live `NSTextView`.
@@ -555,6 +581,11 @@ mod imp {
                 let title = NSString::from_str(title);
                 window.setTitle(&title);
             }
+        }
+
+        #[must_use]
+        pub(crate) fn main_thread_marker(&self) -> MainThreadMarker {
+            self.mtm
         }
 
         fn root_view(&self) -> Option<Retained<NSView>> {
@@ -879,9 +910,7 @@ mod imp {
         NSRect::new(NSPoint::new(0.0, 0.0), content.size)
     }
 
-    fn managed_window_for_root_view(view: &NSView) -> Retained<NSWindow> {
-        let mtm = MainThreadMarker::new()
-            .expect("root-view attachment without a window must run on the main thread");
+    fn managed_window_for_root_view(view: &NSView, mtm: MainThreadMarker) -> Retained<NSWindow> {
         let bounds = view.bounds();
         let rect = offscreen_window_content_rect(mtm, bounds.size.width, bounds.size.height);
         let style =

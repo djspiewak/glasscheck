@@ -332,7 +332,7 @@ fn rendered_text_assertion_matches_live_text(harness: AppKitHarness) {
 
     let artifact_dir = unique_temp_dir("rendered-text");
     assert_text_renders(
-        &host.text_renderer(harness.main_thread_marker()),
+        &host.text_renderer(),
         &expectation,
         &artifact_dir,
         &TextAssertionConfig {
@@ -376,7 +376,7 @@ fn rendered_text_assertion_reports_visual_regression(harness: AppKitHarness) {
 
     let artifact_dir = unique_temp_dir("rendered-text-regression");
     let error = assert_text_renders(
-        &host.text_renderer(harness.main_thread_marker()),
+        &host.text_renderer(),
         &expectation,
         &artifact_dir,
         &TextAssertionConfig {
@@ -457,7 +457,7 @@ fn anchored_text_assertion_reports_ambiguous_match(harness: AppKitHarness) {
 
     let artifact_dir = unique_temp_dir("anchored-rendered-text-ambiguous");
     let error = host
-        .text_renderer(harness.main_thread_marker())
+        .text_renderer()
         .assert_text_renders_anchored(&expectation, &artifact_dir, &TextAssertionConfig::default())
         .unwrap_err();
 
@@ -509,7 +509,7 @@ fn anchored_text_assertion_matches_semantic_region(harness: AppKitHarness) {
     .with_background(RgbaColor::new(255, 255, 255, 255));
 
     let artifact_dir = unique_temp_dir("anchored-rendered-text");
-    host.text_renderer(harness.main_thread_marker())
+    host.text_renderer()
         .assert_text_renders_anchored(
             &expectation,
             &artifact_dir,
@@ -566,7 +566,7 @@ fn anchored_text_assertion_reports_visual_regression(harness: AppKitHarness) {
 
     let artifact_dir = unique_temp_dir("anchored-rendered-text-regression");
     let error = host
-        .text_renderer(harness.main_thread_marker())
+        .text_renderer()
         .assert_text_renders_anchored(
             &expectation,
             &artifact_dir,
@@ -634,7 +634,7 @@ fn rendered_text_assertion_supports_family_weight_and_italic(harness: AppKitHarn
 
     let artifact_dir = unique_temp_dir("rendered-text-family-weight-italic");
     assert_text_renders(
-        &host.text_renderer(harness.main_thread_marker()),
+        &host.text_renderer(),
         &expectation,
         &artifact_dir,
         &TextAssertionConfig {
@@ -685,7 +685,7 @@ fn rendered_text_assertion_matches_clipped_text_region(harness: AppKitHarness) {
 
     let artifact_dir = unique_temp_dir("rendered-text-clipped");
     assert_text_renders(
-        &host.text_renderer(harness.main_thread_marker()),
+        &host.text_renderer(),
         &expectation,
         &artifact_dir,
         &TextAssertionConfig {
@@ -745,7 +745,7 @@ fn rendered_text_assertion_matches_negative_origin_region(harness: AppKitHarness
 
     let artifact_dir = unique_temp_dir("rendered-text-negative-origin");
     assert_text_renders(
-        &host.text_renderer(harness.main_thread_marker()),
+        &host.text_renderer(),
         &expectation,
         &artifact_dir,
         &TextAssertionConfig {
@@ -805,7 +805,7 @@ fn rendered_text_assertion_reports_negative_origin_regression(harness: AppKitHar
 
     let artifact_dir = unique_temp_dir("rendered-text-negative-origin");
     let error = assert_text_renders(
-        &host.text_renderer(harness.main_thread_marker()),
+        &host.text_renderer(),
         &expectation,
         &artifact_dir,
         &TextAssertionConfig {
@@ -994,7 +994,7 @@ fn click_hotspot_reveals_rounded_gradient_and_anchored_text(harness: AppKitHarne
     .with_foreground(RgbaColor::new(255, 255, 255, 255));
 
     let artifact_dir = unique_temp_dir("interactive-gradient-scene");
-    host.text_renderer(harness.main_thread_marker())
+    host.text_renderer()
         .assert_text_renders_anchored(
             &expectation,
             &artifact_dir,
@@ -1038,7 +1038,7 @@ fn click_outside_hotspot_does_not_activate_gradient_scene(harness: AppKitHarness
 
     let artifact_dir = unique_temp_dir("interactive-gradient-scene-inactive");
     let error = host
-        .text_renderer(harness.main_thread_marker())
+        .text_renderer()
         .assert_text_renders_anchored(
             &interactive_gradient_scene_expectation("Connected")
                 .with_font_name("Helvetica-BoldOblique")
@@ -1112,7 +1112,7 @@ fn interactive_gradient_scene_reports_text_content_regression(harness: AppKitHar
 
     let artifact_dir = unique_temp_dir("interactive-gradient-scene-wrong-content");
     let error = host
-        .text_renderer(harness.main_thread_marker())
+        .text_renderer()
         .assert_text_renders_anchored(
             &interactive_gradient_scene_expectation("XXXXXXXXXXXX")
                 .with_font_name("Helvetica-BoldOblique")
@@ -1139,7 +1139,7 @@ fn interactive_gradient_scene_reports_text_size_regression(harness: AppKitHarnes
 
     let artifact_dir = unique_temp_dir("interactive-gradient-scene-wrong-size");
     let error = host
-        .text_renderer(harness.main_thread_marker())
+        .text_renderer()
         .assert_text_renders_anchored(
             &interactive_gradient_scene_expectation("Connected")
                 .with_font_name("Helvetica-BoldOblique")
@@ -1166,7 +1166,7 @@ fn interactive_gradient_scene_reports_text_color_regression(harness: AppKitHarne
 
     let artifact_dir = unique_temp_dir("interactive-gradient-scene-wrong-color");
     let error = host
-        .text_renderer(harness.main_thread_marker())
+        .text_renderer()
         .assert_text_renders_anchored(
             &interactive_gradient_scene_expectation("Connected")
                 .with_font_name("Helvetica-BoldOblique")

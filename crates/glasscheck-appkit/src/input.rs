@@ -12,13 +12,14 @@ mod imp {
 
     pub struct AppKitInputDriver<'a> {
         window: &'a NSWindow,
+        mtm: MainThreadMarker,
     }
 
     impl<'a> AppKitInputDriver<'a> {
         /// Creates an input driver for `window`.
         #[must_use]
-        pub fn new(window: &'a NSWindow) -> Self {
-            Self { window }
+        pub fn new(window: &'a NSWindow, mtm: MainThreadMarker) -> Self {
+            Self { window, mtm }
         }
 
         /// Synthesizes a left mouse click at `point` in window coordinates.
@@ -200,9 +201,7 @@ mod imp {
         fn activate_window(&self) {
             self.window.makeKeyAndOrderFront(None);
             self.window.makeKeyWindow();
-            let mtm =
-                MainThreadMarker::new().expect("window activation must run on the main thread");
-            let app = NSApplication::sharedApplication(mtm);
+            let app = NSApplication::sharedApplication(self.mtm);
             app.activate();
         }
 

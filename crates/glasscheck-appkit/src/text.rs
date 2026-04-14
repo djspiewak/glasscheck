@@ -67,9 +67,16 @@ mod imp {
 
     impl<'a> AppKitTextHarness<'a> {
         /// Creates a text harness backed by `host`.
+        ///
+        /// The host supplies the stored AppKit main-thread capability, so
+        /// callers do not need to thread `MainThreadMarker` through the shared
+        /// post-mount API surface.
         #[must_use]
-        pub fn new(host: &'a AppKitWindowHost, mtm: MainThreadMarker) -> Self {
-            Self { host, mtm }
+        pub fn new(host: &'a AppKitWindowHost) -> Self {
+            Self {
+                host,
+                mtm: host.main_thread_marker(),
+            }
         }
 
         /// Resolves an anchored expectation and asserts it against the live AppKit view.
@@ -100,7 +107,8 @@ mod imp {
             let content_view = window
                 .contentView()
                 .ok_or(AppKitTextError::WindowContentMissing)?;
-            let image = capture_view_image(&content_view).ok_or(AppKitTextError::CaptureFailed)?;
+            let image = capture_view_image(&content_view, self.mtm)
+                .ok_or(AppKitTextError::CaptureFailed)?;
             Ok(crop_in_view_coordinates(&image, expectation.rect))
         }
 

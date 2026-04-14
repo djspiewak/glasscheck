@@ -5,6 +5,7 @@ mod imp {
 
     use glasscheck_core::{Harness, PollError, PollOptions};
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+    use objc2_app_kit::{NSView, NSWindow};
     use objc2_foundation::{MainThreadMarker, NSDate, NSRunLoop};
 
     use crate::window::AppKitWindowHost;
@@ -12,10 +13,13 @@ mod imp {
     static INIT_APP: Once = Once::new();
 
     #[derive(Clone, Copy)]
-    /// Main-thread AppKit harness for creating windows and flushing the run loop.
+    /// Main-thread AppKit harness for creating windows, attaching hosts, and flushing the run loop.
     ///
     /// Use this as the entry point for AppKit tests. It owns the main-thread
-    /// setup and keeps polling aligned with real run-loop progress.
+    /// capability used by AppKit construction and attachment APIs and keeps
+    /// polling aligned with real run-loop progress. Prefer the harness-owned
+    /// attachment helpers over calling `AppKitWindowHost::from_*` directly when
+    /// you already have a harness in scope.
     pub struct AppKitHarness {
         mtm: MainThreadMarker,
     }
@@ -33,6 +37,11 @@ mod imp {
         }
 
         /// Returns the main-thread marker associated with this harness.
+        ///
+        /// Most downstream code should not need this after native fixture
+        /// construction. It remains available for backend-specific view/control
+        /// creation that cannot be expressed through the shared `glasscheck`
+        /// facade.
         #[must_use]
         pub fn main_thread_marker(&self) -> MainThreadMarker {
             self.mtm
@@ -70,6 +79,29 @@ mod imp {
         #[must_use]
         pub fn create_window(&self, width: f64, height: f64) -> AppKitWindowHost {
             AppKitWindowHost::new(self.mtm, width, height)
+        }
+
+        /// Attaches a host to an existing `NSWindow`.
+        ///
+        /// Prefer this over `AppKitWindowHost::from_window` in normal test code
+        /// so the harness remains the carrier for the main-thread capability.
+        #[must_use]
+        pub fn attach_window(&self, window: &NSWindow) -> AppKitWindowHost {
+            AppKitWindowHost::from_window(window, self.mtm)
+        }
+
+        /// Attaches a host to an existing root view and optional parent window.
+        ///
+        /// Prefer this over `AppKitWindowHost::from_root_view` in normal test
+        /// code so the harness remains the carrier for the main-thread
+        /// capability.
+        #[must_use]
+        pub fn attach_root_view(
+            &self,
+            view: &NSView,
+            window: Option<&NSWindow>,
+        ) -> AppKitWindowHost {
+            AppKitWindowHost::from_root_view(view, window, self.mtm)
         }
 
         /// Runs the AppKit run loop for the given duration.

@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use glasscheck_appkit::{
-    AppKitHarness, AppKitWindowHost, HitPointSearch, HitPointStrategy, InstrumentedView,
+    AppKitHarness, HitPointSearch, HitPointStrategy, InstrumentedView,
 };
 use glasscheck_core::{
     assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
@@ -319,7 +319,7 @@ fn attach_to_existing_window_builds_scene_snapshot(harness: AppKitHarness) {
     );
     harness.settle(2);
 
-    let attached = AppKitWindowHost::from_window(host.window());
+    let attached = harness.attach_window(host.window());
     attached.register_view(
         &row,
         InstrumentedView {
@@ -350,7 +350,7 @@ fn attached_window_reports_missing_node(harness: AppKitHarness) {
     let host = harness.create_window(160.0, 120.0);
     let root = make_view(harness.main_thread_marker(), NSSize::new(160.0, 120.0));
     host.set_content_view(&root);
-    let attached = AppKitWindowHost::from_window(host.window());
+    let attached = harness.attach_window(host.window());
     let error = attached
         .snapshot_scene()
         .find(&NodePredicate::id_eq("missing"))
@@ -673,7 +673,7 @@ fn attached_window_registry_drops_nodes_after_content_swap(harness: AppKitHarnes
     host.set_content_view(&initial_root);
     harness.settle(2);
 
-    let attached = AppKitWindowHost::from_window(host.window());
+    let attached = harness.attach_window(host.window());
     attached.register_view(
         &initial_child,
         InstrumentedView {
@@ -758,7 +758,7 @@ fn native_snapshot_visibility_tracks_hidden_ancestors_and_clipping(harness: AppK
 fn provider_only_root_relative_region_uses_content_bounds(harness: AppKitHarness) {
     let host = harness.create_window(240.0, 160.0);
     host.window().setContentView(None);
-    let attached = AppKitWindowHost::from_window(host.window());
+    let attached = harness.attach_window(host.window());
 
     let rect = attached
         .resolve_region(
@@ -779,7 +779,7 @@ fn provider_only_root_relative_region_uses_content_bounds(harness: AppKitHarness
 
 fn provider_only_scene_without_content_view_is_usable(harness: AppKitHarness) {
     let host = harness.create_window(240.0, 160.0);
-    let attached = AppKitWindowHost::from_window(host.window());
+    let attached = harness.attach_window(host.window());
     attached.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
 
     let scene = attached.snapshot_scene();
@@ -796,7 +796,7 @@ fn provider_only_scene_without_content_view_is_usable(harness: AppKitHarness) {
 fn provider_only_region_capture_fails_cleanly(harness: AppKitHarness) {
     let host = harness.create_window(240.0, 160.0);
     host.window().setContentView(None);
-    let attached = AppKitWindowHost::from_window(host.window());
+    let attached = harness.attach_window(host.window());
     attached.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
 
     let error = attached
@@ -813,7 +813,7 @@ fn root_view_only_host_without_window_is_safe(harness: AppKitHarness) {
         harness.main_thread_marker(),
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
     );
-    let host = AppKitWindowHost::from_root_view(&root, None);
+    let host = harness.attach_root_view(&root, None);
     host.register_view(
         &root,
         InstrumentedView {
@@ -845,7 +845,7 @@ fn root_view_attachment_with_window_stays_pinned_to_supplied_view(harness: AppKi
     host.set_content_view(&content);
     harness.settle(2);
 
-    let attached = AppKitWindowHost::from_root_view(&pinned, Some(host.window()));
+    let attached = harness.attach_root_view(&pinned, Some(host.window()));
     let actual = attached
         .capture()
         .expect("attached root view should capture");
@@ -885,7 +885,7 @@ fn pinned_root_view_semantic_click_uses_window_coordinates(harness: AppKitHarnes
     );
     harness.settle(2);
 
-    let attached = AppKitWindowHost::from_root_view(&pinned, Some(host.window()));
+    let attached = harness.attach_root_view(&pinned, Some(host.window()));
     attached.register_view(
         &pinned,
         InstrumentedView {
@@ -1010,7 +1010,7 @@ fn attached_window_refreshes_after_content_view_swap(harness: AppKitHarness) {
     host.set_content_view(&initial_root);
     harness.settle(2);
 
-    let attached = AppKitWindowHost::from_window(host.window());
+    let attached = harness.attach_window(host.window());
     host.window().setContentView(Some(&replacement_root));
     harness.settle(2);
 
@@ -1514,7 +1514,7 @@ fn scene_source_recipe_hit_target_uses_window_coordinates(harness: AppKitHarness
     host.set_content_view(&root);
     harness.settle(2);
 
-    let attached = AppKitWindowHost::from_root_view(&pinned, Some(host.window()));
+    let attached = harness.attach_root_view(&pinned, Some(host.window()));
     attached.set_scene_source(Box::new(ExplicitHitTargetRecipeProvider));
     harness.settle(2);
 
@@ -1550,7 +1550,7 @@ fn scene_source_recipe_hit_target_respects_search_strategy(harness: AppKitHarnes
     host.set_content_view(&root);
     harness.settle(2);
 
-    let attached = AppKitWindowHost::from_root_view(&pinned, Some(host.window()));
+    let attached = harness.attach_root_view(&pinned, Some(host.window()));
     attached.set_scene_source(Box::new(ExplicitHitTargetRecipeProvider));
     harness.settle(2);
 
@@ -2169,7 +2169,7 @@ fn provider_click_after_content_swap_does_not_dispatch_to_stale_registered_view(
     host.set_content_view(&initial_root);
     harness.settle(2);
 
-    let attached = AppKitWindowHost::from_window(host.window());
+    let attached = harness.attach_window(host.window());
     attached.register_view(
         &stale_button,
         InstrumentedView {
@@ -2470,7 +2470,7 @@ fn attached_window_prunes_stale_registered_views_after_content_swap(harness: App
     host.set_content_view(&initial_root);
     harness.settle(2);
 
-    let attached = AppKitWindowHost::from_window(host.window());
+    let attached = harness.attach_window(host.window());
     attached.register_view(
         &initial_child,
         InstrumentedView {
@@ -2509,7 +2509,7 @@ fn attached_window_prunes_stale_registered_views_after_content_swap(harness: App
 fn provider_only_semantic_click_reports_unavailable_input(harness: AppKitHarness) {
     let host = harness.create_window(180.0, 120.0);
     host.window().setContentView(None);
-    let attached = AppKitWindowHost::from_window(host.window());
+    let attached = harness.attach_window(host.window());
     attached.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
 
     let error = attached

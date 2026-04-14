@@ -12,6 +12,33 @@ Functional testing primitives for graphical native Rust UIs.
 
 Much of the scene/query/wait design in `glasscheck` is directly inspired by [Zed](https://github.com/zed-industries/zed)'s test harness.
 
+## Shared Facade
+
+When you depend on `glasscheck`, the crate exposes target-specific aliases for a common top-level facade:
+
+- `glasscheck::Harness`
+- `glasscheck::WindowHost`
+
+The intended downstream pattern is:
+
+1. build the native fixture using backend-specific toolkit code
+2. return the aliased `glasscheck::WindowHost`
+3. run the shared assertions through the common host surface
+
+That shared post-mount surface is intentionally aligned across GTK and AppKit for:
+
+- `snapshot_scene()`
+- `capture()`
+- `capture_region(&RegionSpec)`
+- `resolve_region(&RegionSpec)`
+- `click_node(&NodePredicate)`
+- `input()`
+- `text_renderer()`
+
+This lets one shared test body compile unchanged after platform-specific fixture setup.
+
+On AppKit, main-thread capability is still explicit for native construction and attachment, but it is carried by the harness/host internally so shared post-mount calls stay marker-free.
+
 ## Crates
 
 Use `glasscheck` unless you are building a new backend or integrating with an existing native test harness.
@@ -27,6 +54,8 @@ Use `glasscheck-core` only when you already have your own scene snapshot and pix
 [dependencies]
 glasscheck-core = { path = "crates/glasscheck-core" }
 ```
+
+For AppKit-specific setup, prefer `AppKitHarness::create_window`, `attach_window`, and `attach_root_view` over calling `AppKitWindowHost::from_*` directly. That keeps the harness as the public carrier for `MainThreadMarker`.
 
 ## Pick An API
 

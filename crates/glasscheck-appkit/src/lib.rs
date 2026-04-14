@@ -4,7 +4,9 @@
 //! to real AppKit windows, semantic snapshots, capture, or input synthesis.
 //! Compared with external UI automation, the setup cost is lower and the
 //! assertions are more precise, but tests must opt into explicit
-//! instrumentation.
+//! instrumentation. Prefer `AppKitHarness` as the entry point: it owns the
+//! AppKit main-thread capability for window creation and attachment, while
+//! post-mount host operations such as `text_renderer()` remain marker-free.
 
 mod capture;
 mod harness;

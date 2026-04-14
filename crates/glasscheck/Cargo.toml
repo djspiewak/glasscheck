@@ -13,3 +13,39 @@ gtk = ["dep:glasscheck-gtk"]
 glasscheck-core = { path = "../glasscheck-core" }
 glasscheck-appkit = { path = "../glasscheck-appkit", optional = true }
 glasscheck-gtk = { path = "../glasscheck-gtk", optional = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gtk4 = "0.10"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSButton",
+    "NSColor",
+    "NSControl",
+    "NSFont",
+    "NSTextView",
+    "NSText",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+    "NSUserInterfaceItemIdentification",
+] }
+objc2-foundation = { version = "0.3", features = [
+    "NSAttributedString",
+    "NSRange",
+    "NSString",
+] }
+
+[[test]]
+name = "facade_contracts_gtk"
+path = "tests/facade_contracts_gtk.rs"
+harness = false
+required-features = ["gtk"]
+
+[[test]]
+name = "facade_contracts_appkit"
+path = "tests/facade_contracts_appkit.rs"
+harness = false
+required-features = ["appkit"]

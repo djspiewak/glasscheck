@@ -2,6 +2,13 @@
 
 - Run formatting on every affected file before staging and committing.
 
+## Documentation Hygiene
+
+- Keep user-facing documentation in sync with functionality changes.
+- When public APIs, shared workflows, capability boundaries, or verification commands change, update the relevant README sections in the same change.
+- When public types or methods change behavior or become the preferred path, update their Rust doc comments in the same change.
+- Treat README and public docstring drift as follow-up work to complete before considering the task done.
+
 ## Backend Testing
 
 - GTK backend tests that rely on `xvfb-run` or X11 must be run outside the Codex sandbox. The sandbox blocks the X server setup and socket access needed by GTK.
