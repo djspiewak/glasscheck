@@ -4,7 +4,7 @@ use crate::{
     assert_above, assert_adjacent_horizontally, assert_adjacent_vertically,
     assert_contained_within, assert_contains_point, assert_horizontal_alignment, assert_left_of,
     assert_same_height, assert_same_width, assert_vertical_alignment, LayoutError, LayoutTolerance,
-    NodeHandle, NodePredicate, Point, PropertyValue, QueryError, Rect, SceneSnapshot, SemanticNode,
+    NodeHandle, Point, PropertyValue, QueryError, Rect, Scene, Selector, SemanticNode,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -83,24 +83,24 @@ impl Interactability {
 pub enum SemanticAssertionError {
     Query(QueryError),
     Layout(LayoutError),
-    MissingVisibleBounds(NodePredicate),
+    MissingVisibleBounds(Selector),
     UnexpectedCount {
-        predicate: NodePredicate,
+        predicate: Selector,
         expected: usize,
         actual: usize,
     },
     UnexpectedInteractability {
-        predicate: NodePredicate,
+        predicate: Selector,
         actual: Interactability,
     },
     PropertyMismatch {
-        predicate: NodePredicate,
+        predicate: Selector,
         key: String,
         expected: PropertyValue,
         actual: Option<PropertyValue>,
     },
     StateMismatch {
-        predicate: NodePredicate,
+        predicate: Selector,
         key: String,
         expected: PropertyValue,
         actual: Option<PropertyValue>,
@@ -172,10 +172,7 @@ pub struct ReorderChange {
     pub z_index_after: i32,
 }
 
-pub fn assert_exists(
-    scene: &SceneSnapshot,
-    predicate: &NodePredicate,
-) -> Result<(), SemanticAssertionError> {
+pub fn assert_exists(scene: &Scene, predicate: &Selector) -> Result<(), SemanticAssertionError> {
     let actual = scene.count(predicate);
     if actual > 0 {
         Ok(())
@@ -189,8 +186,8 @@ pub fn assert_exists(
 }
 
 pub fn assert_not_exists(
-    scene: &SceneSnapshot,
-    predicate: &NodePredicate,
+    scene: &Scene,
+    predicate: &Selector,
 ) -> Result<(), SemanticAssertionError> {
     let actual = scene.count(predicate);
     if actual == 0 {
@@ -205,15 +202,15 @@ pub fn assert_not_exists(
 }
 
 pub fn assert_unique(
-    scene: &SceneSnapshot,
-    predicate: &NodePredicate,
+    scene: &Scene,
+    predicate: &Selector,
 ) -> Result<NodeHandle, SemanticAssertionError> {
     Ok(scene.find(predicate)?)
 }
 
 pub fn assert_count(
-    scene: &SceneSnapshot,
-    predicate: &NodePredicate,
+    scene: &Scene,
+    predicate: &Selector,
     expected: usize,
 ) -> Result<(), SemanticAssertionError> {
     let actual = scene.count(predicate);
@@ -228,10 +225,7 @@ pub fn assert_count(
     }
 }
 
-pub fn assert_visible(
-    scene: &SceneSnapshot,
-    predicate: &NodePredicate,
-) -> Result<(), SemanticAssertionError> {
+pub fn assert_visible(scene: &Scene, predicate: &Selector) -> Result<(), SemanticAssertionError> {
     let resolved = scene.resolve(predicate)?;
     resolved
         .visible_bounds
@@ -241,8 +235,8 @@ pub fn assert_visible(
 }
 
 pub fn assert_hit_testable(
-    scene: &SceneSnapshot,
-    predicate: &NodePredicate,
+    scene: &Scene,
+    predicate: &Selector,
 ) -> Result<(), SemanticAssertionError> {
     let interactability = scene.interactability(predicate)?;
     if interactability.is_hit_testable() {
@@ -256,8 +250,8 @@ pub fn assert_hit_testable(
 }
 
 pub fn assert_interactable(
-    scene: &SceneSnapshot,
-    predicate: &NodePredicate,
+    scene: &Scene,
+    predicate: &Selector,
 ) -> Result<Point, SemanticAssertionError> {
     match scene.interactability(predicate)? {
         Interactability::Interactable { hit_point } => Ok(hit_point),
@@ -269,8 +263,8 @@ pub fn assert_interactable(
 }
 
 pub fn assert_property(
-    scene: &SceneSnapshot,
-    predicate: &NodePredicate,
+    scene: &Scene,
+    predicate: &Selector,
     key: &str,
     expected: &PropertyValue,
 ) -> Result<(), SemanticAssertionError> {
@@ -289,8 +283,8 @@ pub fn assert_property(
 }
 
 pub fn assert_state(
-    scene: &SceneSnapshot,
-    predicate: &NodePredicate,
+    scene: &Scene,
+    predicate: &Selector,
     key: &str,
     expected: &PropertyValue,
 ) -> Result<(), SemanticAssertionError> {
@@ -309,9 +303,9 @@ pub fn assert_state(
 }
 
 pub fn assert_above_node(
-    scene: &SceneSnapshot,
-    upper: &NodePredicate,
-    lower: &NodePredicate,
+    scene: &Scene,
+    upper: &Selector,
+    lower: &Selector,
     tolerance: LayoutTolerance,
 ) -> Result<(), SemanticAssertionError> {
     Ok(assert_above(
@@ -322,9 +316,9 @@ pub fn assert_above_node(
 }
 
 pub fn assert_left_of_node(
-    scene: &SceneSnapshot,
-    left: &NodePredicate,
-    right: &NodePredicate,
+    scene: &Scene,
+    left: &Selector,
+    right: &Selector,
     tolerance: LayoutTolerance,
 ) -> Result<(), SemanticAssertionError> {
     Ok(assert_left_of(
@@ -335,9 +329,9 @@ pub fn assert_left_of_node(
 }
 
 pub fn assert_contained_within_node(
-    scene: &SceneSnapshot,
-    inner: &NodePredicate,
-    outer: &NodePredicate,
+    scene: &Scene,
+    inner: &Selector,
+    outer: &Selector,
     tolerance: LayoutTolerance,
 ) -> Result<(), SemanticAssertionError> {
     Ok(assert_contained_within(
@@ -348,9 +342,9 @@ pub fn assert_contained_within_node(
 }
 
 pub fn assert_same_width_node(
-    scene: &SceneSnapshot,
-    left: &NodePredicate,
-    right: &NodePredicate,
+    scene: &Scene,
+    left: &Selector,
+    right: &Selector,
     tolerance: LayoutTolerance,
 ) -> Result<(), SemanticAssertionError> {
     Ok(assert_same_width(
@@ -361,9 +355,9 @@ pub fn assert_same_width_node(
 }
 
 pub fn assert_same_height_node(
-    scene: &SceneSnapshot,
-    left: &NodePredicate,
-    right: &NodePredicate,
+    scene: &Scene,
+    left: &Selector,
+    right: &Selector,
     tolerance: LayoutTolerance,
 ) -> Result<(), SemanticAssertionError> {
     Ok(assert_same_height(
@@ -374,9 +368,9 @@ pub fn assert_same_height_node(
 }
 
 pub fn assert_horizontally_aligned_node(
-    scene: &SceneSnapshot,
-    left: &NodePredicate,
-    right: &NodePredicate,
+    scene: &Scene,
+    left: &Selector,
+    right: &Selector,
     tolerance: LayoutTolerance,
 ) -> Result<(), SemanticAssertionError> {
     Ok(assert_horizontal_alignment(
@@ -387,9 +381,9 @@ pub fn assert_horizontally_aligned_node(
 }
 
 pub fn assert_vertically_aligned_node(
-    scene: &SceneSnapshot,
-    left: &NodePredicate,
-    right: &NodePredicate,
+    scene: &Scene,
+    left: &Selector,
+    right: &Selector,
     tolerance: LayoutTolerance,
 ) -> Result<(), SemanticAssertionError> {
     Ok(assert_vertical_alignment(
@@ -400,8 +394,8 @@ pub fn assert_vertically_aligned_node(
 }
 
 pub fn assert_contains_point_node(
-    scene: &SceneSnapshot,
-    predicate: &NodePredicate,
+    scene: &Scene,
+    predicate: &Selector,
     point: Point,
     tolerance: LayoutTolerance,
 ) -> Result<(), SemanticAssertionError> {
@@ -413,9 +407,9 @@ pub fn assert_contains_point_node(
 }
 
 pub fn assert_adjacent_horizontally_node(
-    scene: &SceneSnapshot,
-    left: &NodePredicate,
-    right: &NodePredicate,
+    scene: &Scene,
+    left: &Selector,
+    right: &Selector,
     tolerance: LayoutTolerance,
 ) -> Result<(), SemanticAssertionError> {
     Ok(assert_adjacent_horizontally(
@@ -426,9 +420,9 @@ pub fn assert_adjacent_horizontally_node(
 }
 
 pub fn assert_adjacent_vertically_node(
-    scene: &SceneSnapshot,
-    upper: &NodePredicate,
-    lower: &NodePredicate,
+    scene: &Scene,
+    upper: &Selector,
+    lower: &Selector,
     tolerance: LayoutTolerance,
 ) -> Result<(), SemanticAssertionError> {
     Ok(assert_adjacent_vertically(
@@ -443,7 +437,7 @@ pub fn assert_adjacent_vertically_node(
 /// This prefers the `glasscheck:source_id` property when it is uniquely present in each snapshot,
 /// and otherwise falls back to the unique snapshot-local `id`. Ambiguous identities are excluded
 /// from cross-snapshot matching and surfaced in `SceneDelta::ambiguous_ids`.
-pub fn diff_scenes(before: &SceneSnapshot, after: &SceneSnapshot) -> SceneDelta {
+pub fn diff_scenes(before: &Scene, after: &Scene) -> SceneDelta {
     let (before_nodes, mut ambiguous_ids) = index_unique_nodes(before);
     let (after_nodes, after_ambiguous) = index_unique_nodes(after);
     for id in after_ambiguous {
@@ -514,9 +508,9 @@ pub fn diff_scenes(before: &SceneSnapshot, after: &SceneSnapshot) -> SceneDelta 
 }
 
 pub fn assert_node_appeared(
-    before: &SceneSnapshot,
-    after: &SceneSnapshot,
-    predicate: &NodePredicate,
+    before: &Scene,
+    after: &Scene,
+    predicate: &Selector,
 ) -> Result<(), SemanticAssertionError> {
     if before.count(predicate) == 0 && after.count(predicate) > 0 {
         Ok(())
@@ -530,9 +524,9 @@ pub fn assert_node_appeared(
 }
 
 pub fn assert_node_disappeared(
-    before: &SceneSnapshot,
-    after: &SceneSnapshot,
-    predicate: &NodePredicate,
+    before: &Scene,
+    after: &Scene,
+    predicate: &Selector,
 ) -> Result<(), SemanticAssertionError> {
     if before.count(predicate) > 0 && after.count(predicate) == 0 {
         Ok(())
@@ -546,9 +540,9 @@ pub fn assert_node_disappeared(
 }
 
 pub fn assert_node_moved(
-    before: &SceneSnapshot,
-    after: &SceneSnapshot,
-    predicate: &NodePredicate,
+    before: &Scene,
+    after: &Scene,
+    predicate: &Selector,
 ) -> Result<(Rect, Rect), SemanticAssertionError> {
     let before_rect = before.bounds(predicate)?;
     let after_rect = after.bounds(predicate)?;
@@ -565,9 +559,9 @@ pub fn assert_node_moved(
 }
 
 pub fn assert_state_changed(
-    before: &SceneSnapshot,
-    after: &SceneSnapshot,
-    predicate: &NodePredicate,
+    before: &Scene,
+    after: &Scene,
+    predicate: &Selector,
     key: &str,
     from: &PropertyValue,
     to: &PropertyValue,
@@ -577,9 +571,7 @@ pub fn assert_state_changed(
     Ok(())
 }
 
-fn index_unique_nodes<'a>(
-    scene: &'a SceneSnapshot,
-) -> (BTreeMap<String, &'a SemanticNode>, Vec<String>) {
+fn index_unique_nodes<'a>(scene: &'a Scene) -> (BTreeMap<String, &'a SemanticNode>, Vec<String>) {
     let mut counts = BTreeMap::<String, usize>::new();
     let mut labels = BTreeMap::<String, String>::new();
     for node in scene.all() {
@@ -652,8 +644,8 @@ mod tests {
         Rect::new(Point::new(x, y), Size::new(width, height))
     }
 
-    fn scene() -> SceneSnapshot {
-        SceneSnapshot::new(vec![
+    fn scene() -> Scene {
+        Scene::new(vec![
             SemanticNode::new("toolbar", Role::Container, rect(0.0, 0.0, 100.0, 20.0)),
             SemanticNode::new("run", Role::Button, rect(0.0, 0.0, 20.0, 20.0))
                 .with_parent("toolbar", 0)
@@ -669,30 +661,30 @@ mod tests {
     #[test]
     fn existence_assertions_cover_pass_and_fail_cases() {
         let scene = scene();
-        assert!(assert_exists(&scene, &NodePredicate::selector_eq("toolbar.run")).is_ok());
-        assert!(assert_exists(&scene, &NodePredicate::role_eq(Role::Button)).is_ok());
-        assert!(assert_not_exists(&scene, &NodePredicate::selector_eq("missing")).is_ok());
-        assert!(assert_exists(&scene, &NodePredicate::selector_eq("missing")).is_err());
-        assert!(assert_not_exists(&scene, &NodePredicate::selector_eq("toolbar.run")).is_err());
-        assert!(assert_unique(&scene, &NodePredicate::role_eq(Role::Button)).is_err());
+        assert!(assert_exists(&scene, &Selector::selector_eq("toolbar.run")).is_ok());
+        assert!(assert_exists(&scene, &Selector::role_eq(Role::Button)).is_ok());
+        assert!(assert_not_exists(&scene, &Selector::selector_eq("missing")).is_ok());
+        assert!(assert_exists(&scene, &Selector::selector_eq("missing")).is_err());
+        assert!(assert_not_exists(&scene, &Selector::selector_eq("toolbar.run")).is_err());
+        assert!(assert_unique(&scene, &Selector::role_eq(Role::Button)).is_err());
     }
 
     #[test]
     fn count_property_and_state_assertions_cover_pass_and_fail_cases() {
         let scene = scene();
-        assert!(assert_count(&scene, &NodePredicate::role_eq(Role::Button), 2).is_ok());
-        assert!(assert_count(&scene, &NodePredicate::role_eq(Role::Button), 1).is_err());
+        assert!(assert_count(&scene, &Selector::role_eq(Role::Button), 2).is_ok());
+        assert!(assert_count(&scene, &Selector::role_eq(Role::Button), 1).is_err());
 
         assert!(assert_property(
             &scene,
-            &NodePredicate::selector_eq("toolbar.run"),
+            &Selector::selector_eq("toolbar.run"),
             "enabled",
             &PropertyValue::Bool(true)
         )
         .is_ok());
         assert!(assert_property(
             &scene,
-            &NodePredicate::selector_eq("toolbar.run"),
+            &Selector::selector_eq("toolbar.run"),
             "enabled",
             &PropertyValue::Bool(false)
         )
@@ -700,14 +692,14 @@ mod tests {
 
         assert!(assert_state(
             &scene,
-            &NodePredicate::selector_eq("toolbar.run"),
+            &Selector::selector_eq("toolbar.run"),
             "armed",
             &PropertyValue::Bool(false)
         )
         .is_ok());
         assert!(assert_state(
             &scene,
-            &NodePredicate::selector_eq("toolbar.run"),
+            &Selector::selector_eq("toolbar.run"),
             "armed",
             &PropertyValue::Bool(true)
         )
@@ -719,27 +711,27 @@ mod tests {
         let scene = scene();
         assert!(assert_left_of_node(
             &scene,
-            &NodePredicate::selector_eq("toolbar.run"),
-            &NodePredicate::selector_eq("toolbar.stop"),
+            &Selector::selector_eq("toolbar.run"),
+            &Selector::selector_eq("toolbar.stop"),
             LayoutTolerance::default(),
         )
         .is_ok());
         assert!(assert_left_of_node(
             &scene,
-            &NodePredicate::selector_eq("toolbar.stop"),
-            &NodePredicate::selector_eq("toolbar.run"),
+            &Selector::selector_eq("toolbar.stop"),
+            &Selector::selector_eq("toolbar.run"),
             LayoutTolerance::default(),
         )
         .is_err());
         assert!(assert_same_height_node(
             &scene,
-            &NodePredicate::selector_eq("toolbar.run"),
-            &NodePredicate::selector_eq("toolbar.stop"),
+            &Selector::selector_eq("toolbar.run"),
+            &Selector::selector_eq("toolbar.stop"),
             LayoutTolerance::default(),
         )
         .is_ok());
 
-        let non_adjacent = SceneSnapshot::new(vec![
+        let non_adjacent = Scene::new(vec![
             SemanticNode::new("left", Role::Button, rect(0.0, 0.0, 10.0, 10.0))
                 .with_selector("left"),
             SemanticNode::new("right", Role::Button, rect(10.5, 25.0, 10.0, 10.0))
@@ -751,15 +743,15 @@ mod tests {
         ]);
         assert!(assert_adjacent_horizontally_node(
             &non_adjacent,
-            &NodePredicate::selector_eq("left"),
-            &NodePredicate::selector_eq("right"),
+            &Selector::selector_eq("left"),
+            &Selector::selector_eq("right"),
             LayoutTolerance::default(),
         )
         .is_err());
         assert!(assert_adjacent_vertically_node(
             &non_adjacent,
-            &NodePredicate::selector_eq("upper"),
-            &NodePredicate::selector_eq("lower"),
+            &Selector::selector_eq("upper"),
+            &Selector::selector_eq("lower"),
             LayoutTolerance::default(),
         )
         .is_err());
@@ -767,13 +759,13 @@ mod tests {
 
     #[test]
     fn scene_diff_reports_changes_and_ambiguous_ids() {
-        let before = SceneSnapshot::new(vec![
+        let before = Scene::new(vec![
             SemanticNode::new("run", Role::Button, rect(0.0, 0.0, 20.0, 20.0))
                 .with_state("armed", PropertyValue::Bool(false)),
             SemanticNode::new("dup", Role::Label, rect(0.0, 0.0, 10.0, 10.0)),
             SemanticNode::new("dup", Role::Label, rect(10.0, 0.0, 10.0, 10.0)),
         ]);
-        let after = SceneSnapshot::new(vec![
+        let after = Scene::new(vec![
             SemanticNode::new("run", Role::Button, rect(5.0, 0.0, 20.0, 20.0))
                 .with_state("armed", PropertyValue::Bool(true)),
             SemanticNode::new("new", Role::Button, rect(0.0, 20.0, 20.0, 20.0)),
@@ -786,13 +778,13 @@ mod tests {
         assert_eq!(delta.removed.len(), 0);
         assert_eq!(delta.changed.len(), 1);
         assert!(delta.ambiguous_ids.contains(&"dup".to_string()));
-        assert!(assert_node_appeared(&before, &after, &NodePredicate::id_eq("new")).is_ok());
-        assert!(assert_node_disappeared(&before, &after, &NodePredicate::id_eq("new")).is_err());
-        assert!(assert_node_moved(&before, &after, &NodePredicate::id_eq("run")).is_ok());
+        assert!(assert_node_appeared(&before, &after, &Selector::id_eq("new")).is_ok());
+        assert!(assert_node_disappeared(&before, &after, &Selector::id_eq("new")).is_err());
+        assert!(assert_node_moved(&before, &after, &Selector::id_eq("run")).is_ok());
         assert!(assert_state_changed(
             &before,
             &after,
-            &NodePredicate::id_eq("run"),
+            &Selector::id_eq("run"),
             "armed",
             &PropertyValue::Bool(false),
             &PropertyValue::Bool(true)
@@ -802,13 +794,13 @@ mod tests {
 
     #[test]
     fn scene_diff_prefers_stable_source_ids_over_snapshot_local_ids() {
-        let before = SceneSnapshot::new(vec![SemanticNode::new(
+        let before = Scene::new(vec![SemanticNode::new(
             "provider::battlefield",
             Role::Container,
             rect(0.0, 0.0, 20.0, 20.0),
         )
         .with_property("glasscheck:source_id", PropertyValue::string("battlefield"))]);
-        let after = SceneSnapshot::new(vec![SemanticNode::new(
+        let after = Scene::new(vec![SemanticNode::new(
             "battlefield",
             Role::Container,
             rect(5.0, 0.0, 20.0, 20.0),
@@ -825,13 +817,13 @@ mod tests {
 
     #[test]
     fn scene_diff_marks_duplicate_source_ids_as_ambiguous_and_does_not_match_them() {
-        let before = SceneSnapshot::new(vec![
+        let before = Scene::new(vec![
             SemanticNode::new("first", Role::Container, rect(0.0, 0.0, 10.0, 10.0))
                 .with_property("glasscheck:source_id", PropertyValue::string("shared")),
             SemanticNode::new("second", Role::Container, rect(10.0, 0.0, 10.0, 10.0))
                 .with_property("glasscheck:source_id", PropertyValue::string("shared")),
         ]);
-        let after = SceneSnapshot::new(vec![
+        let after = Scene::new(vec![
             SemanticNode::new("renamed", Role::Container, rect(0.0, 0.0, 10.0, 10.0))
                 .with_property("glasscheck:source_id", PropertyValue::string("shared")),
             SemanticNode::new("renamed#1", Role::Container, rect(10.0, 0.0, 10.0, 10.0))
@@ -848,27 +840,27 @@ mod tests {
     #[test]
     fn interactability_assertions_cover_positive_and_negative_cases() {
         let scene = scene();
-        assert!(assert_interactable(&scene, &NodePredicate::selector_eq("toolbar.run")).is_ok());
-        assert!(assert_hit_testable(&scene, &NodePredicate::selector_eq("toolbar.run")).is_ok());
+        assert!(assert_interactable(&scene, &Selector::selector_eq("toolbar.run")).is_ok());
+        assert!(assert_hit_testable(&scene, &Selector::selector_eq("toolbar.run")).is_ok());
 
-        let hidden = SceneSnapshot::new(vec![SemanticNode::new(
+        let hidden = Scene::new(vec![SemanticNode::new(
             "run",
             Role::Button,
             rect(0.0, 0.0, 20.0, 20.0),
         )
         .with_selector("toolbar.run")
         .with_state("disabled", PropertyValue::Bool(true))]);
-        assert!(assert_interactable(&hidden, &NodePredicate::selector_eq("toolbar.run")).is_err());
+        assert!(assert_interactable(&hidden, &Selector::selector_eq("toolbar.run")).is_err());
         assert!(matches!(
-            hidden.interactability(&NodePredicate::selector_eq("toolbar.run")),
+            hidden.interactability(&Selector::selector_eq("toolbar.run")),
             Ok(Interactability::Disabled)
         ));
-        assert!(!hidden.exists(&NodePredicate::any_selector(TextMatch::contains("missing"))));
+        assert!(!hidden.exists(&Selector::any_selector(TextMatch::contains("missing"))));
     }
 
     #[test]
     fn hit_testable_assertions_accept_occluded_nodes_but_reject_non_hit_testable_ones() {
-        let occluded = SceneSnapshot::new(vec![
+        let occluded = Scene::new(vec![
             SemanticNode::new("root", Role::Container, rect(0.0, 0.0, 20.0, 20.0)),
             SemanticNode::new("target", Role::Button, rect(0.0, 0.0, 10.0, 10.0))
                 .with_parent("root", 0)
@@ -876,16 +868,16 @@ mod tests {
             SemanticNode::new("overlay", Role::Button, rect(0.0, 0.0, 10.0, 10.0))
                 .with_parent("root", 1),
         ]);
-        assert!(assert_hit_testable(&occluded, &NodePredicate::selector_eq("target")).is_ok());
-        assert!(assert_interactable(&occluded, &NodePredicate::selector_eq("target")).is_err());
+        assert!(assert_hit_testable(&occluded, &Selector::selector_eq("target")).is_ok());
+        assert!(assert_interactable(&occluded, &Selector::selector_eq("target")).is_err());
 
-        let non_hit_testable = SceneSnapshot::new(vec![SemanticNode {
+        let non_hit_testable = Scene::new(vec![SemanticNode {
             hit_testable: false,
             ..SemanticNode::new("target", Role::Button, rect(0.0, 0.0, 10.0, 10.0))
                 .with_selector("target")
         }]);
         assert!(matches!(
-            assert_hit_testable(&non_hit_testable, &NodePredicate::selector_eq("target")),
+            assert_hit_testable(&non_hit_testable, &Selector::selector_eq("target")),
             Err(SemanticAssertionError::UnexpectedInteractability {
                 actual: Interactability::NotHitTestable,
                 ..
@@ -895,21 +887,21 @@ mod tests {
 
     #[test]
     fn visible_assertions_treat_missing_visible_rect_as_visible_when_node_is_visible() {
-        let visible = SceneSnapshot::new(vec![SemanticNode::new(
+        let visible = Scene::new(vec![SemanticNode::new(
             "provider",
             Role::Button,
             rect(0.0, 0.0, 20.0, 20.0),
         )
         .with_selector("provider.button")]);
-        assert!(assert_visible(&visible, &NodePredicate::selector_eq("provider.button")).is_ok());
+        assert!(assert_visible(&visible, &Selector::selector_eq("provider.button")).is_ok());
 
-        let hidden = SceneSnapshot::new(vec![SemanticNode {
+        let hidden = Scene::new(vec![SemanticNode {
             visible: false,
             ..SemanticNode::new("provider", Role::Button, rect(0.0, 0.0, 20.0, 20.0))
                 .with_selector("provider.button")
         }]);
         assert!(matches!(
-            assert_visible(&hidden, &NodePredicate::selector_eq("provider.button")),
+            assert_visible(&hidden, &Selector::selector_eq("provider.button")),
             Err(SemanticAssertionError::MissingVisibleBounds(_))
         ));
     }

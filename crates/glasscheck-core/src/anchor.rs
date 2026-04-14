@@ -7,9 +7,7 @@ use crate::{
         transparent_reference_pixel_constrains_match, transparent_reference_pixel_matches,
     },
     image::Image,
-    query::{predicate_is_metadata_supported, predicate_matches_metadata},
-    NodeHandle, NodeMetadata, NodePredicate, Point, QueryError, QueryRoot, Rect, SceneSnapshot,
-    Size,
+    NodeHandle, Point, QueryError, Rect, Scene, Selector, Size,
 };
 
 /// Bounds expressed relative to an anchor's resolved rectangle.
@@ -200,8 +198,8 @@ pub enum Anchor {
     /// Anchor to the full bounds of a known absolute rectangle.
     Rect(Rect),
     /// Anchor to the unique node matching the predicate.
-    Node(NodePredicate),
-    /// Anchor to a stable handle resolved earlier in the same scene snapshot.
+    Node(Selector),
+    /// Anchor to a stable handle resolved earlier in the same scene.
     Handle(NodeHandle),
     /// Anchor to a previously described region.
     Region(Box<RegionSpec>),
@@ -398,7 +396,7 @@ impl RegionSpec {
 
     /// Creates a region covering the full bounds of the node matching `predicate`.
     #[must_use]
-    pub fn node(predicate: NodePredicate) -> Self {
+    pub fn node(predicate: Selector) -> Self {
         Self::new(Anchor::Node(predicate), RelativeBounds::full())
     }
 
@@ -522,12 +520,9 @@ impl RegionSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RegionResolveError {
     /// The region predicate matched no nodes.
-    NotFound(NodePredicate),
+    NotFound(Selector),
     /// The region predicate matched more than one node.
-    MultipleMatches {
-        predicate: NodePredicate,
-        count: usize,
-    },
+    MultipleMatches { predicate: Selector, count: usize },
     /// A visual refiner found no matching target.
     VisualMatchMissing,
     /// A visual refiner found more than one candidate.
@@ -540,7 +535,7 @@ pub enum RegionResolveError {
     InputUnavailable,
     /// The host cannot capture pixels for the resolved region.
     CaptureUnavailable,
-    /// The stable node handle was invalid for the scene snapshot.
+    /// The stable node handle was invalid for the scene.
     InvalidHandle(NodeHandle),
     /// Relative or absolute bounds were not finite.
     InvalidBounds(RelativeBounds),
@@ -583,71 +578,7 @@ impl fmt::Display for RegionResolveError {
 }
 
 impl std::error::Error for RegionResolveError {}
-
-impl QueryRoot {
-    /// Finds exactly one node matching `predicate`.
-    pub fn find_by_predicate(
-        &self,
-        predicate: &NodePredicate,
-    ) -> Result<&NodeMetadata, RegionResolveError> {
-        if self.is_compatibility_root() {
-            if !predicate_is_metadata_supported(predicate) {
-                return Err(RegionResolveError::NotFound(predicate.clone()));
-            }
-            let matches = compatibility_find_all(self.all(), predicate);
-            return match matches.as_slice() {
-                [] => Err(RegionResolveError::NotFound(predicate.clone())),
-                [node] => Ok(node),
-                _ => Err(RegionResolveError::MultipleMatches {
-                    predicate: predicate.clone(),
-                    count: matches.len(),
-                }),
-            };
-        }
-
-        let Some(scene) = self.scene() else {
-            return Err(RegionResolveError::NotFound(predicate.clone()));
-        };
-        let handle = scene.find(predicate).map_err(map_query_error)?;
-        Ok(self
-            .all()
-            .get(handle.index())
-            .ok_or(RegionResolveError::InvalidHandle(handle))?)
-    }
-
-    /// Returns all nodes matching `predicate`.
-    #[must_use]
-    pub fn find_all_by_predicate(&self, predicate: &NodePredicate) -> Vec<&NodeMetadata> {
-        if self.is_compatibility_root() {
-            if !predicate_is_metadata_supported(predicate) {
-                return Vec::new();
-            }
-            return compatibility_find_all(self.all(), predicate);
-        }
-        self.scene()
-            .into_iter()
-            .flat_map(|scene| scene.find_all(predicate))
-            .filter_map(|handle| self.all().get(handle.index()))
-            .collect()
-    }
-
-    /// Resolves `region` to an absolute rectangle inside `root_bounds`.
-    pub fn resolve_region(
-        &self,
-        root_bounds: Rect,
-        region: &RegionSpec,
-    ) -> Result<Rect, RegionResolveError> {
-        if self.is_compatibility_root() {
-            return resolve_region_from_metadata(self.all(), root_bounds, region);
-        }
-        self.scene().map_or_else(
-            || resolve_region_from_metadata(self.all(), root_bounds, region),
-            |scene| scene.resolve_region(root_bounds, region),
-        )
-    }
-}
-
-impl SceneSnapshot {
+impl Scene {
     /// Resolves `region` to an absolute rectangle inside `root_bounds`.
     pub fn resolve_region(
         &self,
@@ -670,7 +601,7 @@ impl SceneSnapshot {
 }
 
 fn resolve_region(
-    scene: &SceneSnapshot,
+    scene: &Scene,
     root_bounds: Rect,
     image: Option<&Image>,
     region: &RegionSpec,
@@ -749,15 +680,9 @@ fn apply_region_terms(
 
 fn map_query_error(error: QueryError) -> RegionResolveError {
     match error {
-        QueryError::NotFoundPredicate(predicate) => RegionResolveError::NotFound(predicate),
-        QueryError::MultiplePredicateMatches { predicate, count } => {
-            RegionResolveError::MultipleMatches { predicate, count }
-        }
-        QueryError::NotFound(selector) => {
-            RegionResolveError::NotFound(NodePredicate::id_eq(selector.id.unwrap_or_default()))
-        }
+        QueryError::NotFound(predicate) => RegionResolveError::NotFound(predicate),
         QueryError::MultipleMatches { selector, count } => RegionResolveError::MultipleMatches {
-            predicate: NodePredicate::id_eq(selector.id.unwrap_or_default()),
+            predicate: selector,
             count,
         },
     }
@@ -785,55 +710,6 @@ fn validate_rect(rect: Rect) -> Result<(), RegionResolveError> {
         return Err(RegionResolveError::InvalidRegion(rect));
     }
     Ok(())
-}
-
-fn compatibility_find_all<'a>(
-    nodes: &'a [NodeMetadata],
-    predicate: &NodePredicate,
-) -> Vec<&'a NodeMetadata> {
-    nodes
-        .iter()
-        .filter(|node| predicate_matches_metadata(predicate, node))
-        .collect()
-}
-
-fn resolve_region_from_metadata(
-    nodes: &[NodeMetadata],
-    root_bounds: Rect,
-    region: &RegionSpec,
-) -> Result<Rect, RegionResolveError> {
-    validate_relative_bounds(region.bounds)?;
-    let anchor_rect = match &region.anchor {
-        Anchor::Root => root_bounds,
-        Anchor::Rect(rect) => *rect,
-        Anchor::Node(predicate) => {
-            if !predicate_is_metadata_supported(predicate) {
-                return Err(RegionResolveError::NotFound(predicate.clone()));
-            }
-            let matches = compatibility_find_all(nodes, predicate);
-            match matches.as_slice() {
-                [] => return Err(RegionResolveError::NotFound(predicate.clone())),
-                [node] => node.rect,
-                _ => {
-                    return Err(RegionResolveError::MultipleMatches {
-                        predicate: predicate.clone(),
-                        count: matches.len(),
-                    })
-                }
-            }
-        }
-        Anchor::Handle(handle) => nodes
-            .get(handle.index())
-            .map(|node| node.rect)
-            .ok_or(RegionResolveError::InvalidHandle(*handle))?,
-        Anchor::Region(parent) => resolve_region_from_metadata(nodes, root_bounds, parent)?,
-        Anchor::PixelProbe { .. }
-        | Anchor::RegionProbe { .. }
-        | Anchor::ImageMatch { .. }
-        | Anchor::Custom { .. } => return Err(RegionResolveError::CaptureUnavailable),
-    };
-
-    apply_region_terms(anchor_rect, region.bounds, region.absolute)
 }
 
 fn resolve_pixel_probe(
@@ -1085,7 +961,7 @@ fn inflate_rect(rect: Rect, padding: f64) -> Rect {
 mod tests {
     use super::*;
     use crate::{
-        scene::Role, CompareConfig, Point, PropertyValue, Rect, SceneSnapshot, SemanticNode, Size,
+        scene::Role, CompareConfig, Point, PropertyValue, Rect, Scene, SemanticNode, Size,
         TextMatch,
     };
 
@@ -1093,20 +969,20 @@ mod tests {
         Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0))
     }
 
-    fn root() -> QueryRoot {
-        QueryRoot::new(vec![
-            NodeMetadata {
-                id: Some("editor".into()),
-                role: Some(Role::TextInput),
-                label: Some("Editor".into()),
-                rect: Rect::new(Point::new(10.0, 20.0), Size::new(100.0, 50.0)),
-            },
-            NodeMetadata {
-                id: Some("run".into()),
-                role: Some(Role::Button),
-                label: Some("Run Tests".into()),
-                rect: Rect::new(Point::new(130.0, 20.0), Size::new(80.0, 30.0)),
-            },
+    fn root() -> Scene {
+        Scene::new(vec![
+            SemanticNode::new(
+                "editor",
+                Role::TextInput,
+                Rect::new(Point::new(10.0, 20.0), Size::new(100.0, 50.0)),
+            )
+            .with_label("Editor"),
+            SemanticNode::new(
+                "run",
+                Role::Button,
+                Rect::new(Point::new(130.0, 20.0), Size::new(80.0, 30.0)),
+            )
+            .with_label("Run Tests"),
         ])
     }
 
@@ -1137,7 +1013,7 @@ mod tests {
         let rect = root()
             .resolve_region(
                 Rect::new(Point::new(0.0, 0.0), Size::new(300.0, 200.0)),
-                &RegionSpec::node(NodePredicate::id_eq("editor"))
+                &RegionSpec::node(Selector::id_eq("editor"))
                     .subregion(RelativeBounds::new(0.25, 0.5, 0.5, 0.25)),
             )
             .unwrap();
@@ -1153,7 +1029,7 @@ mod tests {
         let rect = root()
             .resolve_region(
                 Rect::new(Point::new(0.0, 0.0), Size::new(300.0, 200.0)),
-                &RegionSpec::node(NodePredicate::id_eq("editor")).offset_region(
+                &RegionSpec::node(Selector::id_eq("editor")).offset_region(
                     RelativeBounds::new(1.0, 0.0, 0.0, 1.0),
                     AbsoluteBounds::new(50.0, 0.0, 120.0, 0.0),
                 ),
@@ -1184,14 +1060,14 @@ mod tests {
 
     #[test]
     fn handle_anchor_resolves_scene_node() {
-        let scene = SceneSnapshot::new(vec![crate::SemanticNode::new(
+        let scene = Scene::new(vec![crate::SemanticNode::new(
             "card",
             Role::Container,
             Rect::new(Point::new(25.0, 40.0), Size::new(80.0, 30.0)),
         )
         .with_property("session_id", PropertyValue::Integer(7))]);
         let handle = scene
-            .find(&NodePredicate::property_eq(
+            .find(&Selector::property_eq(
                 "session_id",
                 PropertyValue::Integer(7),
             ))
@@ -1210,7 +1086,7 @@ mod tests {
 
     #[test]
     fn pixel_probe_finds_matching_pixels() {
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = image_with_red_chip();
         let rect = scene
             .resolve_region_with_image(
@@ -1228,7 +1104,7 @@ mod tests {
 
     #[test]
     fn pixel_probe_fails_when_visual_match_is_missing() {
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = Image::new(12, 10, vec![0; 12 * 10 * 4]);
         let error = scene
             .resolve_region_with_image(
@@ -1246,7 +1122,7 @@ mod tests {
 
     #[test]
     fn pixel_probe_accepts_partial_alpha_reference_over_unknown_background() {
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = image_with_partial_alpha_reference_chip([160, 32, 32, 255]);
         let rect = scene
             .resolve_region_with_image(
@@ -1264,7 +1140,7 @@ mod tests {
 
     #[test]
     fn pixel_probe_rejects_partial_alpha_reference_when_color_is_out_of_range() {
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = image_with_partial_alpha_reference_chip([100, 0, 0, 255]);
         let error = scene
             .resolve_region_with_image(
@@ -1282,7 +1158,7 @@ mod tests {
 
     #[test]
     fn region_probe_finds_single_component() {
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = image_with_red_chip();
         let rect = scene
             .resolve_region_with_image(
@@ -1301,7 +1177,7 @@ mod tests {
 
     #[test]
     fn region_probe_fails_when_multiple_components_match() {
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let mut data = vec![0u8; 12 * 10 * 4];
         for y in 2..6 {
             for x in 1..5 {
@@ -1331,7 +1207,7 @@ mod tests {
 
     #[test]
     fn region_probe_accepts_partial_alpha_reference_over_unknown_background() {
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = image_with_partial_alpha_reference_chip([200, 24, 24, 255]);
         let rect = scene
             .resolve_region_with_image(
@@ -1350,7 +1226,7 @@ mod tests {
 
     #[test]
     fn region_probe_rejects_partial_alpha_reference_when_channel_mix_is_invalid() {
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = image_with_partial_alpha_reference_chip([200, 200, 24, 255]);
         let error = scene
             .resolve_region_with_image(
@@ -1377,7 +1253,7 @@ mod tests {
             }
         }
         let template = Image::new(4, 4, template_data);
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = image_with_red_chip();
         let rect = scene
             .resolve_region_with_image(
@@ -1406,7 +1282,7 @@ mod tests {
                 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
             ],
         );
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = Image::new(12, 10, vec![0; 12 * 10 * 4]);
         let error = scene
             .resolve_region_with_image(
@@ -1441,7 +1317,7 @@ mod tests {
                 255, 0, 0, 255, 255, 0, 0, 128, 255, 0, 0, 128, 255, 0, 0, 128,
             ],
         );
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let mut image = image_with_partial_alpha_reference_chip([180, 40, 40, 255]);
         let base = ((2 * image.width + 3) * 4) as usize;
         image.data[base..base + 4].copy_from_slice(&[255, 0, 0, 255]);
@@ -1475,7 +1351,7 @@ mod tests {
                 255, 0, 0, 255,
             ],
         );
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let mut data = vec![0u8; 12 * 10 * 4];
         for y in 2..6 {
             for x in 1..5 {
@@ -1515,7 +1391,7 @@ mod tests {
                 255, 0, 0, 128, 255, 0, 0, 128, 255, 0, 0, 128, 255, 0, 0, 128,
             ],
         );
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = image_with_partial_alpha_reference_chip([100, 20, 20, 255]);
         let error = scene
             .resolve_region_with_image(
@@ -1544,7 +1420,7 @@ mod tests {
     #[test]
     fn image_match_reports_touching_best_matches_as_ambiguous() {
         let template = Image::new(1, 1, vec![255, 0, 0, 255]);
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = Image::new(2, 1, vec![255, 0, 0, 255, 255, 0, 0, 255]);
         let error = scene
             .resolve_region_with_image(
@@ -1571,7 +1447,7 @@ mod tests {
             2,
             vec![255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         );
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = Image::new(
             4,
             4,
@@ -1607,7 +1483,7 @@ mod tests {
 
     #[test]
     fn pixel_probe_reports_root_space_rect_when_search_region_is_clipped() {
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = image_with_red_chip();
         let rect = scene
             .resolve_region_with_image(
@@ -1623,7 +1499,7 @@ mod tests {
 
     #[test]
     fn region_probe_reports_root_space_rect_when_search_region_is_clipped() {
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = image_with_red_chip();
         let rect = scene
             .resolve_region_with_image(
@@ -1653,7 +1529,7 @@ mod tests {
                 255, 0, 0, 255,
             ],
         );
-        let scene = SceneSnapshot::new(Vec::new());
+        let scene = Scene::new(Vec::new());
         let image = image_with_red_chip();
         let rect = scene
             .resolve_region_with_image(
@@ -1675,13 +1551,13 @@ mod tests {
     }
 
     #[test]
-    fn rich_predicates_are_preserved_for_scene_backed_roots() {
+    fn rich_selectors_resolve_against_scenes() {
         let mut label = SemanticNode::new("label", Role::Label, rect())
             .with_parent("panel", 0)
             .with_label("Inspector")
             .with_state("expanded", PropertyValue::Bool(false));
         label.value = Some("Inspector Value".into());
-        let scene = SceneSnapshot::new(vec![
+        let scene = Scene::new(vec![
             SemanticNode::new("root", Role::Container, rect())
                 .with_class("workspace")
                 .with_tag("app")
@@ -1694,38 +1570,48 @@ mod tests {
                 .with_state("selected", PropertyValue::Bool(true)),
             label,
         ]);
-        let root = QueryRoot::from_scene(scene);
-
         assert_eq!(
-            root.find_by_predicate(&NodePredicate::property_eq(
-                "session_id",
-                PropertyValue::Integer(7)
-            ))
-            .unwrap()
-            .id
-            .as_deref(),
-            Some("panel")
-        );
-        assert_eq!(
-            root.find_by_predicate(&NodePredicate::ClassEq("workspace".into()))
+            scene
+                .node(
+                    scene
+                        .find(&Selector::property_eq(
+                            "session_id",
+                            PropertyValue::Integer(7)
+                        ))
+                        .unwrap(),
+                )
                 .unwrap()
                 .id
-                .as_deref(),
-            Some("root")
+                .as_str(),
+            "panel"
         );
         assert_eq!(
-            root.find_by_predicate(&NodePredicate::TagEq("primary".into()))
+            scene
+                .node(scene.find(&Selector::ClassEq("workspace".into())).unwrap())
                 .unwrap()
                 .id
-                .as_deref(),
-            Some("panel")
+                .as_str(),
+            "root"
         );
         assert_eq!(
-            root.find_by_predicate(&NodePredicate::Value(TextMatch::exact("Inspector Value")))
+            scene
+                .node(scene.find(&Selector::TagEq("primary".into())).unwrap())
                 .unwrap()
                 .id
-                .as_deref(),
-            Some("label")
+                .as_str(),
+            "panel"
+        );
+        assert_eq!(
+            scene
+                .node(
+                    scene
+                        .find(&Selector::Value(TextMatch::exact("Inspector Value")))
+                        .unwrap(),
+                )
+                .unwrap()
+                .id
+                .as_str(),
+            "label"
         );
     }
 }

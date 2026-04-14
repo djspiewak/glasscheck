@@ -5,9 +5,9 @@ mod imp {
 
     use glasscheck_core::{
         crop_image_bottom_left, normalize_provider_nodes, registered_node_id, resolve_node_recipes,
-        Image, InstrumentedNode, NodePredicate, NodeProvenanceKind, NodeRecipe, Point,
-        PropertyValue, QueryRoot, Rect, RegionResolveError, RegionSpec, Role, SceneSnapshot,
-        SemanticNode, SemanticProvider, Size, TextRange,
+        Image, InstrumentedNode, NodeProvenanceKind, NodeRecipe, Point, PropertyValue, Rect,
+        RegionResolveError, RegionSpec, Role, Scene, Selector, SemanticNode, SemanticProvider,
+        Size, TextRange,
     };
     use gtk4::graphene;
     use gtk4::prelude::*;
@@ -184,7 +184,7 @@ mod imp {
         /// GTK input synthesis is still best-effort in some paths. Prefer
         /// semantic assertions and direct widget APIs when interaction fidelity
         /// matters more than exercising the click route itself.
-        pub fn click_node(&self, predicate: &NodePredicate) -> Result<(), RegionResolveError> {
+        pub fn click_node(&self, predicate: &Selector) -> Result<(), RegionResolveError> {
             if self.detached_root_widget {
                 return Err(RegionResolveError::DetachedRootView);
             }
@@ -277,13 +277,13 @@ mod imp {
             self.register_node(widget, descriptor);
         }
 
-        /// Builds a merged scene snapshot from registered native widgets and virtual nodes.
+        /// Builds the current merged scene from registered native widgets and virtual nodes.
         #[must_use]
-        pub fn snapshot_scene(&self) -> SceneSnapshot {
+        pub fn snapshot_scene(&self) -> Scene {
             self.snapshot_scene_with_registered_indices().0
         }
 
-        fn snapshot_scene_with_registered_indices(&self) -> (SceneSnapshot, Vec<usize>) {
+        fn snapshot_scene_with_registered_indices(&self) -> (Scene, Vec<usize>) {
             let provider_snapshot = self.provider_snapshot();
             let image = provider_snapshot
                 .as_ref()
@@ -305,7 +305,7 @@ mod imp {
             &self,
             image: Option<&Image>,
             provider_snapshot: Option<ProviderSnapshot>,
-        ) -> (SceneSnapshot, Vec<usize>) {
+        ) -> (Scene, Vec<usize>) {
             let root_widget = self.root_widget();
             let registry = self.registry.borrow();
             let registered_ids = registry
@@ -364,29 +364,20 @@ mod imp {
                     .collect::<BTreeSet<_>>();
                 nodes.extend(normalize_provider_nodes(provider_nodes, &native_ids));
                 if recipes.is_empty() {
-                    return (SceneSnapshot::new(nodes), registered_indices);
+                    return (Scene::new(nodes), registered_indices);
                 }
                 let resolved_recipes =
                     resolve_node_recipes(nodes, self.root_bounds(), image, &recipes);
                 return (
-                    SceneSnapshot::with_recipe_errors(
-                        resolved_recipes.nodes,
-                        resolved_recipes.errors,
-                    ),
+                    Scene::with_recipe_errors(resolved_recipes.nodes, resolved_recipes.errors),
                     registered_indices,
                 );
             }
 
-            (SceneSnapshot::new(nodes), registered_indices)
+            (Scene::new(nodes), registered_indices)
         }
 
-        /// Builds a query root from the current scene snapshot.
-        #[must_use]
-        pub fn query_root(&self) -> QueryRoot {
-            QueryRoot::from_scene(self.snapshot_scene())
-        }
-
-        /// Resolves a semantic region against the current scene snapshot.
+        /// Resolves a semantic region against the current scene.
         pub fn resolve_region(&self, region: &RegionSpec) -> Result<Rect, RegionResolveError> {
             let provider_snapshot = self.provider_snapshot();
             let image = (region.requires_image()
@@ -570,18 +561,12 @@ mod imp {
 
     fn map_query_error(error: glasscheck_core::QueryError) -> RegionResolveError {
         match error {
-            glasscheck_core::QueryError::NotFoundPredicate(predicate) => {
+            glasscheck_core::QueryError::NotFound(predicate) => {
                 RegionResolveError::NotFound(predicate)
-            }
-            glasscheck_core::QueryError::MultiplePredicateMatches { predicate, count } => {
-                RegionResolveError::MultipleMatches { predicate, count }
-            }
-            glasscheck_core::QueryError::NotFound(selector) => {
-                RegionResolveError::NotFound(NodePredicate::id_eq(selector.id.unwrap_or_default()))
             }
             glasscheck_core::QueryError::MultipleMatches { selector, count } => {
                 RegionResolveError::MultipleMatches {
-                    predicate: NodePredicate::id_eq(selector.id.unwrap_or_default()),
+                    predicate: selector,
                     count,
                 }
             }

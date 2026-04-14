@@ -6,9 +6,9 @@ use std::rc::Rc;
 use glasscheck_appkit::{AppKitHarness, HitPointSearch, HitPointStrategy, InstrumentedView};
 use glasscheck_core::{
     assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
-    NodePredicate, NodeProvenanceKind, NodeRecipe, PixelMatch, PixelProbe, Point, PropertyValue,
-    QueryError, Rect, RegionResolveError, RelativeBounds, Role, SemanticNode, SemanticProvider,
-    Size, TextRange,
+    NodeProvenanceKind, NodeRecipe, PixelMatch, PixelProbe, Point, PropertyValue, QueryError, Rect,
+    RegionResolveError, RelativeBounds, Role, Selector, SemanticNode, SemanticProvider, Size,
+    TextRange,
 };
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
@@ -338,8 +338,8 @@ fn attach_to_existing_window_builds_scene_snapshot(harness: AppKitHarness) {
     );
 
     let scene = attached.snapshot_scene();
-    let row = scene.find(&NodePredicate::id_eq("sidebar-row")).unwrap();
-    let label = scene.find(&NodePredicate::id_eq("sidebar-label")).unwrap();
+    let row = scene.find(&Selector::id_eq("sidebar-row")).unwrap();
+    let label = scene.find(&Selector::id_eq("sidebar-label")).unwrap();
     assert_eq!(scene.node(row).unwrap().label.as_deref(), Some("Draft"));
     assert_eq!(scene.node(label).unwrap().role, Role::Label);
 }
@@ -351,9 +351,9 @@ fn attached_window_reports_missing_node(harness: AppKitHarness) {
     let attached = harness.attach_window(host.window());
     let error = attached
         .snapshot_scene()
-        .find(&NodePredicate::id_eq("missing"))
+        .find(&Selector::id_eq("missing"))
         .unwrap_err();
-    assert!(matches!(error, QueryError::NotFoundPredicate(_)));
+    assert!(matches!(error, QueryError::NotFound(_)));
 }
 
 fn query_root_is_scene_backed(harness: AppKitHarness) {
@@ -374,26 +374,37 @@ fn query_root_is_scene_backed(harness: AppKitHarness) {
     host.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
     harness.settle(2);
 
-    let query_root = host.query_root();
-    let provider = query_root
-        .find_by_predicate(&NodePredicate::property_eq(
-            "provider",
-            PropertyValue::Bool(true),
-        ))
-        .expect("scene-backed query root should include provider nodes");
-    let provider_selector = query_root
-        .find_by_predicate(&NodePredicate::selector_eq("provider.node"))
-        .expect("scene-backed query root should preserve provider selectors");
-    let native = query_root
-        .find_by_predicate(&NodePredicate::id_eq("native-child"))
-        .expect("scene-backed query root should include registered native nodes");
+    let scene = host.snapshot_scene();
+    let provider = scene
+        .node(
+            scene
+                .find(&Selector::property_eq(
+                    "provider",
+                    PropertyValue::Bool(true),
+                ))
+                .expect("scene should include provider nodes"),
+        )
+        .unwrap();
+    let provider_selector = scene
+        .node(
+            scene
+                .find(&Selector::selector_eq("provider.node"))
+                .expect("scene should preserve provider selectors"),
+        )
+        .unwrap();
+    let native = scene
+        .node(
+            scene
+                .find(&Selector::id_eq("native-child"))
+                .expect("scene should include registered native nodes"),
+        )
+        .unwrap();
 
-    assert!(query_root.scene().is_some());
-    assert_eq!(provider.id.as_deref(), Some("provider-node"));
-    assert_eq!(provider_selector.id.as_deref(), Some("provider-node"));
-    assert_eq!(native.id.as_deref(), Some("native-child"));
-    assert!(query_root
-        .find_by_predicate(&NodePredicate::parent(NodePredicate::id_eq("native-child")))
+    assert_eq!(provider.id.as_str(), "provider-node");
+    assert_eq!(provider_selector.id.as_str(), "provider-node");
+    assert_eq!(native.id.as_str(), "native-child");
+    assert!(scene
+        .find(&Selector::parent(Selector::id_eq("native-child")))
         .is_err());
 }
 
@@ -407,17 +418,14 @@ fn semantic_only_snapshot_does_not_resize_small_windows(harness: AppKitHarness) 
     let before = host.window().frame().size;
     let scene = host.snapshot_scene();
     let after_snapshot = host.window().frame().size;
-    let query_root = host.query_root();
     let after_query = host.window().frame().size;
 
-    assert!(scene.find(&NodePredicate::id_eq("provider-node")).is_ok());
+    assert!(scene.find(&Selector::id_eq("provider-node")).is_ok());
     assert_eq!(before.width, after_snapshot.width);
     assert_eq!(before.height, after_snapshot.height);
     assert_eq!(before.width, after_query.width);
     assert_eq!(before.height, after_query.height);
-    assert!(query_root
-        .find_by_predicate(&NodePredicate::id_eq("provider-node"))
-        .is_ok());
+    assert!(scene.find(&Selector::id_eq("provider-node")).is_ok());
 }
 
 fn geometry_only_region_resolution_does_not_resize_small_windows(harness: AppKitHarness) {
@@ -465,7 +473,7 @@ fn visual_recipe_snapshot_rebinds_provider_state_after_capture_resize(harness: A
     let scene = host.snapshot_scene();
     let after = host.window().frame().size;
     let handle = scene
-        .find(&NodePredicate::selector_eq("provider.visual"))
+        .find(&Selector::selector_eq("provider.visual"))
         .expect("visual recipe should resolve after capture-time resize");
     let node = scene
         .node(handle)
@@ -526,10 +534,10 @@ fn registered_native_selectors_are_queryable(harness: AppKitHarness) {
 
     let scene = host.snapshot_scene();
     let exact = scene
-        .find(&NodePredicate::selector_eq("sidebar.row"))
+        .find(&Selector::selector_eq("sidebar.row"))
         .expect("exact selector should match the registered node");
     let fuzzy = scene
-        .find(&NodePredicate::any_selector(
+        .find(&Selector::any_selector(
             glasscheck_core::TextMatch::contains("draft"),
         ))
         .expect("fuzzy selector match should find the registered node");
@@ -537,7 +545,7 @@ fn registered_native_selectors_are_queryable(harness: AppKitHarness) {
     assert_eq!(scene.node(exact).unwrap().id, "native-child");
     assert_eq!(scene.node(fuzzy).unwrap().id, "native-child");
     assert!(scene
-        .find(&NodePredicate::selector_eq("missing.selector"))
+        .find(&Selector::selector_eq("missing.selector"))
         .is_err());
 }
 
@@ -560,7 +568,7 @@ fn native_snapshot_marks_public_properties_with_native_provenance(harness: AppKi
 
     let scene = host.snapshot_scene();
     let node = scene
-        .node(scene.find(&NodePredicate::id_eq("native-child")).unwrap())
+        .node(scene.find(&Selector::id_eq("native-child")).unwrap())
         .unwrap();
 
     assert_eq!(node.provenance, NodeProvenanceKind::Native);
@@ -590,7 +598,7 @@ fn resolve_hit_point_supports_selector_lookup_and_missing_errors(harness: AppKit
 
     let hit_point = host
         .resolve_hit_point(
-            &NodePredicate::selector_eq("sidebar.row"),
+            &Selector::selector_eq("sidebar.row"),
             &HitPointSearch {
                 strategy: HitPointStrategy::VisibleCenterFirst,
                 sample_count: 1,
@@ -601,7 +609,7 @@ fn resolve_hit_point_supports_selector_lookup_and_missing_errors(harness: AppKit
 
     let error = host
         .resolve_hit_point(
-            &NodePredicate::selector_eq("missing.selector"),
+            &Selector::selector_eq("missing.selector"),
             &HitPointSearch {
                 strategy: HitPointStrategy::Grid,
                 sample_count: 9,
@@ -629,7 +637,7 @@ fn registered_views_leave_active_root_subtree_cleanly(harness: AppKitHarness) {
     harness.settle(2);
     assert!(host
         .snapshot_scene()
-        .find(&NodePredicate::id_eq("detached-child"))
+        .find(&Selector::id_eq("detached-child"))
         .is_ok());
 
     child.removeFromSuperview();
@@ -637,9 +645,9 @@ fn registered_views_leave_active_root_subtree_cleanly(harness: AppKitHarness) {
 
     let error = host
         .snapshot_scene()
-        .find(&NodePredicate::id_eq("detached-child"))
+        .find(&Selector::id_eq("detached-child"))
         .unwrap_err();
-    assert!(matches!(error, QueryError::NotFoundPredicate(_)));
+    assert!(matches!(error, QueryError::NotFound(_)));
 }
 
 fn provider_unique_ids_record_source_id_provenance(harness: AppKitHarness) {
@@ -650,7 +658,7 @@ fn provider_unique_ids_record_source_id_provenance(harness: AppKitHarness) {
     harness.settle(2);
 
     let scene = host.snapshot_scene();
-    let handle = scene.find(&NodePredicate::id_eq("provider-node")).unwrap();
+    let handle = scene.find(&Selector::id_eq("provider-node")).unwrap();
     let node = scene.node(handle).unwrap();
 
     assert_eq!(
@@ -683,7 +691,7 @@ fn attached_window_registry_drops_nodes_after_content_swap(harness: AppKitHarnes
     );
     assert!(attached
         .snapshot_scene()
-        .find(&NodePredicate::id_eq("stale-child"))
+        .find(&Selector::id_eq("stale-child"))
         .is_ok());
 
     let replacement_root = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
@@ -692,9 +700,9 @@ fn attached_window_registry_drops_nodes_after_content_swap(harness: AppKitHarnes
 
     let error = attached
         .snapshot_scene()
-        .find(&NodePredicate::id_eq("stale-child"))
+        .find(&Selector::id_eq("stale-child"))
         .unwrap_err();
-    assert!(matches!(error, QueryError::NotFoundPredicate(_)));
+    assert!(matches!(error, QueryError::NotFound(_)));
 }
 
 fn native_snapshot_visibility_tracks_hidden_ancestors_and_clipping(harness: AppKitHarness) {
@@ -739,10 +747,10 @@ fn native_snapshot_visibility_tracks_hidden_ancestors_and_clipping(harness: AppK
 
     let scene = host.snapshot_scene();
     let hidden = scene
-        .node(scene.find(&NodePredicate::id_eq("hidden-child")).unwrap())
+        .node(scene.find(&Selector::id_eq("hidden-child")).unwrap())
         .unwrap();
     let clipped = scene
-        .node(scene.find(&NodePredicate::id_eq("clipped-child")).unwrap())
+        .node(scene.find(&Selector::id_eq("clipped-child")).unwrap())
         .unwrap();
 
     assert!(!hidden.visible);
@@ -782,7 +790,7 @@ fn provider_only_scene_without_content_view_is_usable(harness: AppKitHarness) {
 
     let scene = attached.snapshot_scene();
     let node = scene
-        .find(&NodePredicate::id_eq("provider-node"))
+        .find(&Selector::id_eq("provider-node"))
         .expect("provider node should be queryable without a content view");
 
     assert_eq!(
@@ -798,7 +806,7 @@ fn provider_only_region_capture_fails_cleanly(harness: AppKitHarness) {
     attached.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
 
     let error = attached
-        .capture_region(&glasscheck_core::RegionSpec::node(NodePredicate::id_eq(
+        .capture_region(&glasscheck_core::RegionSpec::node(Selector::id_eq(
             "provider-node",
         )))
         .unwrap_err();
@@ -825,7 +833,7 @@ fn root_view_only_host_without_window_is_safe(harness: AppKitHarness) {
 
     assert!(host.window().contentView().is_some());
     let _ = host.input();
-    let error = host.click_node(&NodePredicate::id_eq("root")).unwrap_err();
+    let error = host.click_node(&Selector::id_eq("root")).unwrap_err();
     assert!(matches!(error, RegionResolveError::DetachedRootView));
     assert_eq!(root.ivars().mouse_downs.get(), 0);
 }
@@ -896,14 +904,14 @@ fn pinned_root_view_semantic_click_uses_window_coordinates(harness: AppKitHarnes
 
     let hit_point = attached
         .resolve_hit_point(
-            &NodePredicate::selector_eq("pinned.click"),
+            &Selector::selector_eq("pinned.click"),
             &HitPointSearch::default(),
         )
         .unwrap();
     assert_eq!(hit_point, Point::new(100.0, 60.0));
 
     attached
-        .click_node(&NodePredicate::id_eq("pinned-click"))
+        .click_node(&Selector::id_eq("pinned-click"))
         .unwrap();
     harness.settle(2);
 
@@ -1144,9 +1152,9 @@ fn registered_native_hierarchy_supports_parent_and_child_indexes(harness: AppKit
     harness.settle(2);
 
     let scene = host.snapshot_scene();
-    let left_handle = scene.find(&NodePredicate::id_eq("left")).unwrap();
-    let right_handle = scene.find(&NodePredicate::id_eq("right")).unwrap();
-    let label_handle = scene.find(&NodePredicate::id_eq("label")).unwrap();
+    let left_handle = scene.find(&Selector::id_eq("left")).unwrap();
+    let right_handle = scene.find(&Selector::id_eq("right")).unwrap();
+    let label_handle = scene.find(&Selector::id_eq("label")).unwrap();
 
     assert_eq!(
         scene.node(left_handle).unwrap().parent_id.as_deref(),
@@ -1167,20 +1175,20 @@ fn registered_native_hierarchy_supports_parent_and_child_indexes(harness: AppKit
     assert_eq!(scene.node(label_handle).unwrap().child_index, 0);
     assert_eq!(scene.node(label_handle).unwrap().z_index, 0);
 
-    let root_children = scene.find_all(&NodePredicate::parent(NodePredicate::id_eq("root")));
+    let root_children = scene.find_all(&Selector::parent(Selector::id_eq("root")));
     assert_eq!(root_children.len(), 2);
     assert_eq!(scene.node(root_children[0]).unwrap().id, "left");
     assert_eq!(scene.node(root_children[1]).unwrap().id, "right");
     assert_eq!(
         scene
-            .find(&NodePredicate::parent(NodePredicate::id_eq("right")))
+            .find(&Selector::parent(Selector::id_eq("right")))
             .unwrap()
             .index(),
         label_handle.index()
     );
     assert_eq!(
         scene
-            .find(&NodePredicate::ancestor(NodePredicate::id_eq("right")))
+            .find(&Selector::ancestor(Selector::id_eq("right")))
             .unwrap()
             .index(),
         label_handle.index()
@@ -1215,9 +1223,9 @@ fn registered_native_hierarchy_reports_missing_ancestor(harness: AppKitHarness) 
 
     let error = host
         .snapshot_scene()
-        .find(&NodePredicate::ancestor(NodePredicate::id_eq("missing")))
+        .find(&Selector::ancestor(Selector::id_eq("missing")))
         .unwrap_err();
-    assert!(matches!(error, QueryError::NotFoundPredicate(_)));
+    assert!(matches!(error, QueryError::NotFound(_)));
 }
 
 fn registered_native_hierarchy_uses_nearest_registered_ancestor(harness: AppKitHarness) {
@@ -1255,12 +1263,12 @@ fn registered_native_hierarchy_uses_nearest_registered_ancestor(harness: AppKitH
     harness.settle(2);
 
     let scene = host.snapshot_scene();
-    let label_handle = scene.find(&NodePredicate::id_eq("label")).unwrap();
+    let label_handle = scene.find(&Selector::id_eq("label")).unwrap();
     assert_eq!(
         scene.node(label_handle).unwrap().parent_id.as_deref(),
         Some("root")
     );
-    let children = scene.find_all(&NodePredicate::parent(NodePredicate::id_eq("root")));
+    let children = scene.find_all(&Selector::parent(Selector::id_eq("root")));
     assert_eq!(children.len(), 1);
     assert_eq!(scene.node(children[0]).unwrap().id, "label");
 }
@@ -1338,20 +1346,20 @@ fn duplicate_native_ids_do_not_drop_ancestor_relationships(harness: AppKitHarnes
     harness.settle(2);
 
     let scene = host.snapshot_scene();
-    let parents = scene.find_all(&NodePredicate::id_eq("duplicate-parent"));
+    let parents = scene.find_all(&Selector::id_eq("duplicate-parent"));
     assert_eq!(parents.len(), 0);
 
-    let disambiguated_parents = scene.find_all(&NodePredicate::id_eq("native::duplicate-parent"));
+    let disambiguated_parents = scene.find_all(&Selector::id_eq("native::duplicate-parent"));
     assert_eq!(disambiguated_parents.len(), 1);
     assert_eq!(
         scene
-            .find_all(&NodePredicate::id_eq("native::duplicate-parent#1"))
+            .find_all(&Selector::id_eq("native::duplicate-parent#1"))
             .len(),
         1
     );
 
-    let left_label = scene.find(&NodePredicate::id_eq("left-label")).unwrap();
-    let right_label = scene.find(&NodePredicate::id_eq("right-label")).unwrap();
+    let left_label = scene.find(&Selector::id_eq("left-label")).unwrap();
+    let right_label = scene.find(&Selector::id_eq("right-label")).unwrap();
     assert_eq!(
         scene.node(left_label).unwrap().parent_id.as_deref(),
         Some("native::duplicate-parent")
@@ -1362,7 +1370,7 @@ fn duplicate_native_ids_do_not_drop_ancestor_relationships(harness: AppKitHarnes
     );
     assert_eq!(
         scene
-            .find(&NodePredicate::ancestor(NodePredicate::id_eq(
+            .find(&Selector::ancestor(Selector::id_eq(
                 "native::duplicate-parent"
             )))
             .unwrap()
@@ -1371,14 +1379,14 @@ fn duplicate_native_ids_do_not_drop_ancestor_relationships(harness: AppKitHarnes
     );
     assert_eq!(
         scene
-            .find(&NodePredicate::ancestor(NodePredicate::id_eq(
+            .find(&Selector::ancestor(Selector::id_eq(
                 "native::duplicate-parent#1"
             )))
             .unwrap()
             .index(),
         right_label.index()
     );
-    let original_id_matches = scene.find_all(&NodePredicate::property_eq(
+    let original_id_matches = scene.find_all(&Selector::property_eq(
         "glasscheck:source_id",
         PropertyValue::string("duplicate-parent"),
     ));
@@ -1445,8 +1453,7 @@ fn stock_button_click_invokes_action_once(harness: AppKitHarness) {
     );
     harness.settle(2);
 
-    host.click_node(&NodePredicate::id_eq("run-button"))
-        .unwrap();
+    host.click_node(&Selector::id_eq("run-button")).unwrap();
     harness.settle(2);
 
     assert_eq!(target.ivars().actions.get(), 1);
@@ -1487,7 +1494,7 @@ fn scene_source_recipes_support_external_offsets(harness: AppKitHarness) {
 
     let scene = host.snapshot_scene();
     let handle = scene
-        .find(&NodePredicate::selector_eq("provider.adjacent"))
+        .find(&Selector::selector_eq("provider.adjacent"))
         .expect("offset recipe node should resolve");
     let node = scene.node(handle).unwrap();
     assert_eq!(
@@ -1516,14 +1523,14 @@ fn scene_source_recipe_hit_target_uses_window_coordinates(harness: AppKitHarness
 
     let hit_point = attached
         .resolve_hit_point(
-            &NodePredicate::selector_eq("provider.hit-target"),
+            &Selector::selector_eq("provider.hit-target"),
             &HitPointSearch::default(),
         )
         .expect("recipe hit target should resolve in window coordinates");
     assert_eq!(hit_point, Point::new(81.0, 33.0));
 
     attached
-        .click_node(&NodePredicate::selector_eq("provider.hit-target"))
+        .click_node(&Selector::selector_eq("provider.hit-target"))
         .expect("recipe hit target should be clickable");
     harness.settle(2);
 
@@ -1555,12 +1562,12 @@ fn scene_source_recipe_hit_target_respects_search_strategy(harness: AppKitHarnes
         sample_count: 5,
     };
     let hit_point = attached
-        .resolve_hit_point(&NodePredicate::selector_eq("provider.hit-target"), &search)
+        .resolve_hit_point(&Selector::selector_eq("provider.hit-target"), &search)
         .expect("recipe hit target should respect the requested search strategy");
     assert_eq!(hit_point, Point::new(80.0, 32.0));
 
     attached
-        .click_node_with_search(&NodePredicate::selector_eq("provider.hit-target"), &search)
+        .click_node_with_search(&Selector::selector_eq("provider.hit-target"), &search)
         .expect("recipe hit target click should use the searched point");
     harness.settle(2);
 
@@ -1585,7 +1592,7 @@ fn scene_source_recipe_clicks_with_explicit_hit_target_even_when_locator_rect_is
     let node = scene
         .node(
             scene
-                .find(&NodePredicate::selector_eq("provider.hit-target-only"))
+                .find(&Selector::selector_eq("provider.hit-target-only"))
                 .unwrap(),
         )
         .unwrap();
@@ -1593,13 +1600,13 @@ fn scene_source_recipe_clicks_with_explicit_hit_target_even_when_locator_rect_is
 
     let hit_point = host
         .resolve_hit_point(
-            &NodePredicate::selector_eq("provider.hit-target-only"),
+            &Selector::selector_eq("provider.hit-target-only"),
             &HitPointSearch::default(),
         )
         .expect("explicit hit target should resolve even when the main rect is empty");
     assert_eq!(hit_point, Point::new(21.0, 13.0));
 
-    host.click_node(&NodePredicate::selector_eq("provider.hit-target-only"))
+    host.click_node(&Selector::selector_eq("provider.hit-target-only"))
         .expect("explicit hit target should drive clicks even when the main rect is empty");
     harness.settle(2);
 
@@ -1623,7 +1630,7 @@ fn scene_source_recipe_is_omitted_when_anchor_is_missing(harness: AppKitHarness)
         RegionResolveError::NotFound(_)
     ));
     assert!(scene
-        .find(&NodePredicate::selector_eq("provider.adjacent"))
+        .find(&Selector::selector_eq("provider.adjacent"))
         .is_err());
 }
 
@@ -1648,7 +1655,7 @@ fn virtual_semantic_provider_supports_stable_card_queries(harness: AppKitHarness
     host.set_semantic_provider(Box::new(CardSceneProvider::default()));
     let scene = host.snapshot_scene();
     let card = scene
-        .find(&NodePredicate::property_eq(
+        .find(&Selector::property_eq(
             "session_id",
             PropertyValue::Integer(3),
         ))
@@ -1663,12 +1670,12 @@ fn virtual_semantic_provider_reports_missing_card(harness: AppKitHarness) {
     host.set_semantic_provider(Box::new(CardSceneProvider::default()));
     let error = host
         .snapshot_scene()
-        .find(&NodePredicate::property_eq(
+        .find(&Selector::property_eq(
             "session_id",
             PropertyValue::Integer(99),
         ))
         .unwrap_err();
-    assert!(matches!(error, QueryError::NotFoundPredicate(_)));
+    assert!(matches!(error, QueryError::NotFound(_)));
 }
 
 fn virtual_semantic_provider_layout_assertions_pass(harness: AppKitHarness) {
@@ -1681,16 +1688,14 @@ fn virtual_semantic_provider_layout_assertions_pass(harness: AppKitHarness) {
     let title = scene
         .node(
             scene
-                .find(&NodePredicate::id_eq("battlefield/card:session-3/title"))
+                .find(&Selector::id_eq("battlefield/card:session-3/title"))
                 .unwrap(),
         )
         .unwrap();
     let chip = scene
         .node(
             scene
-                .find(&NodePredicate::id_eq(
-                    "battlefield/card:session-3/status-chip",
-                ))
+                .find(&Selector::id_eq("battlefield/card:session-3/status-chip"))
                 .unwrap(),
         )
         .unwrap();
@@ -1707,16 +1712,14 @@ fn virtual_semantic_provider_layout_assertions_fail_for_regression(harness: AppK
     let title = scene
         .node(
             scene
-                .find(&NodePredicate::id_eq("battlefield/card:session-3/title"))
+                .find(&Selector::id_eq("battlefield/card:session-3/title"))
                 .unwrap(),
         )
         .unwrap();
     let chip = scene
         .node(
             scene
-                .find(&NodePredicate::id_eq(
-                    "battlefield/card:session-3/status-chip",
-                ))
+                .find(&Selector::id_eq("battlefield/card:session-3/status-chip"))
                 .unwrap(),
         )
         .unwrap();
@@ -1743,13 +1746,13 @@ fn provider_ids_are_namespaced_when_they_collide_with_native_ids(harness: AppKit
 
     let scene = host.snapshot_scene();
     let provider_root = scene
-        .find(&NodePredicate::property_eq(
+        .find(&Selector::property_eq(
             "glasscheck:source_id",
             PropertyValue::string("battlefield"),
         ))
         .unwrap();
     let provider_child = scene
-        .find(&NodePredicate::property_eq(
+        .find(&Selector::property_eq(
             "glasscheck:source_id",
             PropertyValue::string("battlefield/card:session-3"),
         ))
@@ -1765,7 +1768,7 @@ fn provider_ids_are_namespaced_when_they_collide_with_native_ids(harness: AppKit
     );
     assert_eq!(
         scene
-            .find_all(&NodePredicate::property_eq(
+            .find_all(&Selector::property_eq(
                 "glasscheck:source_id",
                 PropertyValue::string("battlefield"),
             ))
@@ -1793,16 +1796,14 @@ fn colliding_provider_id_is_not_left_ambiguous(harness: AppKitHarness) {
     harness.settle(2);
 
     let scene = host.snapshot_scene();
-    let native_handle = scene.find(&NodePredicate::id_eq("battlefield")).unwrap();
+    let native_handle = scene.find(&Selector::id_eq("battlefield")).unwrap();
 
     assert_eq!(
         scene.node(native_handle).unwrap().label.as_deref(),
         Some("Native Battlefield")
     );
     assert!(scene
-        .find(&NodePredicate::id_eq(
-            "provider::battlefield/card:session-3",
-        ))
+        .find(&Selector::id_eq("provider::battlefield/card:session-3",))
         .is_ok());
 }
 
@@ -1824,7 +1825,7 @@ fn unique_native_ids_do_not_expose_source_id_aliases(harness: AppKitHarness) {
     harness.settle(2);
 
     let scene = host.snapshot_scene();
-    let native = scene.find(&NodePredicate::id_eq("battlefield")).unwrap();
+    let native = scene.find(&Selector::id_eq("battlefield")).unwrap();
 
     assert_eq!(
         scene
@@ -1856,7 +1857,7 @@ fn provider_namespacing_preserves_existing_source_id_property(harness: AppKitHar
 
     let scene = host.snapshot_scene();
     let provider = scene
-        .find(&NodePredicate::property_eq(
+        .find(&Selector::property_eq(
             "source_id",
             PropertyValue::string("provider-owned"),
         ))
@@ -1894,9 +1895,9 @@ fn capture_region_uses_same_provider_snapshot_as_pixels(harness: AppKitHarness) 
     harness.settle(2);
 
     let image = host
-        .capture_region(&glasscheck_core::RegionSpec::node(
-            NodePredicate::selector_eq("provider.target"),
-        ))
+        .capture_region(&glasscheck_core::RegionSpec::node(Selector::selector_eq(
+            "provider.target",
+        )))
         .expect("capture should resolve the provider recipe");
 
     assert_eq!(image.width, 120);
@@ -1929,7 +1930,7 @@ fn provider_namespacing_marks_unresolved_native_parent_reference_as_ambiguous(
 
     let scene = host.snapshot_scene();
     let provider_child = scene
-        .find(&NodePredicate::property_eq(
+        .find(&Selector::property_eq(
             "glasscheck:source_id",
             PropertyValue::string("battlefield/native-child"),
         ))
@@ -1970,7 +1971,7 @@ fn provider_namespacing_marks_ambiguous_native_parents(harness: AppKitHarness) {
 
     let scene = host.snapshot_scene();
     let provider_child = scene
-        .find(&NodePredicate::property_eq(
+        .find(&Selector::property_eq(
             "glasscheck:source_id",
             PropertyValue::string("battlefield/native-child"),
         ))
@@ -1996,7 +1997,7 @@ fn duplicate_provider_ids_do_not_invent_parent_relationships(harness: AppKitHarn
 
     let scene = host.snapshot_scene();
     let child = scene
-        .find(&NodePredicate::id_eq("provider::parent/child"))
+        .find(&Selector::id_eq("provider::parent/child"))
         .unwrap();
 
     assert_eq!(scene.node(child).unwrap().parent_id, None);
@@ -2009,10 +2010,8 @@ fn duplicate_provider_ids_do_not_invent_parent_relationships(harness: AppKitHarn
         Some(&PropertyValue::string("parent"))
     );
     assert!(matches!(
-        scene.find(&NodePredicate::ancestor(NodePredicate::id_eq(
-            "provider::parent"
-        ))),
-        Err(QueryError::NotFoundPredicate(_))
+        scene.find(&Selector::ancestor(Selector::id_eq("provider::parent"))),
+        Err(QueryError::NotFound(_))
     ));
 }
 
@@ -2041,9 +2040,7 @@ fn provider_parent_repair_marks_ambiguous_native_parents_without_namespacing(
     harness.settle(2);
 
     let scene = host.snapshot_scene();
-    let provider_child = scene
-        .find(&NodePredicate::id_eq("provider-card/label"))
-        .unwrap();
+    let provider_child = scene.find(&Selector::id_eq("provider-card/label")).unwrap();
 
     assert_eq!(scene.node(provider_child).unwrap().parent_id, None);
     assert_eq!(
@@ -2108,7 +2105,7 @@ fn semantic_click_uses_matched_handle_when_native_ids_duplicate(harness: AppKitH
     );
     harness.settle(2);
 
-    host.click_node(&NodePredicate::label(glasscheck_core::TextMatch::exact(
+    host.click_node(&Selector::label(glasscheck_core::TextMatch::exact(
         "Second",
     )))
     .unwrap();
@@ -2136,8 +2133,7 @@ fn semantic_click_targets_registered_node(harness: AppKitHarness) {
     );
     harness.settle(2);
 
-    host.click_node(&NodePredicate::id_eq("click-target"))
-        .unwrap();
+    host.click_node(&Selector::id_eq("click-target")).unwrap();
     harness.settle(2);
 
     assert_eq!(view.ivars().mouse_downs.get(), 1);
@@ -2178,7 +2174,7 @@ fn provider_click_after_content_swap_does_not_dispatch_to_stale_registered_view(
     attached.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
     assert!(attached
         .snapshot_scene()
-        .find(&NodePredicate::id_eq("stale-button"))
+        .find(&Selector::id_eq("stale-button"))
         .is_ok());
 
     let replacement_root = make_view(harness.main_thread_marker(), NSSize::new(220.0, 140.0));
@@ -2186,7 +2182,7 @@ fn provider_click_after_content_swap_does_not_dispatch_to_stale_registered_view(
     harness.settle(2);
 
     attached
-        .click_node(&NodePredicate::id_eq("provider-node"))
+        .click_node(&Selector::id_eq("provider-node"))
         .unwrap();
     harness.settle(2);
 
@@ -2216,7 +2212,7 @@ fn semantic_click_on_registered_ancestor_routes_to_descendant_hit_view(harness: 
     );
     harness.settle(2);
 
-    host.click_node(&NodePredicate::id_eq("container")).unwrap();
+    host.click_node(&Selector::id_eq("container")).unwrap();
     harness.settle(2);
 
     assert_eq!(child.ivars().mouse_downs.get(), 1);
@@ -2227,9 +2223,7 @@ fn semantic_click_reports_missing_node(harness: AppKitHarness) {
     let host = harness.create_window(180.0, 120.0);
     let view = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
     host.set_content_view(&view);
-    let error = host
-        .click_node(&NodePredicate::id_eq("missing"))
-        .unwrap_err();
+    let error = host.click_node(&Selector::id_eq("missing")).unwrap_err();
     assert!(matches!(error, RegionResolveError::NotFound(_)));
 }
 
@@ -2258,7 +2252,7 @@ fn semantic_click_uses_visible_hit_testable_point(harness: AppKitHarness) {
 
     let scene = host.snapshot_scene();
     let node = scene
-        .node(scene.find(&NodePredicate::id_eq("clipped-target")).unwrap())
+        .node(scene.find(&Selector::id_eq("clipped-target")).unwrap())
         .unwrap();
     assert_eq!(
         node.visible_rect,
@@ -2266,8 +2260,7 @@ fn semantic_click_uses_visible_hit_testable_point(harness: AppKitHarness) {
     );
     assert!(node.hit_testable);
 
-    host.click_node(&NodePredicate::id_eq("clipped-target"))
-        .unwrap();
+    host.click_node(&Selector::id_eq("clipped-target")).unwrap();
     harness.settle(2);
 
     assert_eq!(target.ivars().mouse_downs.get(), 1);
@@ -2302,13 +2295,13 @@ fn semantic_click_falls_back_when_center_is_occluded(harness: AppKitHarness) {
     let node = scene
         .node(
             scene
-                .find(&NodePredicate::id_eq("partially-covered-target"))
+                .find(&Selector::id_eq("partially-covered-target"))
                 .unwrap(),
         )
         .unwrap();
     assert!(node.hit_testable);
 
-    host.click_node(&NodePredicate::id_eq("partially-covered-target"))
+    host.click_node(&Selector::id_eq("partially-covered-target"))
         .unwrap();
     harness.settle(2);
 
@@ -2341,12 +2334,12 @@ fn semantic_click_reports_unhittable_registered_node(harness: AppKitHarness) {
 
     let scene = host.snapshot_scene();
     let node = scene
-        .node(scene.find(&NodePredicate::id_eq("covered-target")).unwrap())
+        .node(scene.find(&Selector::id_eq("covered-target")).unwrap())
         .unwrap();
     assert!(!node.hit_testable);
 
     let error = host
-        .click_node(&NodePredicate::id_eq("covered-target"))
+        .click_node(&Selector::id_eq("covered-target"))
         .unwrap_err();
 
     assert!(matches!(error, RegionResolveError::InputUnavailable));
@@ -2373,16 +2366,12 @@ fn semantic_click_reports_unhittable_registered_root_node(harness: AppKitHarness
 
     let scene = host.snapshot_scene();
     let node = scene
-        .node(
-            scene
-                .find(&NodePredicate::id_eq("unhittable-root"))
-                .unwrap(),
-        )
+        .node(scene.find(&Selector::id_eq("unhittable-root")).unwrap())
         .unwrap();
     assert!(!node.hit_testable);
 
     let error = host
-        .click_node(&NodePredicate::id_eq("unhittable-root"))
+        .click_node(&Selector::id_eq("unhittable-root"))
         .unwrap_err();
 
     assert!(matches!(error, RegionResolveError::InputUnavailable));
@@ -2413,7 +2402,7 @@ fn semantic_click_rejects_registered_node_when_hit_test_returns_ancestor(harness
     harness.settle(2);
 
     let error = host
-        .click_node(&NodePredicate::id_eq("ancestor-hit-target"))
+        .click_node(&Selector::id_eq("ancestor-hit-target"))
         .unwrap_err();
 
     assert!(matches!(error, RegionResolveError::InputUnavailable));
@@ -2445,7 +2434,7 @@ fn semantic_click_rejects_registered_node_when_hit_test_is_unknown(harness: AppK
     harness.settle(2);
 
     let error = host
-        .click_node(&NodePredicate::id_eq("unknown-hit-target"))
+        .click_node(&Selector::id_eq("unknown-hit-target"))
         .unwrap_err();
 
     assert!(matches!(error, RegionResolveError::InputUnavailable));
@@ -2478,7 +2467,7 @@ fn attached_window_prunes_stale_registered_views_after_content_swap(harness: App
     );
     assert!(attached
         .snapshot_scene()
-        .find(&NodePredicate::id_eq("stale-dealloc-child"))
+        .find(&Selector::id_eq("stale-dealloc-child"))
         .is_ok());
 
     let replacement_root = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
@@ -2491,9 +2480,9 @@ fn attached_window_prunes_stale_registered_views_after_content_swap(harness: App
 
     let error = attached
         .snapshot_scene()
-        .find(&NodePredicate::id_eq("stale-dealloc-child"))
+        .find(&Selector::id_eq("stale-dealloc-child"))
         .unwrap_err();
-    assert!(matches!(error, QueryError::NotFoundPredicate(_)));
+    assert!(matches!(error, QueryError::NotFound(_)));
     assert!(
         releases.get() > releases_before_prune,
         "releases_before_prune={} releases_after_prune={}",
@@ -2509,7 +2498,7 @@ fn provider_only_semantic_click_reports_unavailable_input(harness: AppKitHarness
     attached.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
 
     let error = attached
-        .click_node(&NodePredicate::id_eq("provider-node"))
+        .click_node(&Selector::id_eq("provider-node"))
         .unwrap_err();
 
     assert!(matches!(error, RegionResolveError::InputUnavailable));
@@ -2545,8 +2534,7 @@ fn semantic_click_stress_does_not_duplicate_mouse_downs(harness: AppKitHarness) 
     harness.settle(2);
 
     for _ in 0..25 {
-        host.click_node(&NodePredicate::id_eq("click-target"))
-            .unwrap();
+        host.click_node(&Selector::id_eq("click-target")).unwrap();
         harness.settle(1);
     }
 
@@ -2975,7 +2963,7 @@ impl SemanticProvider for OffsetRecipeProvider {
         vec![NodeRecipe::new(
             "adjacent",
             Role::Button,
-            glasscheck_core::RegionSpec::node(NodePredicate::selector_eq("provider.anchor"))
+            glasscheck_core::RegionSpec::node(Selector::selector_eq("provider.anchor"))
                 .right_of(50.0, 40.0),
         )
         .with_selector("provider.adjacent")]
@@ -3004,7 +2992,7 @@ impl SemanticProvider for MovingRecipeProvider {
         vec![NodeRecipe::new(
             "captured-button",
             Role::Button,
-            glasscheck_core::RegionSpec::node(NodePredicate::selector_eq("provider.anchor")),
+            glasscheck_core::RegionSpec::node(Selector::selector_eq("provider.anchor")),
         )
         .with_selector("provider.target")]
     }
@@ -3032,7 +3020,7 @@ impl SemanticProvider for ResizeAwareVisualRecipeProvider {
         vec![NodeRecipe::new(
             "visual-anchor",
             Role::Image,
-            glasscheck_core::RegionSpec::node(NodePredicate::selector_eq("provider.anchor")),
+            glasscheck_core::RegionSpec::node(Selector::selector_eq("provider.anchor")),
         )
         .with_hit_target(
             glasscheck_core::RegionSpec::rect(Rect::new(
@@ -3056,7 +3044,7 @@ impl SemanticProvider for MissingAnchorRecipeProvider {
         vec![NodeRecipe::new(
             "adjacent",
             Role::Button,
-            glasscheck_core::RegionSpec::node(NodePredicate::selector_eq("provider.anchor"))
+            glasscheck_core::RegionSpec::node(Selector::selector_eq("provider.anchor"))
                 .right_of(50.0, 40.0),
         )
         .with_selector("provider.adjacent")]

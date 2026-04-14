@@ -42,12 +42,10 @@ pub use layout::{
     assert_non_overlapping, assert_same_height, assert_same_width, assert_vertical_alignment,
     LayoutError, LayoutTolerance,
 };
-pub use query::{
-    NodeMetadata, NodePredicate, PropertyValue, QueryError, QueryRoot, Selector, TextMatch,
-};
+pub use query::{PropertyValue, QueryError, Selector, TextMatch};
 pub use scene::{
     resolve_node_recipes, NodeHandle, NodeProvenanceKind, NodeRecipe, NodeRecipeResolutionError,
-    ResolvedNodeRecipes, Role, SceneSnapshot, SemanticNode, SemanticProvider,
+    ResolvedNodeRecipes, Role, Scene, SemanticNode, SemanticProvider,
 };
 pub use scene::{SemanticNode as Node, SemanticProvider as SceneSource};
 pub use semantic::SemanticAssertionError as NodeAssertionError;

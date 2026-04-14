@@ -1,9 +1,9 @@
 #[cfg(target_os = "macos")]
 mod imp {
     use glasscheck_core::{
-        resolve_node_recipes, Image, NodePredicate, NodeProvenanceKind, NodeRecipe, Point,
-        PropertyValue, QueryRoot, Rect, RegionResolveError, RegionSpec, Role, SceneSnapshot,
-        SemanticNode, SemanticProvider, Size, TextRange,
+        resolve_node_recipes, Image, NodeProvenanceKind, NodeRecipe, Point, PropertyValue, Rect,
+        RegionResolveError, RegionSpec, Role, Scene, Selector, SemanticNode, SemanticProvider,
+        Size, TextRange,
     };
     use objc2::runtime::AnyObject;
     use objc2::{msg_send, rc::Retained, ClassType, MainThreadOnly};
@@ -291,14 +291,14 @@ mod imp {
         ///
         /// Prefer this over raw coordinate clicks when the test is about user
         /// intent rather than a specific pixel location.
-        pub fn click_node(&self, predicate: &NodePredicate) -> Result<(), RegionResolveError> {
+        pub fn click_node(&self, predicate: &Selector) -> Result<(), RegionResolveError> {
             self.click_node_with_search(predicate, &HitPointSearch::default())
         }
 
         /// Resolves a semantic hit point for the unique node matching `predicate`.
         pub fn resolve_hit_point(
             &self,
-            predicate: &NodePredicate,
+            predicate: &Selector,
             search: &HitPointSearch,
         ) -> Result<Point, RegionResolveError> {
             if self.detached_root_view {
@@ -326,7 +326,7 @@ mod imp {
         /// Clicks the unique node matching `predicate` using semantic hit-point search.
         pub fn click_node_with_search(
             &self,
-            predicate: &NodePredicate,
+            predicate: &Selector,
             search: &HitPointSearch,
         ) -> Result<(), RegionResolveError> {
             if self.detached_root_view {
@@ -436,9 +436,9 @@ mod imp {
             self.register_node(view, descriptor);
         }
 
-        /// Builds a merged scene snapshot from registered native views and virtual nodes.
+        /// Builds the current merged scene from registered native views and virtual nodes.
         #[must_use]
-        pub fn snapshot_scene(&self) -> SceneSnapshot {
+        pub fn snapshot_scene(&self) -> Scene {
             let (provider_snapshot, image) = self.provider_snapshot_with_optional_capture(false);
             self.snapshot_scene_with_provider_snapshot(image.as_ref(), provider_snapshot)
         }
@@ -447,7 +447,7 @@ mod imp {
             &self,
             image: Option<&Image>,
             provider_snapshot: Option<ProviderSnapshot>,
-        ) -> SceneSnapshot {
+        ) -> Scene {
             let root_view = self.root_view();
             let registry = self.active_registered_views(root_view.as_deref());
             let registered_ids = registered_node_ids(&registry);
@@ -540,24 +540,18 @@ mod imp {
                     &unique_native_parent_ids,
                 ));
                 if recipes.is_empty() {
-                    return SceneSnapshot::new(nodes);
+                    return Scene::new(nodes);
                 }
                 let resolved_recipes =
                     resolve_node_recipes(nodes, self.root_bounds(), image, &recipes);
                 let recipe_errors = resolved_recipes.errors;
-                return SceneSnapshot::with_recipe_errors(resolved_recipes.nodes, recipe_errors);
+                return Scene::with_recipe_errors(resolved_recipes.nodes, recipe_errors);
             }
 
-            SceneSnapshot::new(nodes)
+            Scene::new(nodes)
         }
 
-        /// Builds a scene-backed compatibility `QueryRoot` from the current snapshot.
-        #[must_use]
-        pub fn query_root(&self) -> QueryRoot {
-            QueryRoot::from_scene(self.snapshot_scene())
-        }
-
-        /// Resolves a semantic region against the current scene snapshot.
+        /// Resolves a semantic region against the current scene.
         pub fn resolve_region(&self, region: &RegionSpec) -> Result<Rect, RegionResolveError> {
             let (provider_snapshot, image) =
                 self.provider_snapshot_with_optional_capture(region.requires_image());
@@ -1197,18 +1191,12 @@ mod imp {
 
     fn map_query_error(error: glasscheck_core::QueryError) -> RegionResolveError {
         match error {
-            glasscheck_core::QueryError::NotFoundPredicate(predicate) => {
+            glasscheck_core::QueryError::NotFound(predicate) => {
                 RegionResolveError::NotFound(predicate)
-            }
-            glasscheck_core::QueryError::MultiplePredicateMatches { predicate, count } => {
-                RegionResolveError::MultipleMatches { predicate, count }
-            }
-            glasscheck_core::QueryError::NotFound(selector) => {
-                RegionResolveError::NotFound(NodePredicate::id_eq(selector.id.unwrap_or_default()))
             }
             glasscheck_core::QueryError::MultipleMatches { selector, count } => {
                 RegionResolveError::MultipleMatches {
-                    predicate: NodePredicate::id_eq(selector.id.unwrap_or_default()),
+                    predicate: selector,
                     count,
                 }
             }

@@ -6,8 +6,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use glasscheck_core::{
-    compare_images, AnchoredTextExpectation, CompareConfig, NodePredicate, Point, PollOptions,
-    Rect, RegionSpec, RelativeBounds, RgbaColor, Role, Selector, Size, TextAssertionConfig,
+    compare_images, AnchoredTextExpectation, CompareConfig, Point, PollOptions, Rect, RegionSpec,
+    RelativeBounds, RgbaColor, Role, Selector, Size, TextAssertionConfig,
 };
 use glasscheck_gtk::{GtkHarness, InstrumentedWidget};
 use gtk4::gdk;
@@ -133,10 +133,14 @@ fn query_reports_registered_widget_geometry(harness: GtkHarness) {
     );
     harness.settle(4);
 
-    let query_root = host.query_root();
-    let node = query_root
-        .find(&Selector::by_id("run"))
-        .expect("registered widget should exist");
+    let scene = host.snapshot_scene();
+    let node = scene
+        .node(
+            scene
+                .find(&Selector::id_eq("run"))
+                .expect("registered widget should exist"),
+        )
+        .unwrap();
     let allocated_width = button.allocated_width() as f64;
     let allocated_height = button.allocated_height() as f64;
     let root_height = root.allocated_height() as f64;
@@ -213,7 +217,7 @@ fn capture_region_matches_registered_widget_bounds(harness: GtkHarness) {
     wait_for_window_capture(harness, &host, &root);
 
     let region = host
-        .capture_region(&RegionSpec::node(NodePredicate::id_eq("run")))
+        .capture_region(&RegionSpec::node(Selector::id_eq("run")))
         .expect("button region should capture");
     let expected = host
         .capture_subtree(&button)
@@ -279,7 +283,7 @@ fn anchored_text_assertion_matches_semantic_region(harness: GtkHarness) {
 
     let expectation = AnchoredTextExpectation::new(
         "Connected",
-        RegionSpec::node(NodePredicate::id_eq("status")).subregion(RelativeBounds::full()),
+        RegionSpec::node(Selector::id_eq("status")).subregion(RelativeBounds::full()),
     )
     .with_font_family("Sans")
     .with_point_size(14.0)
@@ -315,7 +319,7 @@ fn click_button_activates_once(harness: GtkHarness) {
     );
     harness.settle(4);
 
-    host.click_node(&NodePredicate::id_eq("run"))
+    host.click_node(&Selector::id_eq("run"))
         .expect("semantic click should succeed");
     harness.settle(2);
 
