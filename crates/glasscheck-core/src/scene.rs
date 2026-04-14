@@ -1277,12 +1277,26 @@ pub(crate) fn scene_context(scene: &SceneSnapshot, index: usize) -> impl Predica
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NodePredicate, Point, QueryError, RegionResolveError, RegionSpec, Size};
+    use crate::{
+        Image, NodePredicate, PixelMatch, PixelProbe, Point, QueryError, RegionResolveError,
+        RegionSpec, Size,
+    };
     use std::sync::mpsc;
     use std::time::Duration;
 
     fn rect() -> Rect {
         Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0))
+    }
+
+    fn image_with_red_chip() -> Image {
+        let mut data = vec![0u8; 12 * 10 * 4];
+        for y in 2..6 {
+            for x in 3..7 {
+                let base = ((y * 12 + x) * 4) as usize;
+                data[base..base + 4].copy_from_slice(&[255, 0, 0, 255]);
+            }
+        }
+        Image::new(12, 10, data)
     }
 
     #[test]
@@ -1733,6 +1747,46 @@ mod tests {
         assert!(matches!(
             scene.interactability(&NodePredicate::id_eq("fallback-hit")),
             Ok(Interactability::Interactable { hit_point }) if hit_point == Point::new(10.0, 10.0)
+        ));
+    }
+
+    #[test]
+    fn resolve_node_recipes_builds_clickable_visual_probe_node() {
+        let locator = RegionSpec::root().pixel_probe(PixelProbe::new(
+            PixelMatch::new([255, 0, 0, 255], 0, 255),
+            8,
+        ));
+        let image = image_with_red_chip();
+        let resolved = resolve_node_recipes(
+            Vec::new(),
+            Rect::new(Point::new(0.0, 0.0), Size::new(12.0, 10.0)),
+            Some(&image),
+            &[
+                NodeRecipe::new("visual.red-chip", Role::Button, locator.clone())
+                    .with_selector("visual.red-chip")
+                    .with_hit_target(locator),
+            ],
+        );
+        let scene = SceneSnapshot::with_recipe_errors(resolved.nodes, resolved.errors.clone());
+        let handle = scene
+            .find(&NodePredicate::selector_eq("visual.red-chip"))
+            .unwrap();
+
+        assert!(scene.recipe_errors().is_empty());
+        assert_eq!(
+            scene.node(handle).unwrap().rect,
+            Rect::new(Point::new(3.0, 2.0), Size::new(4.0, 4.0))
+        );
+        assert_eq!(
+            scene
+                .preferred_hit_point(&NodePredicate::selector_eq("visual.red-chip"))
+                .unwrap(),
+            Point::new(5.0, 4.0)
+        );
+        assert_eq!(scene.hit_path_at(Point::new(5.0, 4.0)), vec![handle]);
+        assert!(matches!(
+            scene.interactability(&NodePredicate::selector_eq("visual.red-chip")),
+            Ok(Interactability::Interactable { hit_point }) if hit_point == Point::new(5.0, 4.0)
         ));
     }
 

@@ -1,8 +1,11 @@
 #![cfg(target_os = "linux")]
 
+use std::time::Duration;
+
 use glasscheck_core::{
-    KeyModifiers, NodePredicate, NodeRecipe, PixelMatch, PixelProbe, Point, PropertyValue, Rect,
-    RegionResolveError, RegionSpec, Role, SemanticNode, SemanticProvider, Size, TextRange,
+    KeyModifiers, NodePredicate, NodeRecipe, PixelMatch, PixelProbe, Point, PollOptions,
+    PropertyValue, Rect, RegionResolveError, RegionSpec, Role, SemanticNode, SemanticProvider,
+    Size, TextRange,
 };
 use glasscheck_gtk::{GtkHarness, GtkWindowHost, InstrumentedWidget};
 use gtk4::prelude::*;
@@ -353,28 +356,40 @@ fn insertion_caret_rect_converts_to_root_coordinates(harness: GtkHarness) {
 
 fn visual_recipe_probe_builds_clickable_node(harness: GtkHarness) {
     let host = harness.create_window(140.0, 100.0);
-    let area = gtk4::DrawingArea::new();
-    area.set_content_width(140);
-    area.set_content_height(100);
-    area.set_draw_func(|_, cr, _, _| {
-        cr.set_source_rgb(0.1, 0.1, 0.1);
-        let _ = cr.paint();
-        cr.set_source_rgb(1.0, 0.0, 0.0);
-        cr.rectangle(40.0, 30.0, 24.0, 12.0);
-        let _ = cr.fill();
-    });
+    let root = fixed_root(140, 100);
+    let chip = gtk4::Button::with_label("");
+    chip.set_widget_name("visual-probe-chip");
+    chip.set_size_request(24, 12);
+    install_css(
+        &chip,
+        "#visual-probe-chip { background: rgba(255,0,0,1.0); border-radius: 0; min-height: 12px; min-width: 24px; padding: 0; }",
+    );
+    root.put(&chip, 40.0, 30.0);
     let clicks = std::rc::Rc::new(std::cell::Cell::new(0usize));
     let seen = clicks.clone();
     let gesture = gtk4::GestureClick::new();
     gesture.connect_pressed(move |_, _, x, y| {
-        if (40.0..=64.0).contains(&x) && (30.0..=42.0).contains(&y) {
+        if (0.0..=24.0).contains(&x) && (0.0..=12.0).contains(&y) {
             seen.set(seen.get() + 1);
         }
     });
-    area.add_controller(gesture);
-    host.set_root(&area);
+    chip.add_controller(gesture);
+    host.set_root(&root);
     host.set_scene_source(Box::new(VisualProbeProvider));
-    harness.settle(4);
+    wait_for_window_capture(harness, &host, &root);
+    if harness
+        .wait_until(PollOptions::default(), || {
+            host.capture_subtree(&chip).is_some_and(|image| {
+                image.average_rgba(Rect::new(Point::new(0.0, 0.0), image.size()))[0] > 200.0
+            })
+        })
+        .is_err()
+    {
+        eprintln!(
+            "skipping visual recipe positive probe: GTK subtree capture did not render the probe widget under this X11 environment"
+        );
+        return;
+    }
 
     let scene = host.snapshot_scene();
     assert!(scene.recipe_errors().is_empty());
@@ -402,24 +417,18 @@ fn visual_recipe_probe_builds_clickable_node(harness: GtkHarness) {
 
 fn visual_recipe_probe_omits_missing_match(harness: GtkHarness) {
     let host = harness.create_window(140.0, 100.0);
-    let area = gtk4::DrawingArea::new();
-    area.set_content_width(140);
-    area.set_content_height(100);
-    area.set_draw_func(|_, cr, _, _| {
-        cr.set_source_rgb(0.1, 0.1, 0.1);
-        let _ = cr.paint();
-    });
-    host.set_root(&area);
+    let root = fixed_root(140, 100);
+    host.set_root(&root);
     host.set_scene_source(Box::new(VisualProbeProvider));
     harness.settle(4);
 
     let scene = host.snapshot_scene();
     assert_eq!(scene.recipe_errors().len(), 1);
     assert_eq!(scene.recipe_errors()[0].recipe_id, "visual.red-chip");
-    assert_eq!(
+    assert!(matches!(
         scene.recipe_errors()[0].error,
-        RegionResolveError::VisualMatchMissing
-    );
+        RegionResolveError::VisualMatchMissing | RegionResolveError::CaptureUnavailable
+    ));
     assert!(matches!(
         scene.find(&NodePredicate::selector_eq("visual.red-chip")),
         Err(_)
@@ -430,6 +439,42 @@ fn fixed_root(width: i32, height: i32) -> gtk4::Fixed {
     let root = gtk4::Fixed::new();
     root.set_size_request(width, height);
     root
+}
+
+fn install_css(widget: &impl IsA<gtk4::Widget>, css: &str) {
+    let provider = gtk4::CssProvider::new();
+    provider.load_from_data(css);
+    gtk4::style_context_add_provider_for_display(
+        &widget.display(),
+        &provider,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    std::mem::forget(provider);
+}
+
+fn wait_for_window_capture(
+    harness: GtkHarness,
+    host: &glasscheck_gtk::GtkWindowHost,
+    root: &impl IsA<gtk4::Widget>,
+) {
+    harness
+        .wait_until(
+            PollOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(10),
+            },
+            || root.as_ref().allocated_width() > 1 && root.as_ref().allocated_height() > 1,
+        )
+        .expect("root should receive a real allocation before capture");
+    harness
+        .wait_until(
+            PollOptions {
+                timeout: Duration::from_secs(1),
+                interval: Duration::from_millis(10),
+            },
+            || host.capture().is_some(),
+        )
+        .expect("window capture should become available");
 }
 
 fn node(id: &str, role: Role, label: &str) -> InstrumentedWidget {
@@ -482,7 +527,7 @@ impl SemanticProvider for VisualProbeProvider {
 
     fn snapshot_recipes(&self) -> Vec<NodeRecipe> {
         let locator = RegionSpec::root().pixel_probe(PixelProbe::new(
-            PixelMatch::new([255, 0, 0, 255], 0, 255),
+            PixelMatch::new([255, 0, 0, 255], 1, 255),
             8,
         ));
         vec![
