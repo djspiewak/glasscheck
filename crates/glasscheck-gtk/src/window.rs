@@ -30,7 +30,7 @@ mod imp {
     /// pixels, and query the current widget tree through a backend-neutral
     /// scene model.
     pub struct GtkWindowHost {
-        window: Option<Window>,
+        window: Window,
         root_widget: RefCell<Option<Widget>>,
         registry: RefCell<Vec<RegisteredWidget>>,
         provider: RefCell<Option<Box<dyn SemanticProvider>>>,
@@ -48,7 +48,7 @@ mod imp {
                 .default_height(height.round() as i32)
                 .build();
             Self {
-                window: Some(window),
+                window,
                 root_widget: RefCell::new(None),
                 registry: RefCell::new(Vec::new()),
                 provider: RefCell::new(None),
@@ -62,7 +62,7 @@ mod imp {
         #[must_use]
         pub fn from_window(window: &Window) -> Self {
             Self {
-                window: Some(window.clone()),
+                window: window.clone(),
                 root_widget: RefCell::new(window.child()),
                 registry: RefCell::new(Vec::new()),
                 provider: RefCell::new(None),
@@ -79,7 +79,7 @@ mod imp {
             let owns_window = window.is_none();
             let attached_window = window
                 .cloned()
-                .or_else(|| Some(managed_window_for_root(widget)));
+                .unwrap_or_else(|| managed_window_for_root(widget));
             Self {
                 window: attached_window,
                 root_widget: RefCell::new(Some(root)),
@@ -100,17 +100,13 @@ mod imp {
         /// Returns the underlying `Window`.
         #[must_use]
         pub fn window(&self) -> &Window {
-            self.window
-                .as_ref()
-                .expect("window access requires an attached GTK window")
+            &self.window
         }
 
         /// Sets the window child/root widget.
         pub fn set_root(&self, widget: &impl IsA<Widget>) {
-            if let Some(window) = self.window.as_ref() {
-                window.set_child(Some(widget));
-                present_window_offscreen(window);
-            }
+            self.window.set_child(Some(widget));
+            present_window_offscreen(&self.window);
             *self.root_widget.borrow_mut() = Some(widget.as_ref().clone());
         }
 
@@ -180,11 +176,7 @@ mod imp {
         /// Returns an input driver scoped to this window.
         #[must_use]
         pub fn input(&self) -> GtkInputDriver<'_> {
-            let window = self
-                .window
-                .as_ref()
-                .expect("input requires an attached GTK window");
-            GtkInputDriver::new(window)
+            GtkInputDriver::new(&self.window)
         }
 
         /// Clicks the visual center of the unique node matching `predicate`.
@@ -412,18 +404,14 @@ mod imp {
             .resolve_region_with_image(self.root_bounds(), image.as_ref(), region)
         }
 
-        /// Sets the window title when a window is attached.
+        /// Sets the host window title.
         pub fn set_title(&self, title: &str) {
-            if let Some(window) = self.window.as_ref() {
-                window.set_title(Some(title));
-            }
+            self.window.set_title(Some(title));
         }
 
         pub(crate) fn root_widget(&self) -> Option<Widget> {
             if self.tracks_window_child {
-                if let Some(window) = self.window.as_ref() {
-                    *self.root_widget.borrow_mut() = window.child();
-                }
+                *self.root_widget.borrow_mut() = self.window.child();
             }
             self.root_widget.borrow().clone()
         }
@@ -434,15 +422,11 @@ mod imp {
                 let height = root.allocated_height().max(1) as f64;
                 return Rect::new(Point::new(0.0, 0.0), Size::new(width, height));
             }
-            let window = self
-                .window
-                .as_ref()
-                .expect("host should have either a root widget or a window");
             Rect::new(
                 Point::new(0.0, 0.0),
                 Size::new(
-                    window.default_width().max(1) as f64,
-                    window.default_height().max(1) as f64,
+                    self.window.default_width().max(1) as f64,
+                    self.window.default_height().max(1) as f64,
                 ),
             )
         }
@@ -470,9 +454,7 @@ mod imp {
     impl Drop for GtkWindowHost {
         fn drop(&mut self) {
             if self.owns_window {
-                if let Some(window) = self.window.take() {
-                    window.close();
-                }
+                self.window.close();
             }
         }
     }

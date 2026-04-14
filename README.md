@@ -57,6 +57,8 @@ glasscheck-core = { path = "crates/glasscheck-core" }
 
 For AppKit-specific setup, prefer `AppKitHarness::create_window`, `attach_window`, and `attach_root_view` over calling `AppKitWindowHost::from_*` directly. That keeps the harness as the public carrier for `MainThreadMarker`.
 
+On Linux/GTK, `GtkHarness::new()` returns `Result<_, glib::BoolError>`. GTK initialization depends on the process environment, so callers must handle setup failure explicitly instead of relying on a panic from inside the harness.
+
 ## Pick An API
 
 Use `SceneSnapshot` and `NodePredicate` for most new tests. They support hierarchy, selectors, properties, state, hit testing, and scene diffs.

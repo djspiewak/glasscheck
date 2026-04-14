@@ -132,18 +132,22 @@ impl std::error::Error for QueryError {}
 /// flat metadata lookup. The tradeoff is that richer scene relationships are
 /// only available when the root is backed by a `SceneSnapshot`.
 #[derive(Clone, Debug, PartialEq)]
+enum QueryBacking {
+    Compatibility,
+    Scene(SceneSnapshot),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct QueryRoot {
-    scene: Option<SceneSnapshot>,
+    backing: QueryBacking,
     nodes: Vec<NodeMetadata>,
-    compatibility: bool,
 }
 
 impl Default for QueryRoot {
     fn default() -> Self {
         Self {
-            scene: None,
+            backing: QueryBacking::Compatibility,
             nodes: Vec::new(),
-            compatibility: true,
         }
     }
 }
@@ -153,9 +157,8 @@ impl QueryRoot {
     #[must_use]
     pub fn new(nodes: Vec<NodeMetadata>) -> Self {
         Self {
-            scene: None,
+            backing: QueryBacking::Compatibility,
             nodes,
-            compatibility: true,
         }
     }
 
@@ -167,16 +170,18 @@ impl QueryRoot {
     pub fn from_scene(scene: SceneSnapshot) -> Self {
         let nodes = scene.all().iter().map(NodeMetadata::from).collect();
         Self {
-            scene: Some(scene),
+            backing: QueryBacking::Scene(scene),
             nodes,
-            compatibility: false,
         }
     }
 
     /// Returns the underlying scene snapshot when this root was built from one.
     #[must_use]
     pub fn scene(&self) -> Option<&SceneSnapshot> {
-        self.scene.as_ref()
+        match &self.backing {
+            QueryBacking::Compatibility => None,
+            QueryBacking::Scene(scene) => Some(scene),
+        }
     }
 
     /// Returns all nodes in the query root.
@@ -188,14 +193,7 @@ impl QueryRoot {
     /// Returns `true` when the root was built from compatibility metadata.
     #[must_use]
     pub(crate) fn is_compatibility_root(&self) -> bool {
-        self.compatibility
-    }
-
-    #[must_use]
-    pub(crate) fn backing_scene(&self) -> &SceneSnapshot {
-        self.scene
-            .as_ref()
-            .expect("scene-backed query roots must carry a scene snapshot")
+        matches!(self.backing, QueryBacking::Compatibility)
     }
 
     /// Finds exactly one node matching `selector`.
@@ -619,6 +617,31 @@ mod tests {
             root.find_by_predicate(&NodePredicate::id_eq("missing")),
             Err(RegionResolveError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn query_root_restores_clone_debug_and_partial_eq() {
+        fn assert_clone<T: Clone>() {}
+        fn assert_debug<T: std::fmt::Debug>() {}
+        fn assert_partial_eq<T: PartialEq>() {}
+
+        assert_clone::<QueryRoot>();
+        assert_debug::<QueryRoot>();
+        assert_partial_eq::<QueryRoot>();
+
+        let root = QueryRoot::new(vec![NodeMetadata {
+            id: Some("editor".into()),
+            role: Some(Role::TextInput),
+            label: Some("Editor".into()),
+            rect: rect(),
+        }]);
+
+        let clone = root.clone();
+        assert_eq!(clone, root);
+
+        let debug = format!("{root:?}");
+        assert!(debug.contains("QueryRoot"));
+        assert!(debug.contains("editor"));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use gtk4::gdk;
 use gtk4::prelude::*;
 
 fn main() {
-    let harness = GtkHarness::new();
+    let harness = GtkHarness::new().expect("GTK should initialize for native smoke tests");
 
     run("capture_returns_non_empty_image", || {
         capture_returns_non_empty_image(harness)

@@ -98,7 +98,7 @@ mod imp {
     /// as `input()` and `text_renderer()` stay marker-free.
     pub struct AppKitWindowHost {
         mtm: MainThreadMarker,
-        window: Option<Retained<NSWindow>>,
+        window: Retained<NSWindow>,
         root_view: RefCell<Option<Retained<NSView>>>,
         registry: RefCell<Vec<RegisteredView>>,
         provider: RefCell<Option<Box<dyn SemanticProvider>>>,
@@ -133,7 +133,7 @@ mod imp {
             );
             Self {
                 mtm,
-                window: Some(window),
+                window,
                 root_view: RefCell::new(None),
                 registry: RefCell::new(Vec::new()),
                 provider: RefCell::new(None),
@@ -159,7 +159,7 @@ mod imp {
             });
             Self {
                 mtm,
-                window: Some(retained),
+                window: retained,
                 root_view: RefCell::new(root_view),
                 registry: RefCell::new(Vec::new()),
                 provider: RefCell::new(None),
@@ -185,7 +185,7 @@ mod imp {
                     Retained::retain(window as *const NSWindow as *mut NSWindow)
                         .expect("window attachment should retain successfully")
                 })
-                .or_else(|| Some(managed_window_for_root_view(view, mtm)));
+                .unwrap_or_else(|| managed_window_for_root_view(view, mtm));
             Self {
                 mtm,
                 window: attached_window,
@@ -210,16 +210,12 @@ mod imp {
         /// Returns the underlying `NSWindow`.
         #[must_use]
         pub fn window(&self) -> &NSWindow {
-            self.window
-                .as_deref()
-                .expect("window access requires an attached window")
+            &self.window
         }
 
         /// Sets the window content view.
         pub fn set_root(&self, view: &NSView) {
-            if let Some(window) = self.window.as_deref() {
-                window.setContentView(Some(view));
-            }
+            self.window.setContentView(Some(view));
             let retained = unsafe {
                 Retained::retain(view as *const NSView as *mut NSView)
                     .expect("content view should retain successfully")
@@ -288,11 +284,7 @@ mod imp {
         /// call-site argument.
         #[must_use]
         pub fn input(&self) -> AppKitInputDriver<'_> {
-            let window = self
-                .window
-                .as_deref()
-                .expect("input requires an attached window");
-            AppKitInputDriver::new(window, self.mtm)
+            AppKitInputDriver::new(&self.window, self.mtm)
         }
 
         /// Clicks the semantic hit point of the unique node matching `predicate`.
@@ -366,12 +358,7 @@ mod imp {
                 }
                 return Ok(());
             }
-            if self
-                .window
-                .as_deref()
-                .and_then(|window| window.contentView())
-                .is_none()
-            {
+            if self.window.contentView().is_none() {
                 return Err(RegionResolveError::InputUnavailable);
             }
             self.input().click(Point::new(point.x, point.y));
@@ -579,12 +566,10 @@ mod imp {
                 .resolve_region_with_image(root_bounds, image.as_ref(), region)
         }
 
-        /// Sets the window title when a window is attached.
+        /// Sets the host window title.
         pub fn set_title(&self, title: &str) {
-            if let Some(window) = self.window.as_deref() {
-                let title = NSString::from_str(title);
-                window.setTitle(&title);
-            }
+            let title = NSString::from_str(title);
+            self.window.setTitle(&title);
         }
 
         #[must_use]
@@ -594,25 +579,23 @@ mod imp {
 
         fn root_view(&self) -> Option<Retained<NSView>> {
             if self.tracks_window_content {
-                if let Some(window) = self.window.as_deref() {
-                    let current = window.contentView();
-                    let mut cached = self.root_view.borrow_mut();
-                    match current {
-                        Some(content) => {
-                            let is_stale = cached
-                                .as_ref()
-                                .is_none_or(|view| !std::ptr::eq(&**view, &*content));
-                            if is_stale {
-                                let retained = unsafe {
-                                    Retained::retain(&*content as *const NSView as *mut NSView)
-                                        .expect("content view should retain successfully")
-                                };
-                                *cached = Some(retained);
-                            }
+                let current = self.window.contentView();
+                let mut cached = self.root_view.borrow_mut();
+                match current {
+                    Some(content) => {
+                        let is_stale = cached
+                            .as_ref()
+                            .is_none_or(|view| !std::ptr::eq(&**view, &*content));
+                        if is_stale {
+                            let retained = unsafe {
+                                Retained::retain(&*content as *const NSView as *mut NSView)
+                                    .expect("content view should retain successfully")
+                            };
+                            *cached = Some(retained);
                         }
-                        None => {
-                            *cached = None;
-                        }
+                    }
+                    None => {
+                        *cached = None;
                     }
                 }
             }
@@ -649,8 +632,7 @@ mod imp {
             let content = self
                 .root_view()
                 .map(|view| view.bounds())
-                .or_else(|| self.window.as_deref().map(window_root_local_bounds))
-                .expect("host should have either a root view or a window");
+                .unwrap_or_else(|| window_root_local_bounds(&self.window));
             Rect::new(
                 Point::new(content.origin.x, content.origin.y),
                 Size::new(content.size.width, content.size.height),

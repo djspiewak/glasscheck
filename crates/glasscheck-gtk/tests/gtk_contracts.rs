@@ -11,7 +11,7 @@ use glasscheck_gtk::{GtkHarness, GtkWindowHost, InstrumentedWidget};
 use gtk4::prelude::*;
 
 fn main() {
-    let harness = GtkHarness::new();
+    let harness = GtkHarness::new().expect("GTK should initialize for native contract tests");
 
     run("attach_to_existing_window_builds_scene_snapshot", || {
         attach_to_existing_window_builds_scene_snapshot(harness)

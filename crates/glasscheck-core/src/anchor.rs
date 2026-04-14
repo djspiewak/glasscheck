@@ -605,14 +605,14 @@ impl QueryRoot {
             };
         }
 
-        let handle = self
-            .backing_scene()
-            .find(predicate)
-            .map_err(map_query_error)?;
+        let Some(scene) = self.scene() else {
+            return Err(RegionResolveError::NotFound(predicate.clone()));
+        };
+        let handle = scene.find(predicate).map_err(map_query_error)?;
         Ok(self
             .all()
             .get(handle.index())
-            .expect("scene and compatibility metadata stay aligned"))
+            .ok_or(RegionResolveError::InvalidHandle(handle))?)
     }
 
     /// Returns all nodes matching `predicate`.
@@ -624,9 +624,9 @@ impl QueryRoot {
             }
             return compatibility_find_all(self.all(), predicate);
         }
-        self.backing_scene()
-            .find_all(predicate)
+        self.scene()
             .into_iter()
+            .flat_map(|scene| scene.find_all(predicate))
             .filter_map(|handle| self.all().get(handle.index()))
             .collect()
     }
@@ -640,7 +640,10 @@ impl QueryRoot {
         if self.is_compatibility_root() {
             return resolve_region_from_metadata(self.all(), root_bounds, region);
         }
-        self.backing_scene().resolve_region(root_bounds, region)
+        self.scene().map_or_else(
+            || resolve_region_from_metadata(self.all(), root_bounds, region),
+            |scene| scene.resolve_region(root_bounds, region),
+        )
     }
 }
 

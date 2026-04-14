@@ -1,28 +1,33 @@
 #[cfg(target_os = "linux")]
 mod imp {
-    use std::sync::Once;
+    use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
     use crate::window::GtkWindowHost;
     use glasscheck_core::{Harness, PollError, PollOptions};
 
-    static INIT_GTK: Once = Once::new();
+    static INIT_GTK: OnceLock<Result<(), glib::BoolError>> = OnceLock::new();
 
-    #[derive(Clone, Copy, Debug, Default)]
+    #[derive(Clone, Copy, Debug)]
     /// Main-context GTK harness for creating windows and flushing the event loop.
     ///
-    /// Use this as the entry point for GTK tests. It keeps waits aligned with
-    /// the GTK main context rather than arbitrary sleeps.
+    /// Construct this with [`GtkHarness::new`] so GTK initialization remains
+    /// checked. It keeps waits aligned with the GTK main context rather than
+    /// arbitrary sleeps.
+    ///
+    /// ```compile_fail
+    /// # use glasscheck_gtk::GtkHarness;
+    /// let _ = GtkHarness::default();
+    /// ```
     pub struct GtkHarness;
 
     impl GtkHarness {
         /// Initializes GTK4 for in-process tests.
-        #[must_use]
-        pub fn new() -> Self {
-            INIT_GTK.call_once(|| {
-                gtk4::init().expect("GTK initialization should succeed for native tests");
-            });
-            Self
+        ///
+        /// This is the only public constructor so initialization failures
+        /// cannot be bypassed.
+        pub fn new() -> Result<Self, glib::BoolError> {
+            INIT_GTK.get_or_init(gtk4::init).clone().map(|()| Self)
         }
 
         /// Pumps the GTK main context once.
@@ -103,7 +108,7 @@ mod imp {
 
 #[cfg(not(target_os = "linux"))]
 mod imp {
-    #[derive(Clone, Copy, Debug, Default)]
+    #[derive(Clone, Copy, Debug)]
     pub struct GtkHarness;
 }
 
