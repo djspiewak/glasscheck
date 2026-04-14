@@ -1049,7 +1049,6 @@ fn move_mouse_targets_attached_window_even_when_another_window_is_key(harness: A
     other.set_content_view(&other_view);
     other.window().setAcceptsMouseMovedEvents(true);
     other.window().makeFirstResponder(Some(&other_view));
-    other.window().makeKeyAndOrderFront(None);
     other.window().makeKeyWindow();
     harness.settle(2);
 
@@ -1076,7 +1075,6 @@ fn key_press_targets_attached_window_even_when_another_window_is_key(harness: Ap
     );
     other.set_content_view(&other_view);
     other.window().makeFirstResponder(Some(&other_view));
-    other.window().makeKeyAndOrderFront(None);
     other.window().makeKeyWindow();
     harness.settle(2);
 

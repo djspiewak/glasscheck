@@ -17,7 +17,7 @@ mod imp {
 
     use crate::capture::{capture_view_image, crop_image_in_view_coordinates};
     use crate::input::AppKitInputDriver;
-    use crate::screen::offscreen_window_content_rect;
+    use crate::screen::{offscreen_window_content_rect, offscreen_window_frame_rect};
     use crate::text::AppKitTextHarness;
 
     enum RegisteredViewClickRoute {
@@ -127,6 +127,10 @@ mod imp {
                 )
             };
             unsafe { window.setReleasedWhenClosed(false) };
+            window.setFrame_display(
+                offscreen_window_frame_rect(mtm, style, width, height),
+                false,
+            );
             Self {
                 mtm,
                 window: Some(window),
@@ -926,6 +930,10 @@ mod imp {
         };
         unsafe {
             window.setReleasedWhenClosed(false);
+            window.setFrame_display(
+                offscreen_window_frame_rect(mtm, style, bounds.size.width, bounds.size.height),
+                false,
+            );
             window.setContentView(Some(view));
         }
         window

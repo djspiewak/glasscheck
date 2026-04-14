@@ -199,8 +199,6 @@ mod imp {
         }
 
         fn activate_window(&self) {
-            self.window.makeKeyAndOrderFront(None);
-            self.window.makeKeyWindow();
             let app = NSApplication::sharedApplication(self.mtm);
             app.activate();
         }

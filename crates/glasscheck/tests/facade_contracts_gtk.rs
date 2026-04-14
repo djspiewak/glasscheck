@@ -1,18 +1,27 @@
-#![cfg(target_os = "linux")]
-
+#[cfg(target_os = "linux")]
 use std::cell::Cell;
+#[cfg(target_os = "linux")]
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::rc::Rc;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "linux")]
 use glasscheck::{
     AnchoredTextExpectation, AnchoredTextHarness, InputDriver, NodePredicate, Point, PollOptions,
     Rect, RegionSpec, RelativeBounds, RgbaColor, Role, SemanticNode, SemanticProvider, Size,
     TextAssertionConfig,
 };
+#[cfg(target_os = "linux")]
 use gtk4::prelude::*;
 
+#[cfg(not(target_os = "linux"))]
+fn main() {}
+
+#[cfg(target_os = "linux")]
 fn main() {
     let harness = glasscheck::Harness::new();
     run_case("shared_window_host_surface_is_backend_neutral", || {
@@ -21,14 +30,17 @@ fn main() {
     });
 }
 
+#[cfg(target_os = "linux")]
 struct Fixture {
     host: glasscheck::WindowHost,
 }
 
+#[cfg(target_os = "linux")]
 struct ClickStateProvider {
     clicked: Rc<Cell<bool>>,
 }
 
+#[cfg(target_os = "linux")]
 impl SemanticProvider for ClickStateProvider {
     fn snapshot_nodes(&self) -> Vec<SemanticNode> {
         let label = if self.clicked.get() {
@@ -45,6 +57,7 @@ impl SemanticProvider for ClickStateProvider {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn mount_fixture(harness: &glasscheck::Harness) -> Fixture {
     let host = harness.create_window(320.0, 160.0);
     let root = gtk4::Fixed::new();
@@ -107,16 +120,18 @@ fn mount_fixture(harness: &glasscheck::Harness) -> Fixture {
     Fixture { host }
 }
 
+#[cfg(target_os = "linux")]
 fn install_css(widget: &impl IsA<gtk4::Widget>, css: &str) {
     let provider = gtk4::CssProvider::new();
     provider.load_from_data(css);
-    gtk4::style_context_add_provider(
-        &widget.style_context(),
+    gtk4::style_context_add_provider_for_display(
+        &widget.display(),
         &provider,
         gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 }
 
+#[cfg(target_os = "linux")]
 fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::WindowHost) {
     let scene = host.snapshot_scene();
     assert_eq!(node_label(&scene, "click-state"), Some("Idle"));
@@ -161,6 +176,7 @@ fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::Win
     assert_eq!(node_label(&scene, "click-state"), Some("Clicked"));
 }
 
+#[cfg(target_os = "linux")]
 fn status_expectation(content: &str) -> AnchoredTextExpectation {
     AnchoredTextExpectation::new(
         content,
@@ -171,15 +187,19 @@ fn status_expectation(content: &str) -> AnchoredTextExpectation {
     .with_background(RgbaColor::new(255, 255, 255, 255))
 }
 
+#[cfg(target_os = "linux")]
 fn node_label<'a>(scene: &'a glasscheck::SceneSnapshot, id: &str) -> Option<&'a str> {
     let handle = scene.find(&NodePredicate::id_eq(id)).ok()?;
     scene.node(handle)?.label.as_deref()
 }
 
+#[cfg(target_os = "linux")]
 fn assert_input_driver<T: InputDriver>(_: &T) {}
 
+#[cfg(target_os = "linux")]
 fn assert_text_harness<T: AnchoredTextHarness>(_: &T) {}
 
+#[cfg(target_os = "linux")]
 fn artifact_dir(label: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
     let stamp = SystemTime::now()
@@ -191,6 +211,7 @@ fn artifact_dir(label: &str) -> PathBuf {
     path
 }
 
+#[cfg(target_os = "linux")]
 fn run_case(name: &str, test: impl FnOnce()) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
     match result {

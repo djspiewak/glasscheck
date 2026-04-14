@@ -15,6 +15,7 @@ mod imp {
     use std::path::Path;
 
     use crate::capture::{capture_view_image, crop_image_in_view_coordinates};
+    use crate::screen::{offscreen_window_content_rect, offscreen_window_frame_rect};
     use crate::window::AppKitWindowHost;
 
     /// Errors returned by the AppKit text harness.
@@ -134,10 +135,11 @@ mod imp {
         expectation: &TextExpectation,
     ) -> Result<Retained<NSWindow>, AppKitTextError> {
         validate_font_expectation(expectation)?;
+        let scene_frame = scene_frame(expectation.rect);
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
-                scene_frame(expectation.rect),
+                offscreen_window_content_rect(mtm, scene_frame.size.width, scene_frame.size.height),
                 NSWindowStyleMask::Titled
                     | NSWindowStyleMask::Closable
                     | NSWindowStyleMask::Resizable,
@@ -145,8 +147,19 @@ mod imp {
                 false,
             )
         };
+        let style =
+            NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Resizable;
         unsafe { window.setReleasedWhenClosed(false) };
-        let scene = NSView::initWithFrame(NSView::alloc(mtm), scene_frame(expectation.rect));
+        window.setFrame_display(
+            offscreen_window_frame_rect(
+                mtm,
+                style,
+                scene_frame.size.width,
+                scene_frame.size.height,
+            ),
+            false,
+        );
+        let scene = NSView::initWithFrame(NSView::alloc(mtm), scene_frame);
         let text_view = make_reference_text_view(mtm, expectation)?;
         scene.addSubview(&text_view);
         window.setContentView(Some(&scene));
