@@ -274,17 +274,14 @@ fn resolve_hit_point_supports_selector_lookup_and_search_strategy(harness: GtkHa
     harness.settle(4);
 
     let default_hit = host
-        .resolve_hit_point(
-            &NodePredicate::id_eq("hit-target"),
-            &HitPointSearch::default(),
-        )
+        .resolve_hit_point(&Selector::id_eq("hit-target"), &HitPointSearch::default())
         .expect("default hit-point search should resolve a visible target");
     assert!((30.0..=60.0).contains(&default_hit.x));
     assert!((30.0..=70.0).contains(&default_hit.y));
 
     let grid_hit = host
         .resolve_hit_point(
-            &NodePredicate::id_eq("hit-target"),
+            &Selector::id_eq("hit-target"),
             &HitPointSearch {
                 strategy: HitPointStrategy::Grid,
                 sample_count: 16,
@@ -362,7 +359,7 @@ fn semantic_click_dispatches_button_gesture_handlers(harness: GtkHarness) {
     host.register_node(&button, node("button-gesture", Role::Button, "Gesture"));
     harness.settle(4);
 
-    host.click_node(&NodePredicate::id_eq("button-gesture"))
+    host.click_node(&Selector::id_eq("button-gesture"))
         .expect("semantic click should use native pointer dispatch for buttons");
     harness.settle(2);
 
@@ -386,7 +383,7 @@ fn semantic_click_on_registered_ancestor_routes_to_descendant_hit_widget(harness
     host.register_node(&container, node("container", Role::Container, "Container"));
     harness.settle(4);
 
-    host.click_node(&NodePredicate::id_eq("container"))
+    host.click_node(&Selector::id_eq("container"))
         .expect("semantic click on a registered ancestor should route to the hit descendant");
     harness.settle(4);
 
@@ -420,7 +417,7 @@ fn semantic_click_respects_gesture_button_filters(harness: GtkHarness) {
     );
     harness.settle(4);
 
-    host.click_node(&NodePredicate::id_eq("gesture-filter-target"))
+    host.click_node(&Selector::id_eq("gesture-filter-target"))
         .expect("semantic click should dispatch a primary-button click");
     harness.settle(2);
 
@@ -442,12 +439,12 @@ fn semantic_click_reports_unhittable_registered_node(harness: GtkHarness) {
     harness.settle(4);
 
     let scene = host.snapshot_scene();
-    let handle = scene.find(&NodePredicate::id_eq("covered-target")).unwrap();
+    let handle = scene.find(&Selector::id_eq("covered-target")).unwrap();
     let node = scene.node(handle).unwrap();
     assert!(node.hit_testable);
 
     let error = host
-        .click_node(&NodePredicate::id_eq("covered-target"))
+        .click_node(&Selector::id_eq("covered-target"))
         .unwrap_err();
     assert!(matches!(error, RegionResolveError::InputUnavailable));
 }
@@ -471,7 +468,7 @@ fn semantic_click_uses_recipe_hit_target_when_locator_bounds_are_empty(harness: 
 
     let point = host
         .resolve_hit_point(
-            &NodePredicate::selector_eq("recipe.hit-target"),
+            &Selector::selector_eq("recipe.hit-target"),
             &HitPointSearch::default(),
         )
         .expect("recipe hit target should provide a usable fallback point");
@@ -494,7 +491,7 @@ fn semantic_click_uses_single_scene_snapshot(harness: GtkHarness) {
     }));
     harness.settle(4);
 
-    host.click_node(&NodePredicate::selector_eq("moving.target"))
+    host.click_node(&Selector::selector_eq("moving.target"))
         .expect("semantic click should stay bound to one provider snapshot");
     harness.settle(4);
 
