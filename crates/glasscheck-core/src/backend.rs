@@ -189,6 +189,14 @@ pub fn normalize_provider_nodes(
     let needs_namespace =
         provider_ids.iter().any(|id| native_ids.contains(id)) || has_duplicates(&provider_ids);
     if !needs_namespace {
+        for node in &mut nodes {
+            node.properties
+                .entry("glasscheck:source_id".into())
+                .or_insert_with(|| PropertyValue::String(node.id.clone()));
+            node.property_provenance
+                .entry("glasscheck:source_id".into())
+                .or_insert(node.provenance);
+        }
         return nodes;
     }
 
@@ -215,6 +223,8 @@ pub fn normalize_provider_nodes(
             "glasscheck:source_id".into(),
             PropertyValue::String(original_id),
         );
+        node.property_provenance
+            .insert("glasscheck:source_id".into(), node.provenance);
     }
 
     for node in &nodes {
@@ -236,6 +246,8 @@ pub fn normalize_provider_nodes(
                     "glasscheck:ambiguous_parent_id".into(),
                     PropertyValue::String(parent_id.clone()),
                 );
+                node.property_provenance
+                    .insert("glasscheck:ambiguous_parent_id".into(), node.provenance);
                 node.parent_id = None;
             }
         }
@@ -258,7 +270,7 @@ pub fn crop_image_bottom_left(image: &Image, rect: Rect) -> Image {
 #[cfg(test)]
 mod tests {
     use super::normalize_provider_nodes;
-    use crate::{Point, Rect, Role, SemanticNode, Size};
+    use crate::{NodeProvenanceKind, Point, PropertyValue, Rect, Role, SemanticNode, Size};
     use std::collections::BTreeSet;
 
     fn rect() -> Rect {
@@ -279,5 +291,48 @@ mod tests {
 
         assert_eq!(nodes[0].id, "provider::battlefield");
         assert_eq!(nodes[1].parent_id.as_deref(), Some("provider::battlefield"));
+    }
+
+    #[test]
+    fn provider_normalization_preserves_provenance_for_added_properties() {
+        let native_ids = BTreeSet::from(["battlefield".to_string()]);
+        let nodes = normalize_provider_nodes(
+            vec![
+                SemanticNode::new("battlefield", Role::Container, rect())
+                    .with_provenance(NodeProvenanceKind::Matched),
+                SemanticNode::new("battlefield/card", Role::Container, rect())
+                    .with_parent("battlefield", 0)
+                    .with_provenance(NodeProvenanceKind::Matched),
+            ],
+            &native_ids,
+        );
+
+        assert_eq!(
+            nodes[0].properties.get("glasscheck:source_id"),
+            Some(&PropertyValue::string("battlefield"))
+        );
+        assert_eq!(
+            nodes[0].property_provenance.get("glasscheck:source_id"),
+            Some(&NodeProvenanceKind::Matched)
+        );
+    }
+
+    #[test]
+    fn provider_normalization_records_source_id_without_namespacing() {
+        let native_ids = BTreeSet::new();
+        let nodes = normalize_provider_nodes(
+            vec![SemanticNode::new("provider-node", Role::Container, rect())
+                .with_provenance(NodeProvenanceKind::Declared)],
+            &native_ids,
+        );
+
+        assert_eq!(
+            nodes[0].properties.get("glasscheck:source_id"),
+            Some(&PropertyValue::string("provider-node"))
+        );
+        assert_eq!(
+            nodes[0].property_provenance.get("glasscheck:source_id"),
+            Some(&NodeProvenanceKind::Declared)
+        );
     }
 }

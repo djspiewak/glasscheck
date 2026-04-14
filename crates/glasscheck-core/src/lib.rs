@@ -1,16 +1,16 @@
 //! Backend-neutral primitives for functional testing of graphical native Rust UIs.
 //!
-//! Use this crate when tests can expose semantic scene snapshots, capture
-//! pixels, or both. The main tradeoff is explicit instrumentation: callers
-//! provide semantic metadata up front and get stable scene queries, image
-//! assertions, rendered-text checks, and polling helpers without external UI
-//! automation. This crate targets native graphical UIs rather than
-//! browser-based interfaces. Most users should depend on `glasscheck` instead
-//! so they get the supported native backend integration as well.
+//! Use this crate when tests can expose scene nodes, capture pixels, or both.
+//! Nodes may come from native widget/view registration, declarative recipes,
+//! coarse geometry, pixel probing, fuzzy image matching, or custom refinement.
+//! This crate targets native graphical UIs rather than browser-based UIs. Most
+//! users should depend on `glasscheck` instead so they get the supported native
+//! backend integration as well.
 
 mod anchor;
 mod assertions;
 mod backend;
+mod color_match;
 mod geometry;
 mod image;
 mod layout;
@@ -20,7 +20,11 @@ mod semantic;
 mod text;
 mod wait;
 
-pub use anchor::{Anchor, RegionResolveError, RegionSpec, RelativeBounds};
+pub use anchor::RegionSpec as RegionLocator;
+pub use anchor::{
+    AbsoluteBounds, Anchor, ImageMatch, PixelMatch, PixelProbe, RegionProbe, RegionRefiner,
+    RegionResolveError, RegionSpec, RelativeBounds,
+};
 pub use assertions::{
     assert_snapshot_matches, compare_images, load_png, save_png, CompareConfig, CompareResult,
     SnapshotArtifacts, SnapshotConfig, SnapshotError,
@@ -41,7 +45,12 @@ pub use layout::{
 pub use query::{
     NodeMetadata, NodePredicate, PropertyValue, QueryError, QueryRoot, Selector, TextMatch,
 };
-pub use scene::{NodeHandle, Role, SceneSnapshot, SemanticNode, SemanticProvider};
+pub use scene::{
+    resolve_node_recipes, NodeHandle, NodeProvenanceKind, NodeRecipe, NodeRecipeResolutionError,
+    ResolvedNodeRecipes, Role, SceneSnapshot, SemanticNode, SemanticProvider,
+};
+pub use scene::{SemanticNode as Node, SemanticProvider as SceneSource};
+pub use semantic::SemanticAssertionError as NodeAssertionError;
 pub use semantic::{
     assert_above_node, assert_adjacent_horizontally_node, assert_adjacent_vertically_node,
     assert_contained_within_node, assert_contains_point_node, assert_count, assert_exists,

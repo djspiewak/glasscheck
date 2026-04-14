@@ -4,13 +4,13 @@ Functional testing primitives for graphical native Rust UIs.
 
 `glasscheck` is for in-process tests of graphical native UIs, not browser-based UIs. It is for tests that need more than string checks and less than full external automation. It focuses on three things:
 
-- semantic queries over a scene snapshot
+- node queries over a scene snapshot
 - image and rendered-text assertions against live UI pixels
 - polling helpers for asynchronous UI state
 
 `glasscheck` is the intended dependency for most users. It re-exports the core APIs and adds the supported native backends behind features. `glasscheck-core` is backend-neutral, but it is mainly useful for backend authors or specialized integrations.
 
-Much of the semantic scene/query/wait design in `glasscheck` is directly inspired by [Zed](https://github.com/zed-industries/zed)'s test harness.
+Much of the scene/query/wait design in `glasscheck` is directly inspired by [Zed](https://github.com/zed-industries/zed)'s test harness.
 
 ## Crates
 
@@ -34,17 +34,17 @@ Use `SceneSnapshot` and `NodePredicate` for most new tests. They support hierarc
 
 Use `QueryRoot` and `Selector` only when you need the older flat metadata model or want a very small compatibility layer. The tradeoff is less expressive matching.
 
-Prefer stable selectors and semantic roles over snapshot-local IDs. IDs are exact, but they can be disambiguated during snapshot construction and should not be treated as cross-snapshot identities.
+Prefer stable selectors and roles over snapshot-local IDs. IDs are exact, but they can be disambiguated during snapshot construction and should not be treated as cross-snapshot identities.
 
 ## Scene Queries
 
 ```rust
 use glasscheck_core::{
-    NodePredicate, Point, PropertyValue, Rect, Role, SceneSnapshot, SemanticNode, Size,
+    Node, NodePredicate, Point, PropertyValue, Rect, Role, SceneSnapshot, Size,
 };
 
 let scene = SceneSnapshot::new(vec![
-    SemanticNode::new(
+    Node::new(
         "save-button",
         Role::Button,
         Rect::new(Point::new(20.0, 12.0), Size::new(80.0, 32.0)),
@@ -57,6 +57,138 @@ let scene = SceneSnapshot::new(vec![
 let save = scene.resolve(&NodePredicate::selector_eq("toolbar.save")).unwrap();
 assert_eq!(save.node.label.as_deref(), Some("Save"));
 ```
+
+## Node Refinement
+
+`glasscheck` can build nodes from whatever hooks the UI exposes: native widgets, declared geometry, or visual refinement over live pixels.
+
+### Direct Geometry
+
+Use this when you already know the exact bounds.
+
+```rust
+use glasscheck_core::{NodeRecipe, RegionLocator, Rect, Point, Role, Size};
+
+let recipe = NodeRecipe::new(
+    "browser.nav.back",
+    Role::Button,
+    RegionLocator::rect(Rect::new(Point::new(20.0, 20.0), Size::new(28.0, 28.0))),
+)
+.with_selector("browser.nav.back");
+```
+
+Failure mode: the node still resolves, but later assertions fail if the real UI no longer draws or behaves correctly in that region.
+
+### Nested Subregions
+
+Use this when you know a stable outer node but want a tighter child region.
+
+```rust
+use glasscheck_core::{NodePredicate, RegionLocator, RelativeBounds};
+
+let title_region = RegionLocator::node(NodePredicate::selector_eq("card"))
+    .subregion(RelativeBounds::inset(0.1, 0.1, 0.1, 0.6));
+```
+
+Failure mode: if the outer node moves or disappears, region resolution fails at the anchor.
+
+### Regions Outside Another Region
+
+Use this for “nearby but not inside” regions, such as an affordance expected to appear 50px to the right of another node.
+
+```rust
+use glasscheck_core::{NodePredicate, RegionLocator};
+
+let search_space = RegionLocator::node(NodePredicate::selector_eq("sidebar.item"))
+    .right_of(50.0, 120.0);
+```
+
+Failure mode: the region still resolves geometrically, but follow-up probes or assertions fail if the UI regression means the visual target is not actually there.
+
+### Pixel Probes
+
+Use this when a control is custom-drawn and can be identified by a stable pixel signature. The expected pixel can be fully opaque or partially opaque over an unknown background.
+
+```rust
+use glasscheck_core::{NodeRecipe, PixelMatch, PixelProbe, RegionLocator, Role};
+
+let recipe = NodeRecipe::new(
+    "visual.red-chip",
+    Role::Button,
+    RegionLocator::root().pixel_probe(PixelProbe::new(
+        PixelMatch::new([255, 0, 0, 255], 0, 255),
+        8,
+    )),
+);
+```
+
+Failure mode: the node is omitted from the snapshot if the matching pixels are no longer present.
+
+### Region Probes
+
+Use this when you expect a single connected visual component and want ambiguity to fail loudly. Region probes use the same alpha-aware pixel matching as `PixelProbe`.
+
+```rust
+use glasscheck_core::{NodeRecipe, PixelMatch, RegionLocator, RegionProbe, Role};
+
+let recipe = NodeRecipe::new(
+    "visual.badge",
+    Role::Button,
+    RegionLocator::root().region_probe(RegionProbe::new(
+        PixelMatch::new([255, 0, 0, 255], 8, 200),
+        8,
+        2.0,
+    )),
+);
+```
+
+Failure mode: the node is omitted if no component matches, and resolution fails if multiple components match.
+
+### Alpha-Aware Image Matching
+
+Use this for icons or custom affordances where a small template is more stable than a single-pixel signature. Fully transparent template pixels are ignored during scoring, and partially transparent template pixels are matched as foreground references over an unknown background.
+
+```rust
+use glasscheck_core::{CompareConfig, Image, ImageMatch, NodeRecipe, RegionLocator, Role};
+
+let template = Image::new(2, 2, vec![
+    255, 0, 0, 255, 255, 0, 0, 255,
+    255, 0, 0, 255, 255, 0, 0, 255,
+]);
+
+let recipe = NodeRecipe::new(
+    "visual.chevron",
+    Role::Button,
+    RegionLocator::root().image_match(ImageMatch::new(
+        template,
+        CompareConfig {
+            channel_tolerance: 4,
+            match_threshold: 0.98,
+            generate_diff: false,
+        },
+    )),
+);
+```
+
+Failure mode: resolution fails with a below-threshold match when the icon is present but visually wrong. Transparent padding does not help a weak match pass the threshold.
+
+### Independent Hit Targets
+
+Use this when the node bounds should stay coarse but clicks should land on a tighter visual sub-region.
+
+```rust
+use glasscheck_core::{NodeRecipe, PixelMatch, PixelProbe, RegionLocator, Role};
+
+let hit_target = RegionLocator::root().pixel_probe(PixelProbe::new(
+    PixelMatch::new([255, 0, 0, 255], 0, 255),
+    8,
+));
+
+let recipe = NodeRecipe::new("visual.red-chip", Role::Button, hit_target.clone())
+    .with_hit_target(hit_target);
+```
+
+Failure mode: when the hit target cannot be refined, clicks fall back to the node bounds unless you make the recipe itself depend on the same refined region.
 
 ## Wait For Real UI State
 
@@ -83,12 +215,12 @@ Prefer anchored expectations over fixed rectangles when the layout can move.
 
 ```rust
 use glasscheck_core::{
-    AnchoredTextExpectation, NodePredicate, RegionSpec, RelativeBounds, Role, TextMatch,
+    AnchoredTextExpectation, NodePredicate, RegionLocator, RelativeBounds, Role, TextMatch,
 };
 
 let expectation = AnchoredTextExpectation::new(
     "Run",
-    RegionSpec::node(NodePredicate::and(vec![
+    RegionLocator::node(NodePredicate::and(vec![
         NodePredicate::role_eq(Role::Button),
         NodePredicate::label(TextMatch::contains("Run")),
     ]))
@@ -113,7 +245,7 @@ assert!(compare_images(&actual, &expected, &CompareConfig::default()).passed);
 
 Only AppKit on macOS and GTK4 on Linux are supported native backends today.
 
-`glasscheck-appkit` is for in-process AppKit tests on macOS. It provides window hosting, pixel capture, semantic scene snapshots, hit-point-based clicks, and text rendering.
+`glasscheck-appkit` is for in-process AppKit tests on macOS. It provides window hosting, pixel capture, scene snapshots, hit-point-based clicks, and text rendering.
 
 `glasscheck-gtk` is the Linux GTK4 backend. It provides the same overall testing model, but some low-level input paths remain best-effort and may fall back to widget activation or focus routing.
 

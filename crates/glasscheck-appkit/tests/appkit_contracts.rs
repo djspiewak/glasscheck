@@ -8,12 +8,15 @@ use glasscheck_appkit::{
 };
 use glasscheck_core::{
     assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
-    NodePredicate, Point, PropertyValue, QueryError, Rect, RegionResolveError, RelativeBounds,
-    Role, SemanticNode, SemanticProvider, Size, TextRange,
+    NodePredicate, NodeProvenanceKind, NodeRecipe, PixelMatch, PixelProbe, Point, PropertyValue,
+    QueryError, Rect, RegionResolveError, RelativeBounds, Role, SemanticNode, SemanticProvider,
+    Size, TextRange,
 };
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSButton, NSEvent, NSFont, NSTextInputClient, NSTextView, NSView};
+use objc2_app_kit::{
+    NSBezierPath, NSButton, NSColor, NSEvent, NSFont, NSTextInputClient, NSTextView, NSView,
+};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSSize, NSString};
 
 fn main() {
@@ -56,9 +59,32 @@ fn main() {
     run("query_root_is_scene_backed", || {
         query_root_is_scene_backed(harness)
     });
+    run(
+        "semantic_only_snapshot_does_not_resize_small_windows",
+        || semantic_only_snapshot_does_not_resize_small_windows(harness),
+    );
+    run(
+        "geometry_only_region_resolution_does_not_resize_small_windows",
+        || geometry_only_region_resolution_does_not_resize_small_windows(harness),
+    );
+    run(
+        "visual_recipe_snapshot_rebinds_provider_state_after_capture_resize",
+        || visual_recipe_snapshot_rebinds_provider_state_after_capture_resize(harness),
+    );
+    run(
+        "visual_recipe_root_region_resolution_uses_post_capture_root_bounds",
+        || visual_recipe_root_region_resolution_uses_post_capture_root_bounds(harness),
+    );
     run("registered_native_selectors_are_queryable", || {
         registered_native_selectors_are_queryable(harness)
     });
+    run("provider_unique_ids_record_source_id_provenance", || {
+        provider_unique_ids_record_source_id_provenance(harness)
+    });
+    run(
+        "native_snapshot_marks_public_properties_with_native_provenance",
+        || native_snapshot_marks_public_properties_with_native_provenance(harness),
+    );
     run(
         "resolve_hit_point_supports_selector_lookup_and_missing_errors",
         || resolve_hit_point_supports_selector_lookup_and_missing_errors(harness),
@@ -112,6 +138,10 @@ fn main() {
     run(
         "provider_namespacing_preserves_existing_source_id_property",
         || provider_namespacing_preserves_existing_source_id_property(harness),
+    );
+    run(
+        "capture_region_uses_same_provider_snapshot_as_pixels",
+        || capture_region_uses_same_provider_snapshot_as_pixels(harness),
     );
     run(
         "provider_namespacing_marks_unresolved_native_parent_reference_as_ambiguous",
@@ -213,6 +243,29 @@ fn main() {
     run("stock_button_click_outside_does_not_invoke_action", || {
         stock_button_click_outside_does_not_invoke_action(harness)
     });
+    run("scene_source_recipes_support_external_offsets", || {
+        scene_source_recipes_support_external_offsets(harness)
+    });
+    run(
+        "scene_source_recipe_hit_target_uses_window_coordinates",
+        || scene_source_recipe_hit_target_uses_window_coordinates(harness),
+    );
+    run(
+        "scene_source_recipe_hit_target_respects_search_strategy",
+        || scene_source_recipe_hit_target_respects_search_strategy(harness),
+    );
+    run(
+        "scene_source_recipe_clicks_with_explicit_hit_target_even_when_locator_rect_is_empty",
+        || {
+            scene_source_recipe_clicks_with_explicit_hit_target_even_when_locator_rect_is_empty(
+                harness,
+            )
+        },
+    );
+    run(
+        "scene_source_recipe_is_omitted_when_anchor_is_missing",
+        || scene_source_recipe_is_omitted_when_anchor_is_missing(harness),
+    );
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -346,6 +399,115 @@ fn query_root_is_scene_backed(harness: AppKitHarness) {
         .is_err());
 }
 
+fn semantic_only_snapshot_does_not_resize_small_windows(harness: AppKitHarness) {
+    let host = harness.create_window(24.0, 24.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(24.0, 24.0));
+    host.set_content_view(&root);
+    host.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
+    harness.settle(2);
+
+    let before = host.window().frame().size;
+    let scene = host.snapshot_scene();
+    let after_snapshot = host.window().frame().size;
+    let query_root = host.query_root();
+    let after_query = host.window().frame().size;
+
+    assert!(scene.find(&NodePredicate::id_eq("provider-node")).is_ok());
+    assert_eq!(before.width, after_snapshot.width);
+    assert_eq!(before.height, after_snapshot.height);
+    assert_eq!(before.width, after_query.width);
+    assert_eq!(before.height, after_query.height);
+    assert!(query_root
+        .find_by_predicate(&NodePredicate::id_eq("provider-node"))
+        .is_ok());
+}
+
+fn geometry_only_region_resolution_does_not_resize_small_windows(harness: AppKitHarness) {
+    let host = harness.create_window(24.0, 24.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(24.0, 24.0));
+    host.set_content_view(&root);
+    host.set_scene_source(Box::new(OffsetRecipeProvider));
+    harness.settle(2);
+
+    let before = host.window().frame().size;
+    let resolved = host
+        .resolve_region(&glasscheck_core::RegionSpec::rect(Rect::new(
+            Point::new(2.0, 3.0),
+            Size::new(5.0, 6.0),
+        )))
+        .expect("geometry-only region should resolve without capture side effects");
+    let after = host.window().frame().size;
+
+    assert_eq!(
+        resolved,
+        Rect::new(Point::new(2.0, 3.0), Size::new(5.0, 6.0))
+    );
+    assert_eq!(before.width, after.width);
+    assert_eq!(before.height, after.height);
+}
+
+fn visual_recipe_snapshot_rebinds_provider_state_after_capture_resize(harness: AppKitHarness) {
+    let host = harness.create_window(24.0, 24.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(24.0, 24.0));
+    let marker = SolidFillView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(12.0, 12.0)),
+    );
+    root.addSubview(&marker);
+    host.set_content_view(&root);
+    host.set_scene_source(Box::new(ResizeAwareVisualRecipeProvider {
+        root: unsafe {
+            Retained::retain(&*root as *const NSView as *mut NSView)
+                .expect("root view should retain for provider")
+        },
+    }));
+    harness.settle(2);
+
+    let before = host.window().frame().size;
+    let scene = host.snapshot_scene();
+    let after = host.window().frame().size;
+    let handle = scene
+        .find(&NodePredicate::selector_eq("provider.visual"))
+        .expect("visual recipe should resolve after capture-time resize");
+    let node = scene
+        .node(handle)
+        .expect("resolved recipe should be present");
+
+    assert!(after.width > before.width);
+    assert!(node.rect.origin.x > before.width);
+    assert!(scene.recipe_errors().is_empty());
+}
+
+fn visual_recipe_root_region_resolution_uses_post_capture_root_bounds(harness: AppKitHarness) {
+    let host = harness.create_window(24.0, 24.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(24.0, 24.0));
+    let marker = SolidFillView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(12.0, 12.0)),
+    );
+    root.addSubview(&marker);
+    host.set_content_view(&root);
+    host.set_scene_source(Box::new(ResizeAwareVisualRecipeProvider {
+        root: unsafe {
+            Retained::retain(&*root as *const NSView as *mut NSView)
+                .expect("root view should retain for provider")
+        },
+    }));
+    harness.settle(2);
+
+    let before = host.window().frame().size;
+    let resolved = host
+        .resolve_region(&glasscheck_core::RegionSpec::root())
+        .expect("root region should resolve after capture-time resize");
+    let after = host.window().frame().size;
+    let root_bounds = root.bounds();
+
+    assert!(after.width > before.width);
+    assert_eq!(resolved.size.width, root_bounds.size.width);
+    assert_eq!(resolved.size.height, root_bounds.size.height);
+    assert!(resolved.size.width > before.width);
+}
+
 fn registered_native_selectors_are_queryable(harness: AppKitHarness) {
     let host = harness.create_window(160.0, 120.0);
     let root = make_view(harness.main_thread_marker(), NSSize::new(160.0, 120.0));
@@ -379,6 +541,35 @@ fn registered_native_selectors_are_queryable(harness: AppKitHarness) {
     assert!(scene
         .find(&NodePredicate::selector_eq("missing.selector"))
         .is_err());
+}
+
+fn native_snapshot_marks_public_properties_with_native_provenance(harness: AppKitHarness) {
+    let host = harness.create_window(160.0, 120.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(160.0, 120.0));
+    let child = make_view(harness.main_thread_marker(), NSSize::new(40.0, 20.0));
+    root.addSubview(&child);
+    host.set_content_view(&root);
+    host.register_view(
+        &child,
+        InstrumentedView {
+            id: Some("native-child".into()),
+            role: Some(Role::ListItem),
+            label: Some("Loose".into()),
+            selectors: Vec::new(),
+        },
+    );
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let node = scene
+        .node(scene.find(&NodePredicate::id_eq("native-child")).unwrap())
+        .unwrap();
+
+    assert_eq!(node.provenance, NodeProvenanceKind::Native);
+    assert_eq!(
+        node.property_provenance.get("glasscheck:paint_order_path"),
+        Some(&NodeProvenanceKind::Native)
+    );
 }
 
 fn resolve_hit_point_supports_selector_lookup_and_missing_errors(harness: AppKitHarness) {
@@ -451,6 +642,27 @@ fn registered_views_leave_active_root_subtree_cleanly(harness: AppKitHarness) {
         .find(&NodePredicate::id_eq("detached-child"))
         .unwrap_err();
     assert!(matches!(error, QueryError::NotFoundPredicate(_)));
+}
+
+fn provider_unique_ids_record_source_id_provenance(harness: AppKitHarness) {
+    let host = harness.create_window(160.0, 120.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(160.0, 120.0));
+    host.set_content_view(&root);
+    host.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let handle = scene.find(&NodePredicate::id_eq("provider-node")).unwrap();
+    let node = scene.node(handle).unwrap();
+
+    assert_eq!(
+        node.properties.get("glasscheck:source_id"),
+        Some(&PropertyValue::string("provider-node"))
+    );
+    assert_eq!(
+        node.property_provenance.get("glasscheck:source_id"),
+        Some(&NodeProvenanceKind::Declared)
+    );
 }
 
 fn attached_window_registry_drops_nodes_after_content_swap(harness: AppKitHarness) {
@@ -1270,6 +1482,155 @@ fn stock_button_click_outside_does_not_invoke_action(harness: AppKitHarness) {
     assert_eq!(target.ivars().actions.get(), 0);
 }
 
+fn scene_source_recipes_support_external_offsets(harness: AppKitHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(220.0, 140.0));
+    host.set_content_view(&root);
+    host.set_scene_source(Box::new(OffsetRecipeProvider));
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let handle = scene
+        .find(&NodePredicate::selector_eq("provider.adjacent"))
+        .expect("offset recipe node should resolve");
+    let node = scene.node(handle).unwrap();
+    assert_eq!(
+        node.rect,
+        Rect::new(Point::new(110.0, 20.0), Size::new(40.0, 20.0))
+    );
+}
+
+fn scene_source_recipe_hit_target_uses_window_coordinates(harness: AppKitHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = PointTrackingClickView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(220.0, 140.0)),
+    );
+    let pinned = NullHitTrackingContainerView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(60.0, 20.0), NSSize::new(100.0, 60.0)),
+    );
+    root.addSubview(&pinned);
+    host.set_content_view(&root);
+    harness.settle(2);
+
+    let attached = AppKitWindowHost::from_root_view(&pinned, Some(host.window()));
+    attached.set_scene_source(Box::new(ExplicitHitTargetRecipeProvider));
+    harness.settle(2);
+
+    let hit_point = attached
+        .resolve_hit_point(
+            &NodePredicate::selector_eq("provider.hit-target"),
+            &HitPointSearch::default(),
+        )
+        .expect("recipe hit target should resolve in window coordinates");
+    assert_eq!(hit_point, Point::new(81.0, 33.0));
+
+    attached
+        .click_node(&NodePredicate::selector_eq("provider.hit-target"))
+        .expect("recipe hit target should be clickable");
+    harness.settle(2);
+
+    assert_eq!(root.ivars().mouse_downs.get(), 1);
+    assert_eq!(root.ivars().last_click_x.get(), 81.0);
+    assert_eq!(root.ivars().last_click_y.get(), 33.0);
+}
+
+fn scene_source_recipe_hit_target_respects_search_strategy(harness: AppKitHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = PointTrackingClickView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(220.0, 140.0)),
+    );
+    let pinned = NullHitTrackingContainerView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(60.0, 20.0), NSSize::new(100.0, 60.0)),
+    );
+    root.addSubview(&pinned);
+    host.set_content_view(&root);
+    harness.settle(2);
+
+    let attached = AppKitWindowHost::from_root_view(&pinned, Some(host.window()));
+    attached.set_scene_source(Box::new(ExplicitHitTargetRecipeProvider));
+    harness.settle(2);
+
+    let search = HitPointSearch {
+        strategy: HitPointStrategy::CornersAndCenter,
+        sample_count: 5,
+    };
+    let hit_point = attached
+        .resolve_hit_point(&NodePredicate::selector_eq("provider.hit-target"), &search)
+        .expect("recipe hit target should respect the requested search strategy");
+    assert_eq!(hit_point, Point::new(80.0, 32.0));
+
+    attached
+        .click_node_with_search(&NodePredicate::selector_eq("provider.hit-target"), &search)
+        .expect("recipe hit target click should use the searched point");
+    harness.settle(2);
+
+    assert_eq!(root.ivars().mouse_downs.get(), 1);
+    assert_eq!(root.ivars().last_click_x.get(), 80.0);
+    assert_eq!(root.ivars().last_click_y.get(), 32.0);
+}
+
+fn scene_source_recipe_clicks_with_explicit_hit_target_even_when_locator_rect_is_empty(
+    harness: AppKitHarness,
+) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = PointTrackingClickView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(220.0, 140.0)),
+    );
+    host.set_content_view(&root);
+    host.set_scene_source(Box::new(ExplicitHitTargetOnlyRecipeProvider));
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let node = scene
+        .node(
+            scene
+                .find(&NodePredicate::selector_eq("provider.hit-target-only"))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(node.rect.size, Size::new(0.0, 0.0));
+
+    let hit_point = host
+        .resolve_hit_point(
+            &NodePredicate::selector_eq("provider.hit-target-only"),
+            &HitPointSearch::default(),
+        )
+        .expect("explicit hit target should resolve even when the main rect is empty");
+    assert_eq!(hit_point, Point::new(21.0, 13.0));
+
+    host.click_node(&NodePredicate::selector_eq("provider.hit-target-only"))
+        .expect("explicit hit target should drive clicks even when the main rect is empty");
+    harness.settle(2);
+
+    assert_eq!(root.ivars().mouse_downs.get(), 1);
+    assert_eq!(root.ivars().last_click_x.get(), 21.0);
+    assert_eq!(root.ivars().last_click_y.get(), 13.0);
+}
+
+fn scene_source_recipe_is_omitted_when_anchor_is_missing(harness: AppKitHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(220.0, 140.0));
+    host.set_content_view(&root);
+    host.set_scene_source(Box::new(MissingAnchorRecipeProvider));
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    assert_eq!(scene.recipe_errors().len(), 1);
+    assert_eq!(scene.recipe_errors()[0].recipe_id, "adjacent");
+    assert!(matches!(
+        scene.recipe_errors()[0].error,
+        RegionResolveError::NotFound(_)
+    ));
+    assert!(scene
+        .find(&NodePredicate::selector_eq("provider.adjacent"))
+        .is_err());
+}
+
 fn sidebar_row_alignment_assertion_passes(harness: AppKitHarness) {
     let row_rect = Rect::new(Point::new(12.0, 18.0), Size::new(220.0, 24.0));
     let text_rect = Rect::new(Point::new(16.0, 21.0), Size::new(180.0, 18.0));
@@ -1516,6 +1877,40 @@ fn provider_namespacing_preserves_existing_source_id_property(harness: AppKitHar
     );
 }
 
+fn capture_region_uses_same_provider_snapshot_as_pixels(harness: AppKitHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(220.0, 140.0));
+    let button = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str("Move Me"),
+            None,
+            None,
+            harness.main_thread_marker(),
+        )
+    };
+    button.setFrame(NSRect::new(
+        NSPoint::new(260.0, 24.0),
+        NSSize::new(120.0, 32.0),
+    ));
+    root.addSubview(&button);
+    host.set_content_view(&root);
+    host.set_semantic_provider(Box::new(MovingRecipeProvider { button }));
+    harness.settle(2);
+
+    let image = host
+        .capture_region(&glasscheck_core::RegionSpec::node(
+            NodePredicate::selector_eq("provider.target"),
+        ))
+        .expect("capture should resolve the provider recipe");
+
+    assert_eq!(image.width, 120);
+    assert_eq!(image.height, 32);
+    assert!(
+        image.bright_pixel_fraction(0.95) < 1.0,
+        "captured region should contain the moved button rather than a blank background"
+    );
+}
+
 fn provider_namespacing_marks_unresolved_native_parent_reference_as_ambiguous(
     harness: AppKitHarness,
 ) {
@@ -1654,17 +2049,14 @@ fn provider_parent_repair_marks_ambiguous_native_parents_without_namespacing(
         .find(&NodePredicate::id_eq("provider-card/label"))
         .unwrap();
 
-    assert_eq!(
-        scene.node(provider_child).unwrap().parent_id.as_deref(),
-        Some("battlefield")
-    );
+    assert_eq!(scene.node(provider_child).unwrap().parent_id, None);
     assert_eq!(
         scene
             .node(provider_child)
             .unwrap()
             .properties
             .get("glasscheck:ambiguous_parent_id"),
-        None
+        Some(&PropertyValue::string("battlefield"))
     );
 }
 
@@ -2234,6 +2626,27 @@ impl RoutingTrackingView {
     }
 }
 
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    struct SolidFillView;
+
+    impl SolidFillView {
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty_rect: NSRect) {
+            NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 0.0, 0.0, 1.0).setFill();
+            NSBezierPath::fillRect(self.bounds());
+        }
+    }
+);
+
+impl SolidFillView {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(());
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
 #[derive(Default)]
 struct CardSceneProvider;
 
@@ -2547,6 +2960,158 @@ impl SemanticProvider for ProviderOnlySceneProvider {
         .with_label("Provider Node")
         .with_selector("provider.node")
         .with_property("provider", PropertyValue::Bool(true))]
+    }
+}
+
+struct OffsetRecipeProvider;
+
+impl SemanticProvider for OffsetRecipeProvider {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        vec![SemanticNode::new(
+            "anchor",
+            Role::Container,
+            Rect::new(Point::new(20.0, 20.0), Size::new(40.0, 20.0)),
+        )
+        .with_selector("provider.anchor")]
+    }
+
+    fn snapshot_recipes(&self) -> Vec<NodeRecipe> {
+        vec![NodeRecipe::new(
+            "adjacent",
+            Role::Button,
+            glasscheck_core::RegionSpec::node(NodePredicate::selector_eq("provider.anchor"))
+                .right_of(50.0, 40.0),
+        )
+        .with_selector("provider.adjacent")]
+    }
+}
+
+struct MovingRecipeProvider {
+    button: Retained<NSButton>,
+}
+
+impl SemanticProvider for MovingRecipeProvider {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        self.button.setFrame(NSRect::new(
+            NSPoint::new(24.0, 24.0),
+            NSSize::new(120.0, 32.0),
+        ));
+        vec![SemanticNode::new(
+            "anchor",
+            Role::Button,
+            Rect::new(Point::new(24.0, 24.0), Size::new(120.0, 32.0)),
+        )
+        .with_selector("provider.anchor")]
+    }
+
+    fn snapshot_recipes(&self) -> Vec<NodeRecipe> {
+        vec![NodeRecipe::new(
+            "captured-button",
+            Role::Button,
+            glasscheck_core::RegionSpec::node(NodePredicate::selector_eq("provider.anchor")),
+        )
+        .with_selector("provider.target")]
+    }
+}
+
+struct ResizeAwareVisualRecipeProvider {
+    root: Retained<NSView>,
+}
+
+impl SemanticProvider for ResizeAwareVisualRecipeProvider {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        let bounds = self.root.bounds();
+        vec![SemanticNode::new(
+            "anchor",
+            Role::Image,
+            Rect::new(
+                Point::new((bounds.size.width - 12.0).max(0.0), 2.0),
+                Size::new(12.0, 12.0),
+            ),
+        )
+        .with_selector("provider.anchor")]
+    }
+
+    fn snapshot_recipes(&self) -> Vec<NodeRecipe> {
+        vec![NodeRecipe::new(
+            "visual-anchor",
+            Role::Image,
+            glasscheck_core::RegionSpec::node(NodePredicate::selector_eq("provider.anchor")),
+        )
+        .with_hit_target(
+            glasscheck_core::RegionSpec::rect(Rect::new(
+                Point::new(0.0, 0.0),
+                Size::new(12.0, 12.0),
+            ))
+            .pixel_probe(PixelProbe::new(PixelMatch::new([255, 0, 0, 255], 0, 1), 1)),
+        )
+        .with_selector("provider.visual")]
+    }
+}
+
+struct MissingAnchorRecipeProvider;
+
+impl SemanticProvider for MissingAnchorRecipeProvider {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        Vec::new()
+    }
+
+    fn snapshot_recipes(&self) -> Vec<NodeRecipe> {
+        vec![NodeRecipe::new(
+            "adjacent",
+            Role::Button,
+            glasscheck_core::RegionSpec::node(NodePredicate::selector_eq("provider.anchor"))
+                .right_of(50.0, 40.0),
+        )
+        .with_selector("provider.adjacent")]
+    }
+}
+
+struct ExplicitHitTargetRecipeProvider;
+
+impl SemanticProvider for ExplicitHitTargetRecipeProvider {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        Vec::new()
+    }
+
+    fn snapshot_recipes(&self) -> Vec<NodeRecipe> {
+        vec![NodeRecipe::new(
+            "provider.hit-target",
+            Role::Button,
+            glasscheck_core::RegionSpec::rect(Rect::new(
+                Point::new(10.0, 10.0),
+                Size::new(60.0, 30.0),
+            )),
+        )
+        .with_selector("provider.hit-target")
+        .with_hit_target(glasscheck_core::RegionSpec::rect(Rect::new(
+            Point::new(20.0, 12.0),
+            Size::new(2.0, 2.0),
+        )))]
+    }
+}
+
+struct ExplicitHitTargetOnlyRecipeProvider;
+
+impl SemanticProvider for ExplicitHitTargetOnlyRecipeProvider {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        Vec::new()
+    }
+
+    fn snapshot_recipes(&self) -> Vec<NodeRecipe> {
+        vec![NodeRecipe::new(
+            "provider.hit-target-only",
+            Role::Button,
+            glasscheck_core::RegionSpec::rect(Rect::new(
+                Point::new(10.0, 10.0),
+                Size::new(0.0, 0.0),
+            )),
+        )
+        .with_selector("provider.hit-target-only")
+        .with_hit_target(glasscheck_core::RegionSpec::rect(Rect::new(
+            Point::new(20.0, 12.0),
+            Size::new(2.0, 2.0),
+        )))]
     }
 }
 
