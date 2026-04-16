@@ -1,11 +1,13 @@
 #![cfg(target_os = "linux")]
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::Duration;
 
 use glasscheck_core::{
     KeyModifiers, NodeRecipe, PixelMatch, PixelProbe, Point, PollOptions, PropertyValue, Rect,
     RegionResolveError, RegionSpec, Role, Selector, SemanticNode, SemanticProvider, Size,
-    TextRange,
+    SurfaceId, TextRange, TransientSurfaceSpec,
 };
 use glasscheck_gtk::{
     GtkHarness, GtkWindowHost, HitPointSearch, HitPointStrategy, InstrumentedWidget,
@@ -85,6 +87,12 @@ fn main() {
     run("visual_recipe_probe_omits_missing_match", || {
         visual_recipe_probe_omits_missing_match(harness)
     });
+    run("session_opens_owned_transient_window_and_evicts_it", || {
+        session_opens_owned_transient_window_and_evicts_it(harness)
+    });
+    run("session_opens_popover_transient_and_evicts_it", || {
+        session_opens_popover_transient_and_evicts_it(harness)
+    });
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -117,6 +125,7 @@ fn attach_to_existing_window_builds_scene_snapshot(harness: GtkHarness) {
             id: Some("row".into()),
             role: Some(Role::ListItem),
             label: Some("Draft".into()),
+            ..Default::default()
         },
     );
     harness.settle(4);
@@ -128,6 +137,7 @@ fn attach_to_existing_window_builds_scene_snapshot(harness: GtkHarness) {
             id: Some("row".into()),
             role: Some(Role::ListItem),
             label: Some("Draft".into()),
+            ..Default::default()
         },
     );
 
@@ -176,6 +186,7 @@ fn root_widget_only_host_without_window_is_safe(harness: GtkHarness) {
             id: Some("root".into()),
             role: Some(Role::Button),
             label: Some("Root".into()),
+            ..Default::default()
         },
     );
     harness.settle(2);
@@ -650,6 +661,130 @@ fn visual_recipe_probe_omits_missing_match(harness: GtkHarness) {
     ));
 }
 
+fn session_opens_owned_transient_window_and_evicts_it(harness: GtkHarness) {
+    let inserted = Rc::new(Cell::new(false));
+    let host = harness.create_window(320.0, 220.0);
+    let root = fixed_root(320, 220);
+    let chooser = gtk4::Window::builder()
+        .default_width(180)
+        .default_height(90)
+        .transient_for(host.window())
+        .build();
+    let chooser_root = fixed_root(180, 90);
+    let chooser_button = gtk4::Button::with_label("Insert Table");
+    chooser_button.set_size_request(120, 32);
+    chooser_root.put(&chooser_button, 16.0, 20.0);
+    chooser.set_child(Some(&chooser_root));
+    let chooser_clone = chooser.clone();
+    let inserted_clone = inserted.clone();
+    chooser_button.connect_clicked(move |_| {
+        inserted_clone.set(true);
+        chooser_clone.close();
+    });
+
+    let open = gtk4::Button::with_label("Open Picker");
+    open.set_size_request(120, 32);
+    let chooser_clone = chooser.clone();
+    open.connect_clicked(move |_| chooser_clone.present());
+    root.put(&open, 20.0, 24.0);
+    host.set_root(&root);
+    host.register_node(&open, node("open-picker", Role::Button, "Open Picker"));
+    host.set_semantic_provider(Box::new(InsertedGtkTableScene {
+        inserted: inserted.clone(),
+    }));
+    harness.settle(4);
+
+    let session = harness.session();
+    session.attach_host("main", host);
+    session
+        .open_transient_with_click(
+            "picker",
+            &TransientSurfaceSpec::new("main", Selector::id_eq("open-picker")),
+            PollOptions::default(),
+        )
+        .expect("session should attach the transient child window");
+    session.with_surface(&SurfaceId::new("picker"), |picker| {
+        picker.register_node(
+            &chooser_button,
+            node("insert-table", Role::Button, "Insert Table"),
+        );
+    });
+    harness.settle(4);
+
+    session
+        .click_node(&SurfaceId::new("picker"), &Selector::id_eq("insert-table"))
+        .expect("picker surface should be attached")
+        .expect("click inside transient surface should succeed");
+    session
+        .wait_for_surface_closed(&SurfaceId::new("picker"), PollOptions::default())
+        .expect("closed transient should be evicted");
+    assert!(!session.surface_is_open(&SurfaceId::new("picker")));
+
+    let main_scene = session
+        .snapshot_scene(&SurfaceId::new("main"))
+        .expect("main surface should remain attached");
+    assert!(main_scene.find(&Selector::id_eq("inserted-table")).is_ok());
+}
+
+fn session_opens_popover_transient_and_evicts_it(harness: GtkHarness) {
+    let inserted = Rc::new(Cell::new(false));
+    let host = harness.create_window(320.0, 220.0);
+    let root = fixed_root(320, 220);
+    let popover = gtk4::Popover::new();
+    let chooser_button = gtk4::Button::with_label("Insert Table");
+    chooser_button.set_size_request(120, 32);
+    popover.set_child(Some(&chooser_button));
+    let popover_clone = popover.clone();
+    let inserted_clone = inserted.clone();
+    chooser_button.connect_clicked(move |_| {
+        inserted_clone.set(true);
+        popover_clone.popdown();
+    });
+
+    let open = gtk4::MenuButton::new();
+    open.set_label("Open Picker");
+    open.set_size_request(120, 32);
+    open.set_popover(Some(&popover));
+    root.put(&open, 20.0, 24.0);
+    host.set_root(&root);
+    host.register_node(&open, node("open-picker", Role::Button, "Open Picker"));
+    host.set_semantic_provider(Box::new(InsertedGtkTableScene {
+        inserted: inserted.clone(),
+    }));
+    harness.settle(4);
+
+    let session = harness.session();
+    session.attach_host("main", host);
+    session
+        .open_transient_with_click(
+            "picker",
+            &TransientSurfaceSpec::new("main", Selector::id_eq("open-picker")),
+            PollOptions::default(),
+        )
+        .expect("session should attach the transient popover");
+    session.with_surface(&SurfaceId::new("picker"), |picker| {
+        picker.register_node(
+            &chooser_button,
+            node("insert-table", Role::Button, "Insert Table"),
+        );
+    });
+    harness.settle(4);
+
+    session
+        .click_node(&SurfaceId::new("picker"), &Selector::id_eq("insert-table"))
+        .expect("picker surface should be attached")
+        .expect("click inside transient popover should succeed");
+    session
+        .wait_for_surface_closed(&SurfaceId::new("picker"), PollOptions::default())
+        .expect("dismissed popover should be evicted");
+    assert!(!session.surface_is_open(&SurfaceId::new("picker")));
+
+    let main_scene = session
+        .snapshot_scene(&SurfaceId::new("main"))
+        .expect("main surface should remain attached");
+    assert!(main_scene.find(&Selector::id_eq("inserted-table")).is_ok());
+}
+
 fn fixed_root(width: i32, height: i32) -> gtk4::Fixed {
     let root = gtk4::Fixed::new();
     root.set_size_request(width, height);
@@ -697,6 +832,7 @@ fn node(id: &str, role: Role, label: &str) -> InstrumentedWidget {
         id: Some(id.into()),
         role: Some(role),
         label: Some(label.into()),
+        ..Default::default()
     }
 }
 
@@ -771,6 +907,25 @@ impl SemanticProvider for HitTargetOnlyRecipeProvider {
             Point::new(40.0, 40.0),
             Size::new(60.0, 30.0),
         )))]
+    }
+}
+
+struct InsertedGtkTableScene {
+    inserted: Rc<Cell<bool>>,
+}
+
+impl SemanticProvider for InsertedGtkTableScene {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        self.inserted
+            .get()
+            .then(|| {
+                vec![SemanticNode::new(
+                    "inserted-table",
+                    Role::Container,
+                    Rect::new(Point::new(24.0, 70.0), Size::new(220.0, 110.0)),
+                )]
+            })
+            .unwrap_or_default()
     }
 }
 

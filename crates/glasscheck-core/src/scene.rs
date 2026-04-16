@@ -1011,6 +1011,11 @@ impl Scene {
 
 /// Application-supplied virtual semantic provider.
 pub trait SemanticProvider {
+    /// Produces the current semantic snapshot for the live scene.
+    fn snapshot(&self) -> crate::SemanticSnapshot {
+        crate::SemanticSnapshot::new(self.snapshot_nodes(), self.snapshot_recipes())
+    }
+
     /// Produces the current semantic nodes for the live scene.
     fn snapshot_nodes(&self) -> Vec<SemanticNode>;
 

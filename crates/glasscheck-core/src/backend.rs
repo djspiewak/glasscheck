@@ -17,6 +17,120 @@ pub struct InstrumentedNode {
     pub role: Option<Role>,
     /// Human-readable label.
     pub label: Option<String>,
+    /// Stable test-facing selectors or aliases.
+    pub selectors: Vec<String>,
+    /// Structured state exposed on the native node.
+    pub state: BTreeMap<String, PropertyValue>,
+    /// Structured properties exposed on the native node.
+    pub properties: BTreeMap<String, PropertyValue>,
+}
+
+/// Unified provider output captured for one semantic snapshot.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SemanticSnapshot {
+    /// Materialized semantic nodes.
+    pub nodes: Vec<SemanticNode>,
+    /// Declarative recipes resolved against the same snapshot.
+    pub recipes: Vec<crate::NodeRecipe>,
+}
+
+impl SemanticSnapshot {
+    /// Creates a snapshot from nodes and recipes.
+    #[must_use]
+    pub fn new(nodes: Vec<SemanticNode>, recipes: Vec<crate::NodeRecipe>) -> Self {
+        Self { nodes, recipes }
+    }
+
+    /// Creates a snapshot containing only concrete nodes.
+    #[must_use]
+    pub fn from_nodes(nodes: Vec<SemanticNode>) -> Self {
+        Self {
+            nodes,
+            recipes: Vec::new(),
+        }
+    }
+}
+
+/// Stable identifier for one attached surface inside a logical session.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SurfaceId(String);
+
+impl SurfaceId {
+    /// Creates a surface identifier from a stable string.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// Borrows the raw identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for SurfaceId {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for SurfaceId {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+/// Query used by session helpers to discover transient surfaces.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SurfaceQuery {
+    /// Matches a surface title exactly.
+    TitleEquals(String),
+    /// Matches a surface title by substring.
+    TitleContains(String),
+}
+
+impl SurfaceQuery {
+    /// Builds an exact-title query.
+    #[must_use]
+    pub fn title_eq(title: impl Into<String>) -> Self {
+        Self::TitleEquals(title.into())
+    }
+
+    /// Builds a contains-title query.
+    #[must_use]
+    pub fn title_contains(title: impl Into<String>) -> Self {
+        Self::TitleContains(title.into())
+    }
+
+    /// Returns whether `title` satisfies this query.
+    #[must_use]
+    pub fn matches_title(&self, title: &str) -> bool {
+        match self {
+            Self::TitleEquals(expected) => title == expected,
+            Self::TitleContains(expected) => title.contains(expected),
+        }
+    }
+}
+
+/// Owner-aware specification for opening and attaching a transient surface.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransientSurfaceSpec {
+    /// Surface that owns the transient.
+    pub owner: SurfaceId,
+    /// Semantic selector for the control that opens the transient.
+    pub opener: crate::Selector,
+}
+
+impl TransientSurfaceSpec {
+    /// Creates a transient-surface spec from an owner surface and opener selector.
+    #[must_use]
+    pub fn new(owner: impl Into<SurfaceId>, opener: crate::Selector) -> Self {
+        Self {
+            owner: owner.into(),
+            opener,
+        }
+    }
 }
 
 /// Backend-neutral key modifier state.
@@ -340,8 +454,11 @@ pub fn crop_image_bottom_left(image: &Image, rect: Rect) -> Image {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_provider_nodes;
-    use crate::{NodeProvenanceKind, Point, PropertyValue, Rect, Role, SemanticNode, Size};
+    use super::{normalize_provider_nodes, TransientSurfaceSpec};
+    use crate::{
+        NodeProvenanceKind, Point, PropertyValue, Rect, Role, Selector, SemanticNode, Size,
+        SurfaceId,
+    };
     use std::collections::BTreeSet;
 
     fn rect() -> Rect {
@@ -405,5 +522,13 @@ mod tests {
             nodes[0].property_provenance.get("glasscheck:source_id"),
             Some(&NodeProvenanceKind::Declared)
         );
+    }
+
+    #[test]
+    fn transient_surface_spec_captures_owner_and_opener() {
+        let spec = TransientSurfaceSpec::new("editor", Selector::id_eq("open-table-picker"));
+
+        assert_eq!(spec.owner, SurfaceId::new("editor"));
+        assert_eq!(spec.opener, Selector::id_eq("open-table-picker"));
     }
 }

@@ -6,8 +6,8 @@ mod imp {
     use glasscheck_core::{
         crop_image_bottom_left, normalize_provider_nodes, registered_node_id, resolve_node_recipes,
         HitPointSearch, HitPointStrategy, Image, InputSynthesisError, InstrumentedNode,
-        NodeProvenanceKind, NodeRecipe, Point, PropertyValue, Rect, RegionResolveError, RegionSpec,
-        Role, Scene, Selector, SemanticNode, SemanticProvider, Size, TextRange,
+        NodeProvenanceKind, Point, PropertyValue, Rect, RegionResolveError, RegionSpec, Role,
+        Scene, Selector, SemanticNode, SemanticProvider, SemanticSnapshot, Size, TextRange,
     };
     use gtk4::graphene;
     use gtk4::prelude::*;
@@ -22,7 +22,55 @@ mod imp {
         descriptor: InstrumentedNode,
     }
 
-    type ProviderSnapshot = (Vec<SemanticNode>, Vec<NodeRecipe>);
+    type ProviderSnapshot = SemanticSnapshot;
+
+    /// Host-aware contextual semantic provider for GTK scenes.
+    pub trait GtkSceneSource {
+        /// Produces the semantic snapshot for the active GTK host.
+        fn snapshot(&self, context: &GtkSnapshotContext<'_>) -> SemanticSnapshot;
+    }
+
+    /// Host-aware geometry helpers for GTK semantic providers.
+    pub struct GtkSnapshotContext<'a> {
+        host: &'a GtkWindowHost,
+    }
+
+    impl<'a> GtkSnapshotContext<'a> {
+        fn new(host: &'a GtkWindowHost) -> Self {
+            Self { host }
+        }
+
+        #[must_use]
+        pub fn root_bounds(&self) -> Rect {
+            self.host.root_bounds()
+        }
+
+        #[must_use]
+        pub fn widget_rect(&self, widget: &Widget) -> Option<Rect> {
+            let root = self.host.root_widget()?;
+            rect_of_widget(widget, Some(&root))
+        }
+
+        #[must_use]
+        pub fn visible_rect(&self, widget: &Widget) -> Option<Rect> {
+            visible_rect_of_widget(widget, self.host.root_widget().as_ref())
+        }
+
+        #[must_use]
+        pub fn text_range_rect(&self, view: &TextView, range: TextRange) -> Option<Rect> {
+            self.host.text_range_rect(view, range)
+        }
+
+        #[must_use]
+        pub fn insertion_caret_rect(&self, view: &TextView, location: usize) -> Option<Rect> {
+            self.host.insertion_caret_rect(view, location)
+        }
+
+        #[must_use]
+        pub fn selected_text_range(&self, view: &TextView) -> TextRange {
+            self.host.selected_text_range(view)
+        }
+    }
 
     struct ResolvedClickTarget {
         root_widget: Widget,
@@ -39,7 +87,7 @@ mod imp {
         window: Window,
         root_widget: RefCell<Option<Widget>>,
         registry: RefCell<Vec<RegisteredWidget>>,
-        provider: RefCell<Option<Box<dyn SemanticProvider>>>,
+        provider: RefCell<Option<Box<dyn GtkSceneSource>>>,
         owns_window: bool,
         detached_root_widget: bool,
         tracks_window_child: bool,
@@ -126,12 +174,17 @@ mod imp {
         /// This is useful for semantic overlays or logical nodes that are not
         /// represented by a single concrete widget.
         pub fn set_semantic_provider(&self, provider: Box<dyn SemanticProvider>) {
-            *self.provider.borrow_mut() = Some(provider);
+            self.set_contextual_scene_source(Box::new(LegacyGtkSceneSource { provider }));
         }
 
         /// Preferred name for registering a pull-based scene source.
         pub fn set_scene_source(&self, provider: Box<dyn SemanticProvider>) {
             self.set_semantic_provider(provider);
+        }
+
+        /// Registers a host-aware GTK scene source.
+        pub fn set_contextual_scene_source(&self, provider: Box<dyn GtkSceneSource>) {
+            *self.provider.borrow_mut() = Some(provider);
         }
 
         /// Captures the current root widget as an image.
@@ -205,6 +258,15 @@ mod imp {
                 .map(|target| target.point)
         }
 
+        /// Resolves a semantic hit point in root coordinates.
+        pub fn resolve_root_hit_point(
+            &self,
+            predicate: &Selector,
+            search: &HitPointSearch,
+        ) -> Result<Point, RegionResolveError> {
+            self.resolve_hit_point(predicate, search)
+        }
+
         /// Clicks the unique node matching `predicate` using semantic hit-point search.
         ///
         /// This is a best-effort semantic interaction helper. It may use
@@ -223,6 +285,16 @@ mod imp {
             }
             self.input().click(target.point).map_err(map_input_error)?;
             Ok(())
+        }
+
+        /// Moves the pointer to the semantic hit point of the unique node.
+        pub fn hover_node(
+            &self,
+            predicate: &Selector,
+            search: &HitPointSearch,
+        ) -> Result<(), RegionResolveError> {
+            let point = self.resolve_hit_point(predicate, search)?;
+            self.input().move_mouse(point).map_err(map_input_error)
         }
 
         /// Returns a text-rendering harness that uses this host for live capture.
@@ -276,6 +348,35 @@ mod imp {
             )
         }
 
+        /// Returns the selected scalar range in a live `TextView`.
+        #[must_use]
+        pub fn selected_text_range(&self, view: &TextView) -> TextRange {
+            let buffer = view.buffer();
+            if let Some((start, end)) = buffer.selection_bounds() {
+                return TextRange::new(
+                    start.offset() as usize,
+                    (end.offset() - start.offset()).max(0) as usize,
+                );
+            }
+            let offset = buffer.cursor_position().max(0) as usize;
+            TextRange::new(offset, 0)
+        }
+
+        /// Clicks the insertion point for `location` in `view`.
+        pub fn click_text_position(
+            &self,
+            view: &TextView,
+            location: usize,
+        ) -> Result<(), InputSynthesisError> {
+            let Some(rect) = self.insertion_caret_rect(view, location) else {
+                return Err(InputSynthesisError::MissingTarget);
+            };
+            self.input().click(Point::new(
+                rect.origin.x + (rect.size.width / 2.0).max(0.5),
+                rect.origin.y + (rect.size.height / 2.0).max(0.5),
+            ))
+        }
+
         /// Registers semantic metadata for a widget so it can be queried later.
         pub fn register_node(&self, widget: &impl IsA<Widget>, descriptor: InstrumentedNode) {
             self.registry.borrow_mut().push(RegisteredWidget {
@@ -299,10 +400,11 @@ mod imp {
             let provider_snapshot = self.provider_snapshot();
             let image = provider_snapshot
                 .as_ref()
-                .and_then(|(_, recipes)| {
-                    recipes
+                .and_then(|snapshot| {
+                    snapshot
+                        .recipes
                         .iter()
-                        .any(NodeRecipe::requires_image)
+                        .any(|recipe| recipe.requires_image())
                         .then(|| self.capture())
                 })
                 .flatten()
@@ -350,6 +452,26 @@ mod imp {
                     )
                     .with_provenance(NodeProvenanceKind::Native);
                     node.label = entry.descriptor.label.clone();
+                    node.selectors
+                        .extend(entry.descriptor.selectors.iter().cloned());
+                    node.state.extend(entry.descriptor.state.clone());
+                    node.properties.extend(entry.descriptor.properties.clone());
+                    node.state_provenance.extend(
+                        entry
+                            .descriptor
+                            .state
+                            .keys()
+                            .cloned()
+                            .map(|key| (key, NodeProvenanceKind::Native)),
+                    );
+                    node.property_provenance.extend(
+                        entry
+                            .descriptor
+                            .properties
+                            .keys()
+                            .cloned()
+                            .map(|key| (key, NodeProvenanceKind::Native)),
+                    );
                     node.visible = entry.widget.is_visible();
                     node.visible_rect = visible_rect;
                     node.hit_testable = entry.widget.can_target();
@@ -370,17 +492,17 @@ mod imp {
                 })
                 .collect();
 
-            if let Some((provider_nodes, recipes)) = provider_snapshot {
+            if let Some(snapshot) = provider_snapshot {
                 let native_ids = nodes
                     .iter()
                     .map(|node| node.id.clone())
                     .collect::<BTreeSet<_>>();
-                nodes.extend(normalize_provider_nodes(provider_nodes, &native_ids));
-                if recipes.is_empty() {
+                nodes.extend(normalize_provider_nodes(snapshot.nodes, &native_ids));
+                if snapshot.recipes.is_empty() {
                     return (Scene::new(nodes), registered_indices);
                 }
                 let resolved_recipes =
-                    resolve_node_recipes(nodes, self.root_bounds(), image, &recipes);
+                    resolve_node_recipes(nodes, self.root_bounds(), image, &snapshot.recipes);
                 return (
                     Scene::with_recipe_errors(resolved_recipes.nodes, resolved_recipes.errors),
                     registered_indices,
@@ -394,9 +516,12 @@ mod imp {
         pub fn resolve_region(&self, region: &RegionSpec) -> Result<Rect, RegionResolveError> {
             let provider_snapshot = self.provider_snapshot();
             let image = (region.requires_image()
-                || provider_snapshot
-                    .as_ref()
-                    .is_some_and(|(_, recipes)| recipes.iter().any(NodeRecipe::requires_image)))
+                || provider_snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot
+                        .recipes
+                        .iter()
+                        .any(|recipe| recipe.requires_image())
+                }))
             .then(|| self.capture())
             .flatten()
             .map(|image| image.flip_vertical());
@@ -439,7 +564,7 @@ mod imp {
             self.provider
                 .borrow()
                 .as_ref()
-                .map(|provider| (provider.snapshot_nodes(), provider.snapshot_recipes()))
+                .map(|provider| provider.snapshot(&GtkSnapshotContext::new(self)))
         }
 
         fn registered_widget_for_handle(
@@ -850,13 +975,27 @@ mod imp {
             _ => None,
         }
     }
+
+    struct LegacyGtkSceneSource {
+        provider: Box<dyn SemanticProvider>,
+    }
+
+    impl GtkSceneSource for LegacyGtkSceneSource {
+        fn snapshot(&self, _context: &GtkSnapshotContext<'_>) -> SemanticSnapshot {
+            self.provider.snapshot()
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
 mod imp {
+    pub trait GtkSceneSource {}
+    pub struct GtkSnapshotContext<'a> {
+        _marker: std::marker::PhantomData<&'a ()>,
+    }
     pub struct GtkWindowHost;
 }
 
 #[cfg(target_os = "linux")]
 pub(crate) use imp::capture_widget_image;
-pub use imp::GtkWindowHost;
+pub use imp::{GtkSceneSource, GtkSnapshotContext, GtkWindowHost};

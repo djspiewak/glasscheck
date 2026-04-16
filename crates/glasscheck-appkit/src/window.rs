@@ -2,8 +2,9 @@
 mod imp {
     use glasscheck_core::{
         resolve_node_recipes, HitPointSearch, HitPointStrategy, Image, InputSynthesisError,
-        NodeProvenanceKind, NodeRecipe, Point, PropertyValue, Rect, RegionResolveError, RegionSpec,
-        Role, Scene, Selector, SemanticNode, SemanticProvider, Size, TextRange,
+        InstrumentedNode, NodeProvenanceKind, Point, PropertyValue, Rect, RegionResolveError,
+        RegionSpec, Role, Scene, Selector, SemanticNode, SemanticProvider, SemanticSnapshot, Size,
+        TextRange,
     };
     use objc2::runtime::AnyObject;
     use objc2::{msg_send, rc::Retained, ClassType, MainThreadOnly};
@@ -29,16 +30,16 @@ mod imp {
         Blocked,
     }
 
-    /// Semantic metadata registered for a view exposed to querying APIs.
-    ///
-    /// Keep this small and stable. Prefer selectors, roles, and labels that
-    /// reflect test intent rather than AppKit implementation details.
-    #[derive(Clone, Debug)]
+    /// Host-aware contextual semantic provider for AppKit scenes.
+    pub trait AppKitSceneSource {
+        /// Produces the semantic snapshot for the active AppKit host.
+        fn snapshot(&self, context: &AppKitSnapshotContext<'_>) -> SemanticSnapshot;
+    }
+
+    /// Compatibility descriptor for registered AppKit views.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct InstrumentedView {
-        /// Semantic identifier to expose in snapshots.
-        ///
-        /// Duplicate native identifiers are disambiguated when snapshots are built, so callers
-        /// should treat the resulting scene/query IDs as snapshot-local.
+        /// Stable semantic identifier.
         pub id: Option<String>,
         /// Semantic role.
         pub role: Option<Role>,
@@ -48,10 +49,70 @@ mod imp {
         pub selectors: Vec<String>,
     }
 
+    /// Host-aware geometry helpers for AppKit semantic providers.
+    pub struct AppKitSnapshotContext<'a> {
+        host: &'a AppKitWindowHost,
+    }
+
+    impl<'a> AppKitSnapshotContext<'a> {
+        fn new(host: &'a AppKitWindowHost) -> Self {
+            Self { host }
+        }
+
+        /// Returns the active root bounds in root coordinates.
+        #[must_use]
+        pub fn root_bounds(&self) -> Rect {
+            self.host.root_bounds()
+        }
+
+        /// Converts `rect` from `view` coordinates into root coordinates.
+        #[must_use]
+        pub fn convert_rect_from_view(&self, view: &NSView, rect: NSRect) -> Option<Rect> {
+            let root = self.host.root_view()?;
+            let rect = root.convertRect_fromView(rect, Some(view));
+            Some(Rect::new(
+                Point::new(rect.origin.x, rect.origin.y),
+                Size::new(rect.size.width, rect.size.height),
+            ))
+        }
+
+        /// Returns the bounds of `view` in root coordinates.
+        #[must_use]
+        pub fn view_rect(&self, view: &NSView) -> Option<Rect> {
+            self.host
+                .root_view()
+                .map(|root| rect_in_root(view, Some(&root)))
+        }
+
+        /// Returns the visible/clipped rect of `view` in root coordinates.
+        #[must_use]
+        pub fn visible_rect(&self, view: &NSView) -> Option<Rect> {
+            convert_visible_rect_to_root(view, self.host.root_view().as_deref())
+        }
+
+        /// Returns the root-space rect for a text range.
+        #[must_use]
+        pub fn text_range_rect(&self, view: &NSTextView, range: TextRange) -> Option<Rect> {
+            self.host.text_range_rect(view, range)
+        }
+
+        /// Returns the insertion caret rect for `location` in root coordinates.
+        #[must_use]
+        pub fn insertion_caret_rect(&self, view: &NSTextView, location: usize) -> Option<Rect> {
+            self.host.insertion_caret_rect(view, location)
+        }
+
+        /// Returns the selected scalar range for `view`.
+        #[must_use]
+        pub fn selected_text_range(&self, view: &NSTextView) -> TextRange {
+            self.host.selected_text_range(view)
+        }
+    }
+
     #[derive(Clone, Debug)]
     struct RegisteredView {
         view: Retained<NSView>,
-        descriptor: InstrumentedView,
+        descriptor: InstrumentedNode,
     }
 
     #[derive(Clone, Debug)]
@@ -60,7 +121,7 @@ mod imp {
         source_id: Option<String>,
     }
 
-    type ProviderSnapshot = (Vec<SemanticNode>, Vec<NodeRecipe>);
+    type ProviderSnapshot = SemanticSnapshot;
 
     /// AppKit window host used to build, capture, query, and drive a hidden test scene.
     ///
@@ -77,7 +138,7 @@ mod imp {
         window: Retained<NSWindow>,
         root_view: RefCell<Option<Retained<NSView>>>,
         registry: RefCell<Vec<RegisteredView>>,
-        provider: RefCell<Option<Box<dyn SemanticProvider>>>,
+        provider: RefCell<Option<Box<dyn AppKitSceneSource>>>,
         detached_root_view: bool,
         tracks_window_content: bool,
     }
@@ -212,12 +273,17 @@ mod imp {
         /// Use a provider when the test needs semantic nodes that do not map
         /// one-to-one onto concrete AppKit views.
         pub fn set_semantic_provider(&self, provider: Box<dyn SemanticProvider>) {
-            *self.provider.borrow_mut() = Some(provider);
+            self.set_contextual_scene_source(Box::new(LegacyAppKitSceneSource { provider }));
         }
 
         /// Preferred name for registering a pull-based scene source.
         pub fn set_scene_source(&self, provider: Box<dyn SemanticProvider>) {
             self.set_semantic_provider(provider);
+        }
+
+        /// Registers a host-aware AppKit scene source.
+        pub fn set_contextual_scene_source(&self, provider: Box<dyn AppKitSceneSource>) {
+            *self.provider.borrow_mut() = Some(provider);
         }
 
         /// Captures the current root view as an image.
@@ -302,6 +368,33 @@ mod imp {
             Ok(Point::new(point.x, point.y))
         }
 
+        /// Resolves a semantic hit point in root coordinates.
+        pub fn resolve_root_hit_point(
+            &self,
+            predicate: &Selector,
+            search: &HitPointSearch,
+        ) -> Result<Point, RegionResolveError> {
+            if self.detached_root_view {
+                return Err(RegionResolveError::DetachedRootView);
+            }
+            let scene = self.snapshot_scene();
+            let handle = scene.find(predicate).map_err(map_query_error)?;
+            let node = scene
+                .node(handle)
+                .ok_or(RegionResolveError::InvalidHandle(handle))?;
+            let root_view = self.root_view();
+            let registered_view = self.registered_view_for_handle(handle, root_view.as_deref());
+            let (point, _) = self
+                .click_target(
+                    root_view.as_deref(),
+                    registered_view.as_deref(),
+                    node,
+                    search,
+                )
+                .ok_or(RegionResolveError::InputUnavailable)?;
+            Ok(Point::new(point.x, point.y))
+        }
+
         /// Clicks the unique node matching `predicate` using semantic hit-point search.
         ///
         /// Standard `NSControl` targets are activated via `performClick:` when
@@ -349,6 +442,16 @@ mod imp {
                 .click(Point::new(point.x, point.y))
                 .map_err(map_input_error)?;
             Ok(())
+        }
+
+        /// Moves the pointer to the semantic hit point of the unique node.
+        pub fn hover_node(
+            &self,
+            predicate: &Selector,
+            search: &HitPointSearch,
+        ) -> Result<(), RegionResolveError> {
+            let point = self.resolve_hit_point(predicate, search)?;
+            self.input().move_mouse(point).map_err(map_input_error)
         }
 
         /// Returns a text-rendering harness that uses this host for live capture.
@@ -405,8 +508,49 @@ mod imp {
             ))
         }
 
+        /// Returns the selected scalar range in a live `NSTextView`.
+        #[must_use]
+        pub fn selected_text_range(&self, view: &NSTextView) -> TextRange {
+            let range = NSTextInputClient::selectedRange(view);
+            let content = view.string().to_string();
+            let start = utf16_offset_to_scalar_index(&content, range.location);
+            let end = utf16_offset_to_scalar_index(&content, range.location + range.length);
+            TextRange::new(start, end.saturating_sub(start))
+        }
+
+        /// Clicks the insertion point for `location` in `view`.
+        pub fn click_text_position(
+            &self,
+            view: &NSTextView,
+            location: usize,
+        ) -> Result<(), InputSynthesisError> {
+            let Some(rect) = self.insertion_caret_rect(view, location) else {
+                return Err(InputSynthesisError::MissingTarget);
+            };
+            let root_point = NSPoint::new(
+                rect.origin.x + (rect.size.width / 2.0).max(0.5),
+                rect.origin.y + (rect.size.height / 2.0).max(0.5),
+            );
+            let point = self.root_point_to_window_point(root_point);
+            self.input().click(Point::new(point.x, point.y))
+        }
+
         /// Registers semantic metadata for a view so it can be queried later.
         pub fn register_node(&self, view: &NSView, descriptor: InstrumentedView) {
+            self.register_instrumented_node(
+                view,
+                InstrumentedNode {
+                    id: descriptor.id,
+                    role: descriptor.role,
+                    label: descriptor.label,
+                    selectors: descriptor.selectors,
+                    ..InstrumentedNode::default()
+                },
+            );
+        }
+
+        /// Registers a fully populated backend-neutral native node descriptor.
+        pub fn register_instrumented_node(&self, view: &NSView, descriptor: InstrumentedNode) {
             let retained = unsafe {
                 Retained::retain(view as *const NSView as *mut NSView)
                     .expect("registered view should retain successfully")
@@ -483,6 +627,24 @@ mod imp {
                     node.label = entry.descriptor.label.clone();
                     node.selectors
                         .extend(entry.descriptor.selectors.iter().cloned());
+                    node.state.extend(entry.descriptor.state.clone());
+                    node.properties.extend(entry.descriptor.properties.clone());
+                    node.state_provenance.extend(
+                        entry
+                            .descriptor
+                            .state
+                            .keys()
+                            .cloned()
+                            .map(|key| (key, NodeProvenanceKind::Native)),
+                    );
+                    node.property_provenance.extend(
+                        entry
+                            .descriptor
+                            .properties
+                            .keys()
+                            .cloned()
+                            .map(|key| (key, NodeProvenanceKind::Native)),
+                    );
                     node.visible = visible;
                     node.visible_rect = visible_rect;
                     node.hit_testable = hit_testable;
@@ -500,7 +662,7 @@ mod imp {
                 })
                 .collect();
 
-            if let Some((provider_nodes, recipes)) = provider_snapshot {
+            if let Some(snapshot) = provider_snapshot {
                 let native_ids = nodes
                     .iter()
                     .map(|node| node.id.clone())
@@ -521,15 +683,15 @@ mod imp {
                     .filter_map(|(id, count)| (*count == 1).then_some(id.clone()))
                     .collect::<BTreeSet<_>>();
                 nodes.extend(normalize_provider_nodes(
-                    provider_nodes,
+                    snapshot.nodes,
                     &native_ids,
                     &unique_native_parent_ids,
                 ));
-                if recipes.is_empty() {
+                if snapshot.recipes.is_empty() {
                     return Scene::new(nodes);
                 }
                 let resolved_recipes =
-                    resolve_node_recipes(nodes, self.root_bounds(), image, &recipes);
+                    resolve_node_recipes(nodes, self.root_bounds(), image, &snapshot.recipes);
                 let recipe_errors = resolved_recipes.errors;
                 return Scene::with_recipe_errors(resolved_recipes.nodes, recipe_errors);
             }
@@ -589,7 +751,7 @@ mod imp {
             self.provider
                 .borrow()
                 .as_ref()
-                .map(|provider| (provider.snapshot_nodes(), provider.snapshot_recipes()))
+                .map(|provider| provider.snapshot(&AppKitSnapshotContext::new(self)))
         }
 
         fn provider_snapshot_with_optional_capture(
@@ -598,9 +760,12 @@ mod imp {
         ) -> (Option<ProviderSnapshot>, Option<Image>) {
             let mut provider_snapshot = self.provider_snapshot();
             let needs_image = force_image
-                || provider_snapshot
-                    .as_ref()
-                    .is_some_and(|(_, recipes)| recipes.iter().any(NodeRecipe::requires_image));
+                || provider_snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot
+                        .recipes
+                        .iter()
+                        .any(|recipe| recipe.requires_image())
+                });
             let image = needs_image.then(|| self.capture()).flatten().map(|image| {
                 provider_snapshot = self.provider_snapshot();
                 image.flip_vertical()
@@ -1121,6 +1286,17 @@ mod imp {
         NSRange::new(start, end.saturating_sub(start))
     }
 
+    fn utf16_offset_to_scalar_index(text: &str, utf16_offset: usize) -> usize {
+        let mut utf16_count = 0usize;
+        for (index, ch) in text.chars().enumerate() {
+            if utf16_count >= utf16_offset {
+                return index;
+            }
+            utf16_count += ch.len_utf16();
+        }
+        text.chars().count()
+    }
+
     fn hit_point_candidates(rect: Rect, search: &HitPointSearch) -> Vec<NSPoint> {
         match search.strategy {
             HitPointStrategy::VisibleCenterFirst => {
@@ -1225,19 +1401,33 @@ mod imp {
             _ => None,
         }
     }
+
+    struct LegacyAppKitSceneSource {
+        provider: Box<dyn SemanticProvider>,
+    }
+
+    impl AppKitSceneSource for LegacyAppKitSceneSource {
+        fn snapshot(&self, _context: &AppKitSnapshotContext<'_>) -> SemanticSnapshot {
+            self.provider.snapshot()
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct InstrumentedView {
         pub id: Option<String>,
         pub role: Option<glasscheck_core::Role>,
         pub label: Option<String>,
         pub selectors: Vec<String>,
     }
+    pub trait AppKitSceneSource {}
+    pub struct AppKitSnapshotContext<'a> {
+        _marker: std::marker::PhantomData<&'a ()>,
+    }
     pub struct AppKitWindowHost;
 }
 
 #[allow(unused_imports)]
-pub use imp::{AppKitWindowHost, InstrumentedView};
+pub use imp::{AppKitSceneSource, AppKitSnapshotContext, AppKitWindowHost, InstrumentedView};

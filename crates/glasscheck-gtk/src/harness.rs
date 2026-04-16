@@ -4,7 +4,10 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use crate::window::GtkWindowHost;
+    use crate::GtkSession;
     use glasscheck_core::{Harness, PollError, PollOptions};
+    use gtk4::prelude::IsA;
+    use gtk4::{Widget, Window};
 
     static INIT_GTK: OnceLock<Result<(), glib::BoolError>> = OnceLock::new();
 
@@ -77,6 +80,22 @@ mod imp {
         #[must_use]
         pub fn create_window(&self, width: f64, height: f64) -> GtkWindowHost {
             GtkWindowHost::new(width, height)
+        }
+
+        /// Attaches a host to an existing GTK root widget and optional parent window.
+        #[must_use]
+        pub fn attach_root(
+            &self,
+            widget: &impl IsA<Widget>,
+            window: Option<&Window>,
+        ) -> GtkWindowHost {
+            GtkWindowHost::from_root(widget, window)
+        }
+
+        /// Creates a session for coordinating multiple attached surfaces.
+        #[must_use]
+        pub fn session(&self) -> GtkSession {
+            GtkSession::new(*self)
         }
 
         /// Runs the GTK main context for the given duration.

@@ -12,6 +12,7 @@ mod capture;
 mod harness;
 mod input;
 mod screen;
+mod session;
 mod text;
 mod window;
 
@@ -19,5 +20,6 @@ pub use capture::capture_view_image;
 pub use glasscheck_core::{HitPointSearch, HitPointStrategy, InstrumentedNode};
 pub use harness::AppKitHarness;
 pub use input::AppKitInputDriver;
+pub use session::AppKitSession;
 pub use text::{AppKitAnchoredTextError, AppKitTextError, AppKitTextHarness};
-pub use window::{AppKitWindowHost, InstrumentedView};
+pub use window::{AppKitSceneSource, AppKitSnapshotContext, AppKitWindowHost, InstrumentedView};

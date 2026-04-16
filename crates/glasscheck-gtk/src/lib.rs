@@ -9,6 +9,7 @@
 mod harness;
 mod input;
 mod screen;
+mod session;
 mod text;
 mod window;
 
@@ -16,5 +17,6 @@ pub use glasscheck_core::InstrumentedNode as InstrumentedWidget;
 pub use glasscheck_core::{HitPointSearch, HitPointStrategy, InstrumentedNode};
 pub use harness::GtkHarness;
 pub use input::GtkInputDriver;
+pub use session::GtkSession;
 pub use text::{GtkAnchoredTextError, GtkTextError, GtkTextHarness};
-pub use window::GtkWindowHost;
+pub use window::{GtkSceneSource, GtkSnapshotContext, GtkWindowHost};

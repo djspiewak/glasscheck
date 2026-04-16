@@ -105,6 +105,7 @@ fn mount_fixture(harness: &glasscheck::Harness) -> Fixture {
             id: Some("status-text".into()),
             role: Some(Role::TextInput),
             label: Some("Status".into()),
+            ..Default::default()
         },
     );
     host.register_node(
@@ -113,6 +114,7 @@ fn mount_fixture(harness: &glasscheck::Harness) -> Fixture {
             id: Some("run-button".into()),
             role: Some(Role::Button),
             label: Some("Run".into()),
+            ..Default::default()
         },
     );
     host.set_scene_source(Box::new(ClickStateProvider { clicked }));

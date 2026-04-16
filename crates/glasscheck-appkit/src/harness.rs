@@ -8,6 +8,7 @@ mod imp {
     use objc2_app_kit::{NSView, NSWindow};
     use objc2_foundation::{MainThreadMarker, NSDate, NSRunLoop};
 
+    use crate::session::AppKitSession;
     use crate::window::AppKitWindowHost;
 
     static INIT_APP: Once = Once::new();
@@ -101,6 +102,12 @@ mod imp {
             window: Option<&NSWindow>,
         ) -> AppKitWindowHost {
             AppKitWindowHost::from_root_view(view, window, self.mtm)
+        }
+
+        /// Creates a session for coordinating multiple attached surfaces.
+        #[must_use]
+        pub fn session(&self) -> AppKitSession {
+            AppKitSession::new(*self)
         }
 
         /// Runs the AppKit run loop for the given duration.

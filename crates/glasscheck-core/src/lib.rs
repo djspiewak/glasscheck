@@ -32,7 +32,8 @@ pub use assertions::{
 pub use backend::{
     assert_anchored_text_renders, crop_image_bottom_left, normalize_provider_nodes,
     registered_node_id, AnchoredTextAssertionError, AnchoredTextHarness, Harness, HitPointSearch,
-    HitPointStrategy, InputDriver, InputSynthesisError, InstrumentedNode, KeyModifiers, TextRange,
+    HitPointStrategy, InputDriver, InputSynthesisError, InstrumentedNode, KeyModifiers,
+    SemanticSnapshot, SurfaceId, SurfaceQuery, TextRange, TransientSurfaceSpec,
 };
 pub use geometry::{Point, Rect, Size};
 pub use image::Image;

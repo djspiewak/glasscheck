@@ -131,6 +131,7 @@ fn query_reports_registered_widget_geometry(harness: GtkHarness) {
             id: Some("run".into()),
             role: Some(Role::Button),
             label: Some("Run".into()),
+            ..Default::default()
         },
     );
     harness.settle(4);
@@ -214,6 +215,7 @@ fn capture_region_matches_registered_widget_bounds(harness: GtkHarness) {
             id: Some("run".into()),
             role: Some(Role::Button),
             label: Some("Run".into()),
+            ..Default::default()
         },
     );
     wait_for_window_capture(harness, &host, &root);
@@ -279,6 +281,7 @@ fn anchored_text_assertion_matches_semantic_region(harness: GtkHarness) {
             id: Some("status".into()),
             role: Some(Role::TextInput),
             label: Some("Status".into()),
+            ..Default::default()
         },
     );
     wait_for_window_capture(harness, &host, &root);
@@ -317,6 +320,7 @@ fn click_button_activates_once(harness: GtkHarness) {
             id: Some("run".into()),
             role: Some(Role::Button),
             label: Some("Run".into()),
+            ..Default::default()
         },
     );
     harness.settle(4);

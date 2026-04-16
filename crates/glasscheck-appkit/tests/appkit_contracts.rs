@@ -3,17 +3,22 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use glasscheck_appkit::{AppKitHarness, HitPointSearch, HitPointStrategy, InstrumentedView};
+use glasscheck_appkit::{
+    AppKitHarness, AppKitSceneSource, AppKitSnapshotContext, HitPointSearch, HitPointStrategy,
+    InstrumentedView,
+};
 use glasscheck_core::{
     assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
-    NodeProvenanceKind, NodeRecipe, PixelMatch, PixelProbe, Point, PropertyValue, QueryError, Rect,
-    RegionResolveError, RelativeBounds, Role, Selector, SemanticNode, SemanticProvider, Size,
-    TextRange,
+    NodeProvenanceKind, NodeRecipe, PixelMatch, PixelProbe, Point, PollOptions, PropertyValue,
+    QueryError, Rect, RegionResolveError, RelativeBounds, Role, Selector, SemanticNode,
+    SemanticProvider, SemanticSnapshot, Size, SurfaceId, SurfaceQuery, TextRange,
+    TransientSurfaceSpec,
 };
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
     NSBezierPath, NSButton, NSColor, NSEvent, NSFont, NSTextInputClient, NSTextView, NSView,
+    NSWindowOrderingMode,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSSize, NSString};
 
@@ -48,6 +53,18 @@ fn main() {
         "insertion_caret_rect_converts_from_screen_to_root_coordinates",
         || insertion_caret_rect_converts_from_screen_to_root_coordinates(harness),
     );
+    run("contextual_scene_source_uses_host_geometry_helpers", || {
+        contextual_scene_source_uses_host_geometry_helpers(harness)
+    });
+    run("selected_text_range_reports_scalar_offsets", || {
+        selected_text_range_reports_scalar_offsets(harness)
+    });
+    run("session_discovers_window_by_title", || {
+        session_discovers_window_by_title(harness)
+    });
+    run("session_opens_owned_transient_window_and_evicts_it", || {
+        session_opens_owned_transient_window_and_evicts_it(harness)
+    });
     run("attached_window_refreshes_after_content_view_swap", || {
         attached_window_refreshes_after_content_view_swap(harness)
     });
@@ -1006,6 +1023,176 @@ fn insertion_caret_rect_converts_from_screen_to_root_coordinates(harness: AppKit
             Point::new(expected.origin.x, expected.origin.y),
             Size::new(expected.size.width, expected.size.height),
         )
+    );
+}
+
+fn contextual_scene_source_uses_host_geometry_helpers(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 200.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 200.0));
+    let view = make_text_view(
+        harness.main_thread_marker(),
+        NSSize::new(180.0, 80.0),
+        "Context provider",
+    );
+    view.setFrameOrigin(NSPoint::new(30.0, 36.0));
+    root.addSubview(&view);
+    host.set_content_view(&root);
+    host.set_contextual_scene_source(Box::new(ContextualTextSceneSource {
+        view: unsafe {
+            Retained::retain(&*view as *const NSTextView as *mut NSTextView)
+                .expect("text view should retain")
+        },
+    }));
+    harness.settle(2);
+
+    let scene = host.snapshot_scene();
+    let text = scene
+        .resolve(&Selector::selector_eq("context.text"))
+        .expect("context-backed text node should resolve");
+    let caret = scene
+        .resolve(&Selector::selector_eq("context.caret"))
+        .expect("context-backed caret node should resolve");
+
+    assert!(text.bounds.size.width > 0.0);
+    assert!(caret.bounds.size.height > 0.0);
+}
+
+fn selected_text_range_reports_scalar_offsets(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 200.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 200.0));
+    let view = make_text_view(
+        harness.main_thread_marker(),
+        NSSize::new(180.0, 80.0),
+        "Caret movement",
+    );
+    view.setSelectable(true);
+    view.setFrameOrigin(NSPoint::new(30.0, 36.0));
+    root.addSubview(&view);
+    host.set_content_view(&root);
+    harness.settle(2);
+
+    host.input().set_selection(&view, TextRange::new(5, 0));
+    harness.settle(2);
+    assert_eq!(host.selected_text_range(&view), TextRange::new(5, 0));
+    assert!(host.insertion_caret_rect(&view, 1).is_some());
+}
+
+fn session_discovers_window_by_title(harness: AppKitHarness) {
+    let main = harness.create_window(240.0, 120.0);
+    let chooser = harness.create_window(180.0, 100.0);
+    main.set_title("Main Editor");
+    chooser.set_title("Table Picker");
+    harness.settle(2);
+
+    let session = harness.session();
+    session.attach_host("main", main);
+    assert!(
+        session.discover_window("picker", &SurfaceQuery::title_contains("Picker")),
+        "session should discover title-matched windows"
+    );
+
+    let picker = session
+        .snapshot_scene(&SurfaceId::new("picker"))
+        .expect("discovered surface should be attached");
+    assert!(!picker.all().is_empty() || picker.all().is_empty());
+}
+
+fn session_opens_owned_transient_window_and_evicts_it(harness: AppKitHarness) {
+    let mtm = harness.main_thread_marker();
+    let inserted = Rc::new(Cell::new(false));
+    let host = harness.create_window(320.0, 220.0);
+    let picker = harness.create_window(180.0, 64.0);
+    let root = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(320.0, 220.0)),
+    );
+    let opener_target = ChildWindowOpenTarget::new(mtm, picker.window());
+    let insert_target = ChildWindowInsertTarget::new(mtm, inserted.clone(), picker.window());
+    let insert_button = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str("Insert Table"),
+            Some(&*insert_target),
+            Some(sel!(buttonPressed:)),
+            mtm,
+        )
+    };
+    insert_button.setFrame(NSRect::new(
+        NSPoint::new(16.0, 16.0),
+        NSSize::new(140.0, 32.0),
+    ));
+    let picker_root = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 64.0)),
+    );
+    picker_root.addSubview(&insert_button);
+    picker.set_content_view(&picker_root);
+
+    let opener = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str("Open Picker"),
+            Some(&*opener_target),
+            Some(sel!(openChildWindow:)),
+            mtm,
+        )
+    };
+    opener.setFrame(NSRect::new(
+        NSPoint::new(28.0, 140.0),
+        NSSize::new(120.0, 32.0),
+    ));
+    root.addSubview(&opener);
+    host.set_content_view(&root);
+    host.register_node(
+        &opener,
+        InstrumentedView {
+            id: Some("open-picker".into()),
+            role: Some(Role::Button),
+            label: Some("Open Picker".into()),
+            ..Default::default()
+        },
+    );
+    host.set_scene_source(Box::new(InsertedTableScene {
+        inserted: inserted.clone(),
+    }));
+    harness.settle(2);
+
+    let session = harness.session();
+    session.attach_host("main", host);
+    session
+        .open_transient_with_click(
+            "picker",
+            &TransientSurfaceSpec::new("main", Selector::id_eq("open-picker")),
+            PollOptions::default(),
+        )
+        .expect("session should attach the newly opened child window");
+
+    session.with_surface(&SurfaceId::new("picker"), |picker| {
+        picker.register_node(
+            &insert_button,
+            InstrumentedView {
+                id: Some("insert-table".into()),
+                role: Some(Role::Button),
+                label: Some("Insert Table".into()),
+                ..Default::default()
+            },
+        );
+    });
+    harness.settle(2);
+
+    session
+        .click_node(&SurfaceId::new("picker"), &Selector::id_eq("insert-table"))
+        .expect("picker surface should be attached")
+        .expect("insert action should succeed");
+    session
+        .wait_for_surface_closed(&SurfaceId::new("picker"), PollOptions::default())
+        .expect("picker surface should be evicted after the transient closes");
+    assert!(!session.surface_is_open(&SurfaceId::new("picker")));
+
+    let main_scene = session
+        .snapshot_scene(&SurfaceId::new("main"))
+        .expect("main surface should remain attached");
+    assert!(
+        main_scene.find(&Selector::id_eq("inserted-table")).is_ok(),
+        "main scene should reflect the table insertion after the popover action"
     );
 }
 
@@ -3003,6 +3190,10 @@ impl ReleaseTrackingView {
 
 struct ProviderOnlySceneProvider;
 
+struct ContextualTextSceneSource {
+    view: Retained<NSTextView>,
+}
+
 impl SemanticProvider for ProviderOnlySceneProvider {
     fn snapshot_nodes(&self) -> Vec<SemanticNode> {
         vec![SemanticNode::new(
@@ -3013,6 +3204,26 @@ impl SemanticProvider for ProviderOnlySceneProvider {
         .with_label("Provider Node")
         .with_selector("provider.node")
         .with_property("provider", PropertyValue::Bool(true))]
+    }
+}
+
+impl AppKitSceneSource for ContextualTextSceneSource {
+    fn snapshot(&self, context: &AppKitSnapshotContext<'_>) -> SemanticSnapshot {
+        let text_rect = context
+            .text_range_rect(&self.view, TextRange::new(0, 7))
+            .expect("text geometry should resolve");
+        let caret_rect = context
+            .insertion_caret_rect(&self.view, 3)
+            .expect("caret geometry should resolve");
+        SemanticSnapshot::new(
+            vec![
+                SemanticNode::new("context-text", Role::TextRun, text_rect)
+                    .with_selector("context.text"),
+                SemanticNode::new("context-caret", Role::Marker, caret_rect)
+                    .with_selector("context.caret"),
+            ],
+            Vec::new(),
+        )
     }
 }
 
@@ -3294,6 +3505,104 @@ define_class!(
 impl ButtonActionTarget {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ButtonActionIvars::default());
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+struct InsertedTableScene {
+    inserted: Rc<Cell<bool>>,
+}
+
+impl SemanticProvider for InsertedTableScene {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        self.inserted
+            .get()
+            .then(|| {
+                vec![SemanticNode::new(
+                    "inserted-table",
+                    Role::Container,
+                    Rect::new(Point::new(24.0, 40.0), Size::new(220.0, 120.0)),
+                )]
+            })
+            .unwrap_or_default()
+    }
+}
+
+struct ChildWindowOpenIvars {
+    child_window: Retained<objc2_app_kit::NSWindow>,
+}
+
+define_class!(
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ChildWindowOpenIvars]
+    struct ChildWindowOpenTarget;
+
+    impl ChildWindowOpenTarget {
+        #[unsafe(method(openChildWindow:))]
+        fn open_child_window(&self, sender: Option<&NSButton>) {
+            let sender = sender.expect("popover opener should be a button");
+            let parent = sender.window().expect("opener button should belong to a window");
+            unsafe {
+                parent.addChildWindow_ordered(
+                    &self.ivars().child_window,
+                    NSWindowOrderingMode::Above,
+                );
+            }
+            self.ivars().child_window.orderFrontRegardless();
+        }
+    }
+);
+
+impl ChildWindowOpenTarget {
+    fn new(mtm: MainThreadMarker, child_window: &objc2_app_kit::NSWindow) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ChildWindowOpenIvars {
+            child_window: unsafe {
+                Retained::retain(child_window as *const _ as *mut _)
+                    .expect("child window opener should retain successfully")
+            },
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+struct ChildWindowInsertIvars {
+    child_window: Retained<objc2_app_kit::NSWindow>,
+    inserted: Rc<Cell<bool>>,
+}
+
+define_class!(
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ChildWindowInsertIvars]
+    struct ChildWindowInsertTarget;
+
+    impl ChildWindowInsertTarget {
+        #[unsafe(method(buttonPressed:))]
+        fn button_pressed(&self, _sender: Option<&NSButton>) {
+            self.ivars().inserted.set(true);
+            if let Some(parent) = self.ivars().child_window.parentWindow() {
+                parent.removeChildWindow(&self.ivars().child_window);
+            }
+            self.ivars().child_window.orderOut(None);
+            self.ivars().child_window.close();
+        }
+    }
+);
+
+impl ChildWindowInsertTarget {
+    fn new(
+        mtm: MainThreadMarker,
+        inserted: Rc<Cell<bool>>,
+        child_window: &objc2_app_kit::NSWindow,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ChildWindowInsertIvars {
+            child_window: unsafe {
+                Retained::retain(child_window as *const _ as *mut _)
+                    .expect("child window insert target should retain successfully")
+            },
+            inserted,
+        });
         unsafe { msg_send![super(this), init] }
     }
 }

@@ -32,10 +32,13 @@ That shared post-mount surface is intentionally aligned across GTK and AppKit fo
 - `capture_region(&RegionSpec)`
 - `resolve_region(&RegionSpec)`
 - `click_node(&Selector)`
+- `hover_node(&Selector, &HitPointSearch)`
 - `input()`
 - `text_renderer()`
 
 This lets one shared test body compile unchanged after platform-specific fixture setup.
+
+For multi-surface flows, the facade also exposes a target-specific `glasscheck::Session` alias plus `Harness::session()`. Sessions can attach named surfaces, open owned transient surfaces with `open_transient_with_click(...)`, wait for transient dismissal with `wait_for_surface_closed(...)`, delegate node interactions to a specific surface, and still fall back to passive title-based discovery through `SurfaceQuery` when that is the only signal available.
 
 On AppKit, main-thread capability is still explicit for native construction and attachment, but it is carried by the harness/host internally so shared post-mount calls stay marker-free. Harness-managed AppKit windows are kept as background test windows, so capture and input can run without temporary windows surfacing on screen.
 
@@ -66,6 +69,28 @@ Use `Scene` and `Selector` for most new tests. They support hierarchy, selectors
 Prefer stable selectors and roles over snapshot-local IDs. IDs are exact, but they can be disambiguated during snapshot construction and should not be treated as cross-snapshot identities.
 
 Use scene-local `id`s for structural relationships inside one scene, such as parent/child wiring. Use selectors for the public test-facing names you query across fresh scene captures.
+
+## Contextual Scene Sources
+
+When a provider needs host geometry, use the backend contextual scene-source API instead of duplicating coordinate conversion in the app:
+
+- AppKit: `AppKitWindowHost::set_contextual_scene_source(...)` with `AppKitSnapshotContext`
+- GTK: `GtkWindowHost::set_contextual_scene_source(...)` with `GtkSnapshotContext`
+
+Context objects expose root bounds, view/widget rect conversion, visible rect lookup, text range rects, insertion caret rects, and selected text ranges. Legacy `set_scene_source(...)` and `SemanticProvider` remain supported and are adapted into the new snapshot model.
+
+Providers now return a unified `SemanticSnapshot { nodes, recipes }` instead of splitting those concepts across separate host plumbing.
+
+## Text Geometry And Interaction
+
+Both native hosts expose backend-native text helpers for direct layout assertions and caret-driven interaction:
+
+- `text_range_rect(...)`
+- `insertion_caret_rect(...)`
+- `selected_text_range(...)`
+- `click_text_position(...)`
+
+Prefer these helpers when tests need text-backed geometry or caret assertions rather than app-local adapters.
 
 ## Scene Queries
 

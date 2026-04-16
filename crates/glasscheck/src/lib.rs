@@ -19,17 +19,25 @@ pub type Harness = AppKitHarness;
 #[cfg(all(feature = "appkit", target_os = "macos"))]
 pub type WindowHost = AppKitWindowHost;
 #[cfg(all(feature = "appkit", target_os = "macos"))]
+pub type Session = AppKitSession;
+#[cfg(all(feature = "appkit", target_os = "macos"))]
 pub type NativeInputDriver<'a> = AppKitInputDriver<'a>;
 #[cfg(all(feature = "appkit", target_os = "macos"))]
 pub type NativeTextHarness<'a> = AppKitTextHarness<'a>;
+#[cfg(all(feature = "appkit", target_os = "macos"))]
+pub type NativeSnapshotContext<'a> = AppKitSnapshotContext<'a>;
 #[cfg(all(feature = "gtk", target_os = "linux"))]
 pub type Harness = GtkHarness;
 #[cfg(all(feature = "gtk", target_os = "linux"))]
 pub type WindowHost = GtkWindowHost;
 #[cfg(all(feature = "gtk", target_os = "linux"))]
+pub type Session = GtkSession;
+#[cfg(all(feature = "gtk", target_os = "linux"))]
 pub type NativeInputDriver<'a> = GtkInputDriver<'a>;
 #[cfg(all(feature = "gtk", target_os = "linux"))]
 pub type NativeTextHarness<'a> = GtkTextHarness<'a>;
+#[cfg(all(feature = "gtk", target_os = "linux"))]
+pub type NativeSnapshotContext<'a> = GtkSnapshotContext<'a>;
 
 #[cfg(test)]
 mod tests {
