@@ -1208,8 +1208,10 @@ fn wait_until_flushes_runloop_between_attempts(harness: AppKitHarness) {
     let attempts = harness
         .wait_until(
             PollOptions {
-                timeout: std::time::Duration::from_millis(120),
-                interval: std::time::Duration::from_millis(1),
+                // AppKit run-loop turns can take well over 100ms on loaded CI
+                // runners, so leave enough budget for a second flushed poll.
+                timeout: std::time::Duration::from_millis(500),
+                interval: std::time::Duration::from_millis(5),
             },
             || {
                 ticks += 1;
