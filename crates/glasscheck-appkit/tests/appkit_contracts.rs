@@ -213,8 +213,16 @@ fn main() {
         || move_mouse_targets_attached_window_even_when_another_window_is_key(harness),
     );
     run(
+        "synthesized_input_keeps_background_test_windows_hidden",
+        || synthesized_input_keeps_background_test_windows_hidden(harness),
+    );
+    run(
         "key_press_targets_attached_window_even_when_another_window_is_key",
         || key_press_targets_attached_window_even_when_another_window_is_key(harness),
+    );
+    run(
+        "making_peer_window_key_does_not_surface_background_test_windows",
+        || making_peer_window_key_does_not_surface_background_test_windows(harness),
     );
     run(
         "registered_native_hierarchy_supports_parent_and_child_indexes",
@@ -1067,6 +1075,34 @@ fn move_mouse_targets_attached_window_even_when_another_window_is_key(harness: A
     assert_eq!(other_view.ivars().mouse_moves.get(), 0);
 }
 
+fn synthesized_input_keeps_background_test_windows_hidden(harness: AppKitHarness) {
+    let host = harness.create_window(180.0, 120.0);
+    let view = RoutingTrackingView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    host.set_content_view(&view);
+    host.window().setAcceptsMouseMovedEvents(true);
+    host.window().makeFirstResponder(Some(&view));
+    harness.settle(2);
+
+    assert!(
+        !host.window().isVisible(),
+        "background test window should start hidden"
+    );
+
+    host.input().move_mouse(Point::new(24.0, 24.0)).unwrap();
+    host.input()
+        .key_press("a", glasscheck_core::KeyModifiers::default())
+        .unwrap();
+    harness.settle(2);
+
+    assert!(
+        !host.window().isVisible(),
+        "synthetic input should not surface the background test window"
+    );
+}
+
 fn key_press_targets_attached_window_even_when_another_window_is_key(harness: AppKitHarness) {
     let target = harness.create_window(180.0, 120.0);
     let target_view = RoutingTrackingView::new(
@@ -1094,6 +1130,38 @@ fn key_press_targets_attached_window_even_when_another_window_is_key(harness: Ap
 
     assert_eq!(target_view.ivars().key_downs.get(), 1);
     assert_eq!(other_view.ivars().key_downs.get(), 0);
+}
+
+fn making_peer_window_key_does_not_surface_background_test_windows(harness: AppKitHarness) {
+    let target = harness.create_window(180.0, 120.0);
+    let target_view = RoutingTrackingView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    target.set_content_view(&target_view);
+
+    let other = harness.create_window(180.0, 120.0);
+    let other_view = RoutingTrackingView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    other.set_content_view(&other_view);
+    harness.settle(2);
+
+    assert!(!target.window().isVisible());
+    assert!(!other.window().isVisible());
+
+    other.window().makeKeyWindow();
+    harness.settle(2);
+
+    assert!(
+        !target.window().isVisible(),
+        "background target window should remain hidden when a peer becomes key"
+    );
+    assert!(
+        !other.window().isVisible(),
+        "background peer window should not surface when made key"
+    );
 }
 
 fn registered_native_hierarchy_supports_parent_and_child_indexes(harness: AppKitHarness) {

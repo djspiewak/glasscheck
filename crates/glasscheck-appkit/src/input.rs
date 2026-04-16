@@ -3,23 +3,22 @@ mod imp {
     use objc2::runtime::{AnyObject, Sel};
     use objc2::{msg_send, ClassType};
     use objc2_app_kit::{
-        NSApplication, NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSTextInputClient,
-        NSTextView, NSView, NSWindow,
+        NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSTextInputClient, NSTextView,
+        NSView, NSWindow,
     };
-    use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSString};
+    use objc2_foundation::{NSPoint, NSRange, NSString};
 
     use glasscheck_core::{InputDriver, InputSynthesisError, KeyModifiers, Point, Rect, TextRange};
 
     pub struct AppKitInputDriver<'a> {
         window: &'a NSWindow,
-        mtm: MainThreadMarker,
     }
 
     impl<'a> AppKitInputDriver<'a> {
         /// Creates an input driver for `window`.
         #[must_use]
-        pub fn new(window: &'a NSWindow, mtm: MainThreadMarker) -> Self {
-            Self { window, mtm }
+        pub fn new(window: &'a NSWindow, _mtm: objc2_foundation::MainThreadMarker) -> Self {
+            Self { window }
         }
 
         /// Synthesizes a left mouse click at `point` in window coordinates.
@@ -219,10 +218,7 @@ mod imp {
             }
         }
 
-        fn activate_window(&self) {
-            let app = NSApplication::sharedApplication(self.mtm);
-            app.activate();
-        }
+        fn activate_window(&self) {}
 
         fn is_control_target(&self, target: Option<&NSView>) -> bool {
             let Some(target) = target else {

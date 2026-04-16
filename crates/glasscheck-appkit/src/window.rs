@@ -17,7 +17,10 @@ mod imp {
 
     use crate::capture::{capture_view_image, crop_image_in_view_coordinates};
     use crate::input::AppKitInputDriver;
-    use crate::screen::{offscreen_window_content_rect, offscreen_window_frame_rect};
+    use crate::screen::{
+        configure_background_test_window, offscreen_window_content_rect,
+        offscreen_window_frame_rect,
+    };
     use crate::text::AppKitTextHarness;
 
     enum RegisteredViewClickRoute {
@@ -59,7 +62,7 @@ mod imp {
 
     type ProviderSnapshot = (Vec<SemanticNode>, Vec<NodeRecipe>);
 
-    /// AppKit window host used to build, capture, query, and drive a test scene.
+    /// AppKit window host used to build, capture, query, and drive a hidden test scene.
     ///
     /// This is the main AppKit integration surface. Use it to attach semantic
     /// metadata to native views, capture pixels, query the current scene, and
@@ -104,6 +107,7 @@ mod imp {
                 offscreen_window_frame_rect(mtm, style, width, height),
                 false,
             );
+            configure_background_test_window(&window);
             Self {
                 mtm,
                 window,
@@ -130,6 +134,7 @@ mod imp {
                 Retained::retain(&*view as *const NSView as *mut NSView)
                     .expect("content view attachment should retain successfully")
             });
+            configure_background_test_window(&retained);
             Self {
                 mtm,
                 window: retained,
@@ -159,6 +164,7 @@ mod imp {
                         .expect("window attachment should retain successfully")
                 })
                 .unwrap_or_else(|| managed_window_for_root_view(view, mtm));
+            configure_background_test_window(&attached_window);
             Self {
                 mtm,
                 window: attached_window,
@@ -892,6 +898,7 @@ mod imp {
             );
             window.setContentView(Some(view));
         }
+        configure_background_test_window(&window);
         window
     }
 

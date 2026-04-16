@@ -24,6 +24,15 @@ mod imp {
         NSWindow::frameRectForContentRect_styleMask(content_rect, style_mask, mtm)
     }
 
+    pub(crate) fn configure_background_test_window(window: &NSWindow) {
+        let policy = background_test_window_visibility_policy();
+        window.setExcludedFromWindowsMenu(policy.excluded_from_windows_menu);
+        window.setCanHide(policy.can_hide);
+        window.setHidesOnDeactivate(policy.hides_on_deactivate);
+        window.setAlphaValue(policy.alpha_value);
+        window.orderOut(None);
+    }
+
     fn screen_frames(mtm: MainThreadMarker) -> Vec<NSRect> {
         NSScreen::screens(mtm)
             .iter()
@@ -71,7 +80,10 @@ mod imp {
 
     #[cfg(test)]
     mod tests {
-        use super::{offscreen_rect_for_size, union_rects, FALLBACK_ORIGIN};
+        use super::{
+            background_test_window_visibility_policy, offscreen_rect_for_size, union_rects,
+            FALLBACK_ORIGIN,
+        };
         use objc2_foundation::{NSPoint, NSRect, NSSize};
 
         #[test]
@@ -126,6 +138,15 @@ mod imp {
             assert_eq!(union.size, NSSize::new(1728.0, 2099.0));
         }
 
+        #[test]
+        fn background_test_window_policy_disables_window_menu_and_hiding() {
+            let policy = background_test_window_visibility_policy();
+            assert!(policy.excluded_from_windows_menu);
+            assert!(!policy.can_hide);
+            assert!(policy.hides_on_deactivate);
+            assert_eq!(policy.alpha_value, 0.0);
+        }
+
         fn intersects_any(frame: NSRect, displays: impl IntoIterator<Item = NSRect>) -> bool {
             displays
                 .into_iter()
@@ -139,10 +160,29 @@ mod imp {
                 && rhs.origin.y < lhs.origin.y + lhs.size.height
         }
     }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct BackgroundTestWindowVisibilityPolicy {
+        excluded_from_windows_menu: bool,
+        can_hide: bool,
+        hides_on_deactivate: bool,
+        alpha_value: f64,
+    }
+
+    fn background_test_window_visibility_policy() -> BackgroundTestWindowVisibilityPolicy {
+        BackgroundTestWindowVisibilityPolicy {
+            excluded_from_windows_menu: true,
+            can_hide: false,
+            hides_on_deactivate: true,
+            alpha_value: 0.0,
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod imp {}
 
 #[cfg(target_os = "macos")]
-pub(crate) use imp::{offscreen_window_content_rect, offscreen_window_frame_rect};
+pub(crate) use imp::{
+    configure_background_test_window, offscreen_window_content_rect, offscreen_window_frame_rect,
+};

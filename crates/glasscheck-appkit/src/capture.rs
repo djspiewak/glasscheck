@@ -8,7 +8,7 @@ mod imp {
     use objc2_app_kit::{NSBitmapImageRep, NSClipView, NSSplitView, NSView, NSWindow};
     use objc2_foundation::{MainThreadMarker, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
-    use crate::screen::offscreen_window_frame_rect;
+    use crate::screen::{configure_background_test_window, offscreen_window_frame_rect};
 
     const MIN_CAPTURE_DIM: f64 = 50.0;
     const DEFAULT_CAPTURE_FRAME: NSRect =
@@ -39,6 +39,7 @@ mod imp {
             );
             window.setMinSize(repaired.size);
             window.setFrame_display(repaired, true);
+            configure_background_test_window(window);
             if let Some(content) = window.contentView() {
                 force_split_view_layout(&content);
             }

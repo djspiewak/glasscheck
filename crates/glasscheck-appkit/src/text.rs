@@ -15,7 +15,10 @@ mod imp {
     use std::path::Path;
 
     use crate::capture::{capture_view_image, crop_image_in_view_coordinates};
-    use crate::screen::{offscreen_window_content_rect, offscreen_window_frame_rect};
+    use crate::screen::{
+        configure_background_test_window, offscreen_window_content_rect,
+        offscreen_window_frame_rect,
+    };
     use crate::window::AppKitWindowHost;
 
     /// Errors returned by the AppKit text harness.
@@ -159,6 +162,7 @@ mod imp {
             ),
             false,
         );
+        configure_background_test_window(&window);
         let scene = NSView::initWithFrame(NSView::alloc(mtm), scene_frame);
         let text_view = make_reference_text_view(mtm, expectation)?;
         scene.addSubview(&text_view);

@@ -30,7 +30,6 @@ mod imp {
             INIT_APP.call_once(|| {
                 let app = NSApplication::sharedApplication(mtm);
                 app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-                app.activate();
             });
 
             Self { mtm }
@@ -72,7 +71,7 @@ mod imp {
             Harness::wait_until(self, options, || predicate())
         }
 
-        /// Creates a new test window with the requested content size.
+        /// Creates a new hidden background test window with the requested content size.
         ///
         /// This is the usual starting point when tests need capture, semantic
         /// snapshots, or synthesized input against a real window.

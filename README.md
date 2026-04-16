@@ -37,7 +37,7 @@ That shared post-mount surface is intentionally aligned across GTK and AppKit fo
 
 This lets one shared test body compile unchanged after platform-specific fixture setup.
 
-On AppKit, main-thread capability is still explicit for native construction and attachment, but it is carried by the harness/host internally so shared post-mount calls stay marker-free.
+On AppKit, main-thread capability is still explicit for native construction and attachment, but it is carried by the harness/host internally so shared post-mount calls stay marker-free. Harness-managed AppKit windows are kept as background test windows, so capture and input can run without temporary windows surfacing on screen.
 
 ## Crates
 
@@ -55,7 +55,7 @@ Use `glasscheck-core` only when you already have your own scene and pixel captur
 glasscheck-core = { path = "crates/glasscheck-core" }
 ```
 
-For AppKit-specific setup, prefer `AppKitHarness::create_window`, `attach_window`, and `attach_root_view` over calling `AppKitWindowHost::from_*` directly. That keeps the harness as the public carrier for `MainThreadMarker`.
+For AppKit-specific setup, prefer `AppKitHarness::create_window`, `attach_window`, and `attach_root_view` over calling `AppKitWindowHost::from_*` directly. That keeps the harness as the public carrier for `MainThreadMarker` and preserves the backend's hidden-window test policy.
 
 On Linux/GTK, `GtkHarness::new()` returns `Result<_, glib::BoolError>`. GTK initialization depends on the process environment, so callers must handle setup failure explicitly instead of relying on a panic from inside the harness.
 
