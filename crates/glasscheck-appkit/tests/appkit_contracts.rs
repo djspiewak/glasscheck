@@ -1,6 +1,6 @@
 #![cfg(target_os = "macos")]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use glasscheck_appkit::{
@@ -15,10 +15,11 @@ use glasscheck_core::{
     TransientSurfaceSpec,
 };
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadOnly};
+use objc2::runtime::AnyObject;
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSBezierPath, NSButton, NSColor, NSEvent, NSFont, NSTextInputClient, NSTextView, NSView,
-    NSWindowOrderingMode,
+    NSBezierPath, NSButton, NSColor, NSEvent, NSFont, NSTextInputClient, NSTextView,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowOrderingMode,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSSize, NSString};
 
@@ -59,12 +60,43 @@ fn main() {
     run("selected_text_range_reports_scalar_offsets", || {
         selected_text_range_reports_scalar_offsets(harness)
     });
+    run("click_text_position_moves_real_nstextview_caret", || {
+        click_text_position_moves_real_nstextview_caret(harness)
+    });
+    run(
+        "click_text_position_synthesizes_text_view_mouse_down",
+        || click_text_position_synthesizes_text_view_mouse_down(harness),
+    );
+    run(
+        "click_text_position_completes_before_follow_up_input",
+        || click_text_position_completes_before_follow_up_input(harness),
+    );
     run("session_discovers_window_by_title", || {
         session_discovers_window_by_title(harness)
     });
     run("session_opens_owned_transient_window_and_evicts_it", || {
         session_opens_owned_transient_window_and_evicts_it(harness)
     });
+    run(
+        "transient_surface_hover_updates_active_always_mouse_moved_tracking_state",
+        || transient_surface_hover_updates_active_always_mouse_moved_tracking_state(harness),
+    );
+    run(
+        "transient_surface_hover_delivers_single_mouse_moved_callback_per_step",
+        || transient_surface_hover_delivers_single_mouse_moved_callback_per_step(harness),
+    );
+    run(
+        "click_targets_attached_child_window_even_when_parent_window_is_present",
+        || click_targets_attached_child_window_even_when_parent_window_is_present(harness),
+    );
+    run(
+        "semantic_click_targets_attached_child_window_even_when_parent_window_is_present",
+        || semantic_click_targets_attached_child_window_even_when_parent_window_is_present(harness),
+    );
+    run(
+        "click_text_position_moves_attached_child_nstextview_caret",
+        || click_text_position_moves_attached_child_nstextview_caret(harness),
+    );
     run("attached_window_refreshes_after_content_view_swap", || {
         attached_window_refreshes_after_content_view_swap(harness)
     });
@@ -1077,6 +1109,126 @@ fn selected_text_range_reports_scalar_offsets(harness: AppKitHarness) {
     assert!(host.insertion_caret_rect(&view, 1).is_some());
 }
 
+fn click_text_position_moves_real_nstextview_caret(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 200.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 200.0));
+    let view = make_text_view(harness.main_thread_marker(), NSSize::new(180.0, 80.0), "ab");
+    view.setEditable(true);
+    view.setSelectable(true);
+    view.setFrameOrigin(NSPoint::new(30.0, 36.0));
+    root.addSubview(&view);
+    host.set_content_view(&root);
+    host.window().makeFirstResponder(Some(&view));
+    host.window().makeKeyWindow();
+    harness.settle(2);
+
+    host.input().set_selection(&view, TextRange::new(2, 0));
+    harness.settle(2);
+
+    host.click_text_position(&view, 1).unwrap();
+    assert_eq!(host.selected_text_range(&view), TextRange::new(1, 0));
+
+    host.window().orderOut(None);
+    host.window().close();
+}
+
+fn click_text_position_synthesizes_text_view_mouse_down(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 200.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 200.0));
+    let view = MouseDownTrackingTextView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 80.0)),
+    );
+    view.setEditable(true);
+    view.setSelectable(true);
+    view.setDrawsBackground(false);
+    view.setString(&NSString::from_str("ab"));
+    view.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+    view.setFrameOrigin(NSPoint::new(30.0, 36.0));
+    root.addSubview(&view);
+    host.set_content_view(&root);
+    host.window().makeFirstResponder(Some(&view));
+    host.window().makeKeyWindow();
+    harness.settle(2);
+
+    host.click_text_position(&view, 1).unwrap();
+    assert_eq!(view.ivars().mouse_downs.get(), 1);
+
+    host.window().orderOut(None);
+    host.window().close();
+}
+
+fn click_text_position_completes_before_follow_up_input(harness: AppKitHarness) {
+    let host = harness.create_window(320.0, 200.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(320.0, 200.0));
+    let view = make_text_view(harness.main_thread_marker(), NSSize::new(180.0, 80.0), "ab");
+    view.setEditable(true);
+    view.setSelectable(true);
+    view.setFrameOrigin(NSPoint::new(30.0, 36.0));
+    root.addSubview(&view);
+    host.set_content_view(&root);
+    host.window().makeFirstResponder(Some(&view));
+    host.window().makeKeyWindow();
+    harness.settle(2);
+
+    host.input().set_selection(&view, TextRange::new(2, 0));
+    harness.settle(2);
+
+    host.click_text_position(&view, 1).unwrap();
+    host.input().type_text_direct(&view, "X");
+
+    assert_eq!(view.string().to_string(), "aXb");
+    assert_eq!(host.selected_text_range(&view), TextRange::new(2, 0));
+
+    host.window().orderOut(None);
+    host.window().close();
+}
+
+fn click_text_position_moves_attached_child_nstextview_caret(harness: AppKitHarness) {
+    let mtm = harness.main_thread_marker();
+    let parent = harness.create_window(240.0, 140.0);
+    let parent_root = make_view(mtm, NSSize::new(240.0, 140.0));
+    parent.set_content_view(&parent_root);
+
+    let child = harness.create_window(220.0, 120.0);
+    let child_root = make_view(mtm, NSSize::new(220.0, 120.0));
+    let view = MouseDownTrackingTextView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 80.0)),
+    );
+    view.setEditable(true);
+    view.setSelectable(true);
+    view.setDrawsBackground(false);
+    view.setString(&NSString::from_str("ab"));
+    view.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+    view.setFrameOrigin(NSPoint::new(20.0, 20.0));
+    child_root.addSubview(&view);
+    child.set_content_view(&child_root);
+
+    unsafe {
+        parent
+            .window()
+            .addChildWindow_ordered(child.window(), NSWindowOrderingMode::Above);
+    }
+    child.window().orderFrontRegardless();
+    harness.settle(2);
+
+    let attached = harness.attach_window(child.window());
+    attached.input().set_selection(&view, TextRange::new(2, 0));
+    harness.settle(2);
+
+    attached.click_text_position(&view, 1).unwrap();
+
+    assert_eq!(attached.selected_text_range(&view), TextRange::new(1, 0));
+    assert!(!child.window().isKeyWindow());
+
+    parent.window().removeChildWindow(child.window());
+    child.window().orderOut(None);
+    child.window().close();
+    parent.window().orderOut(None);
+    parent.window().close();
+}
+
 fn session_discovers_window_by_title(harness: AppKitHarness) {
     let main = harness.create_window(240.0, 120.0);
     let chooser = harness.create_window(180.0, 100.0);
@@ -1196,6 +1348,183 @@ fn session_opens_owned_transient_window_and_evicts_it(harness: AppKitHarness) {
     );
 }
 
+fn transient_surface_hover_updates_active_always_mouse_moved_tracking_state(
+    harness: AppKitHarness,
+) {
+    let fixture = open_picker_contract_fixture(harness);
+
+    let initial_scene = fixture
+        .session
+        .snapshot_scene(&SurfaceId::new("picker"))
+        .expect("picker surface should be attached");
+    assert_highlighted_picker_cell(&initial_scene, 1, 1);
+    assert_picker_label(&initial_scene, "1 × 1");
+
+    fixture
+        .session
+        .hover_node(
+            &SurfaceId::new("picker"),
+            &Selector::id_eq("table.picker.cell.3.4"),
+            &HitPointSearch::default(),
+        )
+        .expect("picker surface should be attached")
+        .expect("hover should succeed");
+    harness.settle(2);
+
+    let picker_scene = fixture
+        .session
+        .snapshot_scene(&SurfaceId::new("picker"))
+        .expect("picker surface should remain attached");
+    assert_highlighted_picker_cell(&picker_scene, 3, 4);
+    assert_picker_label(&picker_scene, "3 × 4");
+}
+
+fn transient_surface_hover_delivers_single_mouse_moved_callback_per_step(harness: AppKitHarness) {
+    let fixture = open_picker_contract_fixture(harness);
+
+    assert_eq!(fixture.tracking_mouse_moved_count(), 0);
+    assert_eq!(fixture.tracking_mouse_exited_count(), 0);
+
+    fixture
+        .session
+        .hover_node(
+            &SurfaceId::new("picker"),
+            &Selector::id_eq("table.picker.cell.3.4"),
+            &HitPointSearch::default(),
+        )
+        .expect("picker surface should be attached")
+        .expect("hover should succeed");
+    harness.settle(2);
+
+    assert_eq!(fixture.tracking_mouse_moved_count(), 1);
+    assert_eq!(fixture.tracking_mouse_exited_count(), 0);
+
+    fixture
+        .session
+        .hover_node(
+            &SurfaceId::new("picker"),
+            &Selector::id_eq("table.picker.cell.4.2"),
+            &HitPointSearch::default(),
+        )
+        .expect("picker surface should be attached")
+        .expect("second hover should succeed");
+    harness.settle(2);
+
+    assert_eq!(fixture.tracking_mouse_moved_count(), 2);
+    assert_eq!(fixture.tracking_mouse_exited_count(), 0);
+
+    let picker_scene = fixture
+        .session
+        .snapshot_scene(&SurfaceId::new("picker"))
+        .expect("picker surface should remain attached");
+    assert_highlighted_picker_cell(&picker_scene, 4, 2);
+    assert_picker_label(&picker_scene, "4 × 2");
+}
+
+fn click_targets_attached_child_window_even_when_parent_window_is_present(harness: AppKitHarness) {
+    let mtm = harness.main_thread_marker();
+    let parent = harness.create_window(180.0, 120.0);
+    let parent_view = RoutingTrackingView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    parent.set_content_view(&parent_view);
+    parent.window().makeFirstResponder(Some(&parent_view));
+
+    let child = harness.create_window(180.0, 120.0);
+    let child_view = ClickTrackingChildView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    child.set_content_view(&child_view);
+
+    unsafe {
+        parent
+            .window()
+            .addChildWindow_ordered(child.window(), NSWindowOrderingMode::Above);
+    }
+
+    let other = harness.create_window(180.0, 120.0);
+    let other_view = RoutingTrackingView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    other.set_content_view(&other_view);
+    other.window().makeFirstResponder(Some(&other_view));
+    other.window().makeKeyWindow();
+    harness.settle(2);
+
+    assert!(child.window().parentWindow().is_some());
+    assert!(!child.window().isKeyWindow());
+
+    let attached = harness.attach_window(child.window());
+    attached.input().click(Point::new(40.0, 40.0)).unwrap();
+
+    assert_eq!(child_view.ivars().mouse_downs.get(), 1);
+    assert_eq!(child_view.ivars().mouse_ups.get(), 1);
+    assert_eq!(parent_view.ivars().mouse_downs.get(), 0);
+    assert_eq!(other_view.ivars().mouse_downs.get(), 0);
+    assert!(!child.window().isKeyWindow());
+}
+
+fn semantic_click_targets_attached_child_window_even_when_parent_window_is_present(
+    harness: AppKitHarness,
+) {
+    let mtm = harness.main_thread_marker();
+    let parent = harness.create_window(180.0, 120.0);
+    let parent_view = RoutingTrackingView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    parent.set_content_view(&parent_view);
+    parent.window().makeFirstResponder(Some(&parent_view));
+
+    let child = harness.create_window(180.0, 120.0);
+    let child_view = ClickTrackingChildView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    child.set_content_view(&child_view);
+
+    unsafe {
+        parent
+            .window()
+            .addChildWindow_ordered(child.window(), NSWindowOrderingMode::Above);
+    }
+
+    let other = harness.create_window(180.0, 120.0);
+    let other_view = RoutingTrackingView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    other.set_content_view(&other_view);
+    other.window().makeFirstResponder(Some(&other_view));
+    other.window().makeKeyWindow();
+    harness.settle(2);
+
+    let attached = harness.attach_window(child.window());
+    attached.register_node(
+        &child_view,
+        InstrumentedView {
+            id: Some("attached-child-click-target".into()),
+            role: Some(Role::Button),
+            label: Some("Attached Child Click Target".into()),
+            ..Default::default()
+        },
+    );
+    harness.settle(2);
+
+    attached
+        .click_node(&Selector::id_eq("attached-child-click-target"))
+        .unwrap();
+
+    assert_eq!(child_view.ivars().mouse_downs.get(), 1);
+    assert_eq!(child_view.ivars().mouse_ups.get(), 1);
+    assert_eq!(parent_view.ivars().mouse_downs.get(), 0);
+    assert_eq!(other_view.ivars().mouse_downs.get(), 0);
+    assert!(!child.window().isKeyWindow());
+}
+
 fn attached_window_refreshes_after_content_view_swap(harness: AppKitHarness) {
     let host = harness.create_window(260.0, 140.0);
     let initial_root = make_text_view(
@@ -1254,12 +1583,15 @@ fn move_mouse_targets_attached_window_even_when_another_window_is_key(harness: A
     other.window().makeFirstResponder(Some(&other_view));
     other.window().makeKeyWindow();
     harness.settle(2);
+    let other_was_key = other.window().isKeyWindow();
 
     target.input().move_mouse(Point::new(40.0, 40.0)).unwrap();
     harness.settle(2);
 
     assert_eq!(target_view.ivars().mouse_moves.get(), 1);
     assert_eq!(other_view.ivars().mouse_moves.get(), 0);
+    assert!(!target.window().isKeyWindow());
+    assert_eq!(other.window().isKeyWindow(), other_was_key);
 }
 
 fn synthesized_input_keeps_background_test_windows_hidden(harness: AppKitHarness) {
@@ -1277,6 +1609,7 @@ fn synthesized_input_keeps_background_test_windows_hidden(harness: AppKitHarness
         !host.window().isVisible(),
         "background test window should start hidden"
     );
+    assert!(!host.window().isKeyWindow());
 
     host.input().move_mouse(Point::new(24.0, 24.0)).unwrap();
     host.input()
@@ -1288,6 +1621,7 @@ fn synthesized_input_keeps_background_test_windows_hidden(harness: AppKitHarness
         !host.window().isVisible(),
         "synthetic input should not surface the background test window"
     );
+    assert!(!host.window().isKeyWindow());
 }
 
 fn key_press_targets_attached_window_even_when_another_window_is_key(harness: AppKitHarness) {
@@ -1308,6 +1642,7 @@ fn key_press_targets_attached_window_even_when_another_window_is_key(harness: Ap
     other.window().makeFirstResponder(Some(&other_view));
     other.window().makeKeyWindow();
     harness.settle(2);
+    let other_was_key = other.window().isKeyWindow();
 
     target
         .input()
@@ -1317,6 +1652,8 @@ fn key_press_targets_attached_window_even_when_another_window_is_key(harness: Ap
 
     assert_eq!(target_view.ivars().key_downs.get(), 1);
     assert_eq!(other_view.ivars().key_downs.get(), 0);
+    assert!(!target.window().isKeyWindow());
+    assert_eq!(other.window().isKeyWindow(), other_was_key);
 }
 
 fn making_peer_window_key_does_not_surface_background_test_windows(harness: AppKitHarness) {
@@ -2824,6 +3161,7 @@ fn make_text_view(
 
 #[derive(Clone, Default)]
 struct RoutingTrackingIvars {
+    mouse_downs: Cell<usize>,
     mouse_moves: Cell<usize>,
     key_downs: Cell<usize>,
 }
@@ -2843,6 +3181,12 @@ define_class!(
         #[unsafe(method(acceptsFirstMouse:))]
         fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
             true
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
+            let next = self.ivars().mouse_downs.get() + 1;
+            self.ivars().mouse_downs.set(next);
         }
 
         #[unsafe(method(mouseMoved:))]
@@ -3029,6 +3373,7 @@ impl PointTrackingClickView {
 #[derive(Default)]
 struct ClickTrackingIvars {
     mouse_downs: Cell<usize>,
+    mouse_ups: Cell<usize>,
 }
 
 define_class!(
@@ -3053,6 +3398,7 @@ define_class!(
                 .mouse_downs
                 .set(self.ivars().mouse_downs.get() + 1);
         }
+
     }
 );
 
@@ -3081,6 +3427,7 @@ define_class!(
                 .mouse_downs
                 .set(self.ivars().mouse_downs.get() + 1);
         }
+
     }
 );
 
@@ -3111,10 +3458,23 @@ define_class!(
         }
 
         #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, _event: &NSEvent) {
+        fn mouse_down(&self, event: &NSEvent) {
             self.ivars()
                 .mouse_downs
                 .set(self.ivars().mouse_downs.get() + 1);
+            unsafe {
+                let () = msg_send![super(self), mouseDown: event];
+            }
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            self.ivars()
+                .mouse_ups
+                .set(self.ivars().mouse_ups.get() + 1);
+            unsafe {
+                let () = msg_send![super(self), mouseUp: event];
+            }
         }
     }
 );
@@ -3149,10 +3509,57 @@ define_class!(
                 .mouse_downs
                 .set(self.ivars().mouse_downs.get() + 1);
         }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _event: &NSEvent) {
+            self.ivars()
+                .mouse_ups
+                .set(self.ivars().mouse_ups.get() + 1);
+        }
     }
 );
 
 impl ClickTrackingChildView {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ClickTrackingIvars::default());
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+define_class!(
+    #[unsafe(super(NSTextView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ClickTrackingIvars]
+    struct MouseDownTrackingTextView;
+
+    impl MouseDownTrackingTextView {
+        #[unsafe(method(acceptsFirstResponder))]
+        fn accepts_first_responder(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &NSEvent) {
+            self.ivars()
+                .mouse_downs
+                .set(self.ivars().mouse_downs.get() + 1);
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _event: &NSEvent) {
+            self.ivars()
+                .mouse_ups
+                .set(self.ivars().mouse_ups.get() + 1);
+        }
+    }
+);
+
+impl MouseDownTrackingTextView {
     fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ClickTrackingIvars::default());
         unsafe { msg_send![super(this), initWithFrame: frame] }
@@ -3605,4 +4012,321 @@ impl ChildWindowInsertTarget {
         });
         unsafe { msg_send![super(this), init] }
     }
+}
+
+const PICKER_ROWS: usize = 4;
+const PICKER_COLS: usize = 4;
+const PICKER_CELL_SIZE: f64 = 24.0;
+const PICKER_GRID_ORIGIN_X: f64 = 16.0;
+const PICKER_GRID_ORIGIN_Y: f64 = 40.0;
+const PICKER_LABEL_ORIGIN_X: f64 = 16.0;
+const PICKER_LABEL_ORIGIN_Y: f64 = 12.0;
+const PICKER_LABEL_WIDTH: f64 = 72.0;
+const PICKER_LABEL_HEIGHT: f64 = 20.0;
+const PICKER_WINDOW_WIDTH: f64 = 160.0;
+const PICKER_WINDOW_HEIGHT: f64 = 160.0;
+
+#[derive(Clone, Copy)]
+struct PickerState {
+    hovered_row: usize,
+    hovered_col: usize,
+}
+
+impl Default for PickerState {
+    fn default() -> Self {
+        Self {
+            hovered_row: 1,
+            hovered_col: 1,
+        }
+    }
+}
+
+impl PickerState {
+    fn label(self) -> String {
+        format!("{} × {}", self.hovered_row, self.hovered_col)
+    }
+}
+
+struct PickerSceneProvider {
+    state: Rc<RefCell<PickerState>>,
+}
+
+impl SemanticProvider for PickerSceneProvider {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        let state = *self.state.borrow();
+        let mut nodes = vec![
+            SemanticNode::new(
+                "table.picker",
+                Role::Container,
+                Rect::new(
+                    Point::new(0.0, 0.0),
+                    Size::new(PICKER_WINDOW_WIDTH, PICKER_WINDOW_HEIGHT),
+                ),
+            )
+            .with_selector("table.picker"),
+            SemanticNode::new(
+                "table.picker.label",
+                Role::Label,
+                Rect::new(
+                    Point::new(PICKER_LABEL_ORIGIN_X, PICKER_LABEL_ORIGIN_Y),
+                    Size::new(PICKER_LABEL_WIDTH, PICKER_LABEL_HEIGHT),
+                ),
+            )
+            .with_selector("table.picker.label")
+            .with_property("text", PropertyValue::string(state.label())),
+        ];
+
+        for row in 1..=PICKER_ROWS {
+            for col in 1..=PICKER_COLS {
+                let rect = Rect::new(
+                    Point::new(
+                        PICKER_GRID_ORIGIN_X + ((col - 1) as f64 * PICKER_CELL_SIZE),
+                        PICKER_GRID_ORIGIN_Y + ((row - 1) as f64 * PICKER_CELL_SIZE),
+                    ),
+                    Size::new(PICKER_CELL_SIZE, PICKER_CELL_SIZE),
+                );
+                nodes.push(
+                    SemanticNode::new(format!("table.picker.cell.{row}.{col}"), Role::Button, rect)
+                        .with_selector("table.picker.cell")
+                        .with_property("rows", PropertyValue::Integer(row as i64))
+                        .with_property("cols", PropertyValue::Integer(col as i64))
+                        .with_state(
+                            "highlighted",
+                            PropertyValue::Bool(
+                                state.hovered_row == row && state.hovered_col == col,
+                            ),
+                        ),
+                );
+            }
+        }
+
+        nodes
+    }
+}
+
+struct PickerTrackingOwnerIvars {
+    container: Retained<NSView>,
+    state: Rc<RefCell<PickerState>>,
+    mouse_moved_calls: Rc<Cell<usize>>,
+    mouse_exited_calls: Rc<Cell<usize>>,
+}
+
+define_class!(
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = PickerTrackingOwnerIvars]
+    struct PickerTrackingOwner;
+
+    impl PickerTrackingOwner {
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &NSEvent) {
+            self.ivars()
+                .mouse_moved_calls
+                .set(self.ivars().mouse_moved_calls.get() + 1);
+            let window_point = event.locationInWindow();
+            let local_point = self
+                .ivars()
+                .container
+                .convertPoint_fromView(window_point, None);
+            if let Some((row, col)) = picker_cell_at_point(local_point) {
+                *self.ivars().state.borrow_mut() = PickerState {
+                    hovered_row: row,
+                    hovered_col: col,
+                };
+            }
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            self.ivars()
+                .mouse_exited_calls
+                .set(self.ivars().mouse_exited_calls.get() + 1);
+            *self.ivars().state.borrow_mut() = PickerState::default();
+        }
+    }
+);
+
+impl PickerTrackingOwner {
+    fn new(
+        mtm: MainThreadMarker,
+        container: &NSView,
+        state: Rc<RefCell<PickerState>>,
+        mouse_moved_calls: Rc<Cell<usize>>,
+        mouse_exited_calls: Rc<Cell<usize>>,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(PickerTrackingOwnerIvars {
+            container: unsafe {
+                Retained::retain(container as *const _ as *mut _)
+                    .expect("tracking owner should retain the picker container")
+            },
+            state,
+            mouse_moved_calls,
+            mouse_exited_calls,
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+struct PickerContractFixture {
+    session: glasscheck_appkit::AppKitSession,
+    tracking_mouse_moved_calls: Rc<Cell<usize>>,
+    tracking_mouse_exited_calls: Rc<Cell<usize>>,
+    _picker_window: Retained<NSWindow>,
+    _picker_container: Retained<NSView>,
+    _tracking_area: Retained<NSTrackingArea>,
+    _tracking_owner: Retained<PickerTrackingOwner>,
+    _opener_target: Retained<ChildWindowOpenTarget>,
+}
+
+impl PickerContractFixture {
+    fn tracking_mouse_moved_count(&self) -> usize {
+        self.tracking_mouse_moved_calls.get()
+    }
+
+    fn tracking_mouse_exited_count(&self) -> usize {
+        self.tracking_mouse_exited_calls.get()
+    }
+}
+
+fn open_picker_contract_fixture(harness: AppKitHarness) -> PickerContractFixture {
+    let mtm = harness.main_thread_marker();
+    let picker_state = Rc::new(RefCell::new(PickerState::default()));
+    let tracking_mouse_moved_calls = Rc::new(Cell::new(0));
+    let tracking_mouse_exited_calls = Rc::new(Cell::new(0));
+    let host = harness.create_window(320.0, 220.0);
+    let picker = harness.create_window(PICKER_WINDOW_WIDTH, PICKER_WINDOW_HEIGHT);
+    let root = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(320.0, 220.0)),
+    );
+    let picker_root = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(PICKER_WINDOW_WIDTH, PICKER_WINDOW_HEIGHT),
+        ),
+    );
+    picker.set_content_view(&picker_root);
+
+    let opener_target = ChildWindowOpenTarget::new(mtm, picker.window());
+    let opener = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str("Open Picker"),
+            Some(&*opener_target),
+            Some(sel!(openChildWindow:)),
+            mtm,
+        )
+    };
+    opener.setFrame(NSRect::new(
+        NSPoint::new(28.0, 140.0),
+        NSSize::new(120.0, 32.0),
+    ));
+    root.addSubview(&opener);
+    host.set_content_view(&root);
+    host.register_node(
+        &opener,
+        InstrumentedView {
+            id: Some("open-picker".into()),
+            role: Some(Role::Button),
+            label: Some("Open Picker".into()),
+            ..Default::default()
+        },
+    );
+    harness.settle(2);
+
+    let session = harness.session();
+    session.attach_host("main", host);
+    session
+        .click_node(&SurfaceId::new("main"), &Selector::id_eq("open-picker"))
+        .expect("main surface should be attached")
+        .expect("picker opener click should succeed");
+    picker.window().makeKeyAndOrderFront(None);
+    harness.settle(2);
+    assert!(
+        picker.window().parentWindow().is_some(),
+        "picker opener should parent the child window before attachment"
+    );
+    session.attach_window("picker", picker.window());
+    let tracking_owner = PickerTrackingOwner::new(
+        mtm,
+        &picker_root,
+        picker_state.clone(),
+        tracking_mouse_moved_calls.clone(),
+        tracking_mouse_exited_calls.clone(),
+    );
+    let tracking_options = NSTrackingAreaOptions::MouseMoved | NSTrackingAreaOptions::ActiveAlways;
+    let owner_object: &AnyObject = unsafe { &*(std::ptr::from_ref(&*tracking_owner).cast()) };
+    let tracking_area = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            NSTrackingArea::alloc(),
+            NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(PICKER_WINDOW_WIDTH, PICKER_WINDOW_HEIGHT),
+            ),
+            tracking_options,
+            Some(owner_object),
+            None,
+        )
+    };
+    picker_root.addTrackingArea(&tracking_area);
+    session.with_surface(&SurfaceId::new("picker"), |picker_host| {
+        picker_host.set_scene_source(Box::new(PickerSceneProvider {
+            state: picker_state.clone(),
+        }));
+        picker_host.window().setAcceptsMouseMovedEvents(true);
+    });
+    harness.settle(2);
+
+    PickerContractFixture {
+        session,
+        tracking_mouse_moved_calls,
+        tracking_mouse_exited_calls,
+        _picker_window: unsafe {
+            Retained::retain(picker.window() as *const _ as *mut _)
+                .expect("picker fixture should retain the picker window")
+        },
+        _picker_container: unsafe {
+            Retained::retain(&*picker_root as *const _ as *mut _)
+                .expect("picker fixture should retain the picker container")
+        },
+        _tracking_area: tracking_area,
+        _tracking_owner: tracking_owner,
+        _opener_target: opener_target,
+    }
+}
+
+fn picker_cell_at_point(point: NSPoint) -> Option<(usize, usize)> {
+    let relative_x = point.x - PICKER_GRID_ORIGIN_X;
+    let relative_y = point.y - PICKER_GRID_ORIGIN_Y;
+    if relative_x < 0.0 || relative_y < 0.0 {
+        return None;
+    }
+
+    let col = (relative_x / PICKER_CELL_SIZE).floor() as usize + 1;
+    let row = (relative_y / PICKER_CELL_SIZE).floor() as usize + 1;
+    (row <= PICKER_ROWS && col <= PICKER_COLS).then_some((row, col))
+}
+
+fn assert_highlighted_picker_cell(scene: &glasscheck_core::Scene, row: usize, col: usize) {
+    let handle = scene
+        .find(&Selector::id_eq(&format!("table.picker.cell.{row}.{col}")))
+        .expect("picker cell should resolve");
+    let node = scene.node(handle).expect("picker cell should exist");
+    assert_eq!(
+        node.state.get("highlighted"),
+        Some(&PropertyValue::Bool(true)),
+        "expected table.picker.cell.{row}.{col} to be highlighted"
+    );
+}
+
+fn assert_picker_label(scene: &glasscheck_core::Scene, text: &str) {
+    let handle = scene
+        .find(&Selector::id_eq("table.picker.label"))
+        .expect("picker label should resolve");
+    let node = scene.node(handle).expect("picker label should exist");
+    assert_eq!(
+        node.properties.get("text"),
+        Some(&PropertyValue::string(text)),
+        "expected picker label text to match"
+    );
 }

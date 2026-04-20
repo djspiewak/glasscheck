@@ -414,6 +414,15 @@ mod imp {
                 .ok_or(RegionResolveError::InvalidHandle(handle))?;
             let root_view = self.root_view();
             let registered_view = self.registered_view_for_handle(handle, root_view.as_deref());
+            if let Some(view) = registered_view
+                .as_deref()
+                .filter(|view| is_control_view(view))
+            {
+                unsafe {
+                    let () = msg_send![&**view, performClick: std::ptr::null::<AnyObject>()];
+                }
+                return Ok(());
+            }
             let (point, click_view) = match self.click_target(
                 root_view.as_deref(),
                 registered_view.as_deref(),
@@ -524,15 +533,22 @@ mod imp {
             view: &NSTextView,
             location: usize,
         ) -> Result<(), InputSynthesisError> {
+            let desired = TextRange::new(location, 0);
             let Some(rect) = self.insertion_caret_rect(view, location) else {
-                return Err(InputSynthesisError::MissingTarget);
+                self.input().set_selection(view, desired);
+                return Ok(());
             };
             let root_point = NSPoint::new(
                 rect.origin.x + (rect.size.width / 2.0).max(0.5),
                 rect.origin.y + (rect.size.height / 2.0).max(0.5),
             );
             let point = self.root_point_to_window_point(root_point);
-            self.input().click(Point::new(point.x, point.y))
+            self.input()
+                .click_text_view(view, Point::new(point.x, point.y))?;
+            if self.selected_text_range(view) != desired {
+                self.input().set_selection(view, desired);
+            }
+            Ok(())
         }
 
         /// Registers semantic metadata for a view so it can be queried later.

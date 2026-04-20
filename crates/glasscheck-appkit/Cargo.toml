@@ -36,6 +36,12 @@ objc2-app-kit = { version = "0.3", features = [
     "NSGraphicsContext",
     "NSUserInterfaceItemIdentification",
 ] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGEvent",
+    "CGEventTypes",
+    "CGGeometry",
+    "CGRemoteOperation",
+] }
 objc2-foundation = { version = "0.3", features = [
     "NSDate",
     "NSRunLoop",

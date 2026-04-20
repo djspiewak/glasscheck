@@ -1,24 +1,28 @@
 #[cfg(target_os = "macos")]
 mod imp {
+    use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, Sel};
     use objc2::{msg_send, ClassType};
     use objc2_app_kit::{
-        NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSTextInputClient, NSTextView,
-        NSView, NSWindow,
+        NSApplication, NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSTextInputClient,
+        NSTextView, NSTrackingAreaOptions, NSView, NSWindow,
     };
-    use objc2_foundation::{NSPoint, NSRange, NSString};
+    use objc2_foundation::{
+        MainThreadMarker, NSDate, NSDefaultRunLoopMode, NSPoint, NSRange, NSRunLoop, NSString,
+    };
 
     use glasscheck_core::{InputDriver, InputSynthesisError, KeyModifiers, Point, Rect, TextRange};
 
     pub struct AppKitInputDriver<'a> {
         window: &'a NSWindow,
+        mtm: MainThreadMarker,
     }
 
     impl<'a> AppKitInputDriver<'a> {
         /// Creates an input driver for `window`.
         #[must_use]
-        pub fn new(window: &'a NSWindow, _mtm: objc2_foundation::MainThreadMarker) -> Self {
-            Self { window }
+        pub fn new(window: &'a NSWindow, mtm: MainThreadMarker) -> Self {
+            Self { window, mtm }
         }
 
         /// Synthesizes a left mouse click at `point` in window coordinates.
@@ -35,9 +39,19 @@ mod imp {
                 return Ok(());
             }
             if let Some(target) = target.as_deref() {
-                self.click_target(target, point)?;
+                if self.window.parentWindow().is_some() {
+                    self.window.makeFirstResponder(Some(target));
+                    self.dispatch_window_mouse_click(point)?;
+                } else {
+                    self.click_target(target, point)?;
+                }
             } else if let Some(content) = self.window.contentView() {
-                self.click_target(&content, point)?;
+                if self.window.parentWindow().is_some() {
+                    self.window.makeFirstResponder(Some(&content));
+                    self.dispatch_window_mouse_click(point)?;
+                } else {
+                    self.click_target(&content, point)?;
+                }
             } else {
                 return Err(InputSynthesisError::MissingTarget);
             }
@@ -51,6 +65,10 @@ mod imp {
             point: NSPoint,
         ) -> Result<(), InputSynthesisError> {
             self.activate_window();
+            if self.window.parentWindow().is_some() {
+                self.window.makeFirstResponder(Some(view));
+                return self.dispatch_window_mouse_click(point);
+            }
             let window_number = self.window.windowNumber();
             if let Some(down) =
                 NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
@@ -71,16 +89,17 @@ mod imp {
             }
             if let Some(up) =
                 NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                NSEventType::LeftMouseUp,
-                point,
-                NSEventModifierFlags::empty(),
-                0.0,
-                window_number,
-                None,
-                0,
-                1,
-                1.0,
-            ) {
+                    NSEventType::LeftMouseUp,
+                    point,
+                    NSEventModifierFlags::empty(),
+                    0.0,
+                    window_number,
+                    None,
+                    0,
+                    1,
+                    1.0,
+                )
+            {
                 view.mouseUp(&up);
             } else {
                 return Err(InputSynthesisError::TransportFailure("mouse-up event creation"));
@@ -96,27 +115,23 @@ mod imp {
             ))
         }
 
+        /// Synthesizes a left click at `point` by routing through the window event path.
+        pub fn click_window_point(&self, point: Point) -> Result<(), InputSynthesisError> {
+            self.activate_window();
+            let point = ns_point(point);
+            self.dispatch_window_mouse_click(point)
+        }
+
         /// Synthesizes a mouse-move event at `point` in window coordinates.
         pub fn move_mouse(&self, point: Point) -> Result<(), InputSynthesisError> {
             self.activate_window();
-            let point = ns_point(point);
-            let window_number = self.window.windowNumber();
-            if let Some(event) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+            self.dispatch_mouse_move(
                 NSEventType::MouseMoved,
-                point,
+                ns_point(point),
                 NSEventModifierFlags::empty(),
-                0.0,
-                window_number,
-                None,
-                0,
                 0,
                 0.0,
-            ) {
-                self.window.sendEvent(&event);
-                Ok(())
-            } else {
-                Err(InputSynthesisError::TransportFailure("mouse-move event creation"))
-            }
+            )
         }
 
         /// Synthesizes a key press and release with the provided metadata.
@@ -211,6 +226,48 @@ mod imp {
             view.setSelectedRange(ns_range_for_scalar_range(view, range));
         }
 
+        /// Synthesizes a left click targeted at a text view's insertion point.
+        pub fn click_text_view(
+            &self,
+            view: &NSTextView,
+            point: Point,
+        ) -> Result<(), InputSynthesisError> {
+            self.activate_window();
+            self.window.makeFirstResponder(Some(view));
+            let point = ns_point(point);
+            let window_number = self.window.windowNumber();
+            let Some(down) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                NSEventType::LeftMouseDown,
+                point,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window_number,
+                None,
+                0,
+                1,
+                1.0,
+            ) else {
+                return Err(InputSynthesisError::TransportFailure("mouse-down event creation"));
+            };
+            let Some(up) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                NSEventType::LeftMouseUp,
+                point,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window_number,
+                None,
+                0,
+                1,
+                1.0,
+            ) else {
+                return Err(InputSynthesisError::TransportFailure("mouse-up event creation"));
+            };
+            self.app().postEvent_atStart(&up, false);
+            view.mouseDown(&down);
+            self.drain_run_loop();
+            Ok(())
+        }
+
         /// Sends an Objective-C action message to `target`.
         pub fn send_action(&self, target: &AnyObject, action: Sel) {
             unsafe {
@@ -219,6 +276,155 @@ mod imp {
         }
 
         fn activate_window(&self) {}
+
+        fn app(&self) -> Retained<NSApplication> {
+            NSApplication::sharedApplication(self.mtm)
+        }
+
+        fn dispatch_mouse_move(
+            &self,
+            event_type: NSEventType,
+            point: NSPoint,
+            modifiers: NSEventModifierFlags,
+            click_count: isize,
+            pressure: f32,
+        ) -> Result<(), InputSynthesisError> {
+            let window_number = self.window.windowNumber();
+            let Some(event) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                event_type,
+                point,
+                modifiers,
+                0.0,
+                window_number,
+                None,
+                0,
+                click_count,
+                pressure,
+            ) else {
+                return Err(InputSynthesisError::TransportFailure(
+                    "mouse event creation",
+                ));
+            };
+            self.window.sendEvent(&event);
+            self.dispatch_owner_tracking_mouse_moved_fallback(&event, point);
+            Ok(())
+        }
+
+        fn dispatch_window_mouse_event(
+            &self,
+            event_type: NSEventType,
+            point: NSPoint,
+            modifiers: NSEventModifierFlags,
+            click_count: isize,
+            pressure: f32,
+        ) -> Result<(), InputSynthesisError> {
+            let window_number = self.window.windowNumber();
+            let Some(event) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                event_type,
+                point,
+                modifiers,
+                0.0,
+                window_number,
+                None,
+                0,
+                click_count,
+                pressure,
+            ) else {
+                return Err(InputSynthesisError::TransportFailure(
+                    "mouse event creation",
+                ));
+            };
+            self.window.sendEvent(&event);
+            Ok(())
+        }
+
+        fn dispatch_window_mouse_click(&self, point: NSPoint) -> Result<(), InputSynthesisError> {
+            self.dispatch_window_mouse_event(
+                NSEventType::LeftMouseDown,
+                point,
+                NSEventModifierFlags::empty(),
+                1,
+                1.0,
+            )?;
+            self.dispatch_window_mouse_event(
+                NSEventType::LeftMouseUp,
+                point,
+                NSEventModifierFlags::empty(),
+                1,
+                1.0,
+            )
+        }
+
+        // AppKit does not reliably deliver owner-backed tracking-area mouseMoved callbacks for
+        // these synthetic window-targeted moves, so provide a narrow mouseMoved-only fallback.
+        fn dispatch_owner_tracking_mouse_moved_fallback(&self, event: &NSEvent, point: NSPoint) {
+            let Some(content) = self.window.contentView() else {
+                return;
+            };
+            self.dispatch_owner_tracking_mouse_moved_fallback_in_view(&content, event, point);
+        }
+
+        fn dispatch_owner_tracking_mouse_moved_fallback_in_view(
+            &self,
+            view: &NSView,
+            event: &NSEvent,
+            window_point: NSPoint,
+        ) {
+            let local_point = view.convertPoint_fromView(window_point, None);
+            for area in view.trackingAreas().iter() {
+                let options = area.options();
+                if !self.supports_owner_tracking_mouse_moved_fallback(options) {
+                    continue;
+                }
+                let rect = if options.contains(NSTrackingAreaOptions::InVisibleRect) {
+                    view.visibleRect()
+                } else {
+                    area.rect()
+                };
+                if !point_in_rect(local_point, rect) {
+                    continue;
+                }
+                let Some(owner) = area.owner() else {
+                    continue;
+                };
+                unsafe {
+                    let () = msg_send![&*owner, mouseMoved: event];
+                }
+            }
+
+            for subview in view.subviews().iter() {
+                self.dispatch_owner_tracking_mouse_moved_fallback_in_view(
+                    &subview,
+                    event,
+                    window_point,
+                );
+            }
+        }
+
+        fn supports_owner_tracking_mouse_moved_fallback(
+            &self,
+            options: NSTrackingAreaOptions,
+        ) -> bool {
+            if !options.contains(NSTrackingAreaOptions::MouseMoved) {
+                return false;
+            }
+            if options.contains(NSTrackingAreaOptions::ActiveAlways) {
+                return true;
+            }
+            if options.contains(NSTrackingAreaOptions::ActiveInKeyWindow) {
+                return self.window.isKeyWindow();
+            }
+            if options.contains(NSTrackingAreaOptions::ActiveInActiveApp) {
+                return self.app().isActive();
+            }
+            false
+        }
+
+        fn drain_run_loop(&self) {
+            let date = NSDate::dateWithTimeIntervalSinceNow(0.01);
+            let _ = NSRunLoop::currentRunLoop()
+                .runMode_beforeDate(unsafe { NSDefaultRunLoopMode }, &date);
+        }
 
         fn is_control_target(&self, target: Option<&NSView>) -> bool {
             let Some(target) = target else {
@@ -295,6 +501,13 @@ mod imp {
         let start = scalar_index_to_utf16_offset(&content, range.start);
         let end = scalar_index_to_utf16_offset(&content, range.start + range.len);
         NSRange::new(start, end.saturating_sub(start))
+    }
+
+    fn point_in_rect(point: NSPoint, rect: objc2_foundation::NSRect) -> bool {
+        point.x >= rect.origin.x
+            && point.x <= rect.origin.x + rect.size.width
+            && point.y >= rect.origin.y
+            && point.y <= rect.origin.y + rect.size.height
     }
 }
 
