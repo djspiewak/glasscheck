@@ -989,6 +989,7 @@ fn key_press_queued_reaches_root_legacy_controller(harness: GtkHarness) {
     let key_press_count = Rc::new(Cell::new(0usize));
     let count_ref = key_press_count.clone();
     let legacy = gtk4::EventControllerLegacy::new();
+    legacy.set_propagation_phase(gtk4::PropagationPhase::Capture);
     legacy.connect_event(move |_, event| {
         if event.event_type() == gtk4::gdk::EventType::KeyPress {
             count_ref.set(count_ref.get() + 1);
@@ -1057,6 +1058,7 @@ fn key_press_direct_skips_root_legacy_controller(harness: GtkHarness) {
     let key_press_count = Rc::new(Cell::new(0usize));
     let count_ref = key_press_count.clone();
     let legacy = gtk4::EventControllerLegacy::new();
+    legacy.set_propagation_phase(gtk4::PropagationPhase::Capture);
     legacy.connect_event(move |_, event| {
         if event.event_type() == gtk4::gdk::EventType::KeyPress {
             count_ref.set(count_ref.get() + 1);
