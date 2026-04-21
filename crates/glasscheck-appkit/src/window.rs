@@ -198,7 +198,6 @@ mod imp {
                 Retained::retain(&*view as *const NSView as *mut NSView)
                     .expect("content view attachment should retain successfully")
             });
-            configure_background_test_window(&retained);
             Self {
                 mtm,
                 window: retained,
@@ -231,7 +230,6 @@ mod imp {
                         .expect("window attachment should retain successfully")
                 })
                 .unwrap_or_else(|| managed_window_for_root_view(view, mtm));
-            configure_background_test_window(&attached_window);
             Self {
                 mtm,
                 window: attached_window,

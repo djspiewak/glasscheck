@@ -59,7 +59,9 @@ impl SurfaceId {
     /// Creates a surface identifier from a stable string.
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        let id = id.into();
+        debug_assert!(!id.is_empty(), "SurfaceId must not be empty");
+        Self(id)
     }
 
     /// Borrows the raw identifier.
@@ -100,7 +102,9 @@ impl SurfaceQuery {
     /// Builds a contains-title query.
     #[must_use]
     pub fn title_contains(title: impl Into<String>) -> Self {
-        Self::TitleContains(title.into())
+        let title = title.into();
+        debug_assert!(!title.is_empty(), "SurfaceQuery::title_contains pattern must not be empty");
+        Self::TitleContains(title)
     }
 
     /// Returns whether `title` satisfies this query.
@@ -166,7 +170,9 @@ impl TextRange {
 /// Search strategy for semantic hit-point resolution.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HitPointSearch {
+    /// Strategy for generating candidate hit points within the visible region.
     pub strategy: HitPointStrategy,
+    /// Maximum number of candidate points to sample; used by `Grid` and `VisibleCenterFirst`.
     pub sample_count: usize,
 }
 
@@ -454,7 +460,7 @@ pub fn crop_image_bottom_left(image: &Image, rect: Rect) -> Image {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_provider_nodes, TransientSurfaceSpec};
+    use super::{normalize_provider_nodes, SurfaceQuery, TransientSurfaceSpec};
     use crate::{
         NodeProvenanceKind, Point, PropertyValue, Rect, Role, Selector, SemanticNode, Size,
         SurfaceId,
@@ -530,5 +536,19 @@ mod tests {
 
         assert_eq!(spec.owner, SurfaceId::new("editor"));
         assert_eq!(spec.opener, Selector::id_eq("open-table-picker"));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "SurfaceId must not be empty")]
+    fn surface_id_rejects_empty_string() {
+        let _ = SurfaceId::new("");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "SurfaceQuery::title_contains pattern must not be empty")]
+    fn surface_query_title_contains_rejects_empty_pattern() {
+        let _ = SurfaceQuery::title_contains("");
     }
 }

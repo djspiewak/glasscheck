@@ -1282,7 +1282,10 @@ fn session_discovers_window_by_title(harness: AppKitHarness) {
     let picker = session
         .snapshot_scene(&SurfaceId::new("picker"))
         .expect("discovered surface should be attached");
-    assert!(!picker.all().is_empty() || picker.all().is_empty());
+    assert!(
+        !picker.all().is_empty(),
+        "discovered surface should have accessible nodes"
+    );
 }
 
 fn session_opens_owned_transient_window_and_evicts_it(harness: AppKitHarness) {

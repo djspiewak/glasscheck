@@ -32,6 +32,8 @@ pub enum PollError {
     Timeout { elapsed: Duration, attempts: usize },
     /// A capture source could not provide an image.
     CaptureFailed(&'static str),
+    /// A required precondition was not met; polling was not attempted.
+    Precondition(&'static str),
 }
 
 impl std::fmt::Display for PollError {
@@ -45,6 +47,7 @@ impl std::fmt::Display for PollError {
                 )
             }
             Self::CaptureFailed(message) => write!(f, "capture failed: {message}"),
+            Self::Precondition(reason) => write!(f, "precondition not met: {reason}"),
         }
     }
 }
@@ -99,13 +102,14 @@ where
         if predicate() {
             return Ok(attempts);
         }
-        if start.elapsed() >= options.timeout {
+        let remaining = options.timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
             return Err(PollError::Timeout {
                 elapsed: start.elapsed(),
                 attempts,
             });
         }
-        sleep(options.interval);
+        sleep(remaining.min(options.interval));
     }
 }
 
@@ -132,7 +136,7 @@ where
         attempts += 1;
         let current = capture().ok_or(PollError::CaptureFailed("image source returned None"))?;
 
-        if required == 1 || run_length + 1 >= required && previous.as_ref() == Some(&current) {
+        if required == 1 || (run_length + 1 >= required && previous.as_ref() == Some(&current)) {
             return Ok(current);
         }
 
@@ -148,13 +152,14 @@ where
 
         previous = Some(current);
 
-        if start.elapsed() >= options.timeout {
+        let remaining = options.timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
             return Err(PollError::Timeout {
                 elapsed: start.elapsed(),
                 attempts,
             });
         }
-        sleep(options.interval);
+        sleep(remaining.min(options.interval));
     }
 }
 
@@ -179,7 +184,7 @@ where
     loop {
         attempts += 1;
         let current = capture().ok_or(PollError::CaptureFailed("scene source returned None"))?;
-        if required == 1 || run_length + 1 >= required && previous.as_ref() == Some(&current) {
+        if required == 1 || (run_length + 1 >= required && previous.as_ref() == Some(&current)) {
             return Ok(current);
         }
 
@@ -195,13 +200,14 @@ where
 
         previous = Some(current);
 
-        if start.elapsed() >= options.timeout {
+        let remaining = options.timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
             return Err(PollError::Timeout {
                 elapsed: start.elapsed(),
                 attempts,
             });
         }
-        sleep(options.interval);
+        sleep(remaining.min(options.interval));
     }
 }
 
@@ -369,24 +375,24 @@ where
     loop {
         attempts += 1;
         let scene = capture().ok_or(WaitError::CaptureFailed("scene source returned None"))?;
-        let last_matches: Vec<ResolvedNode> = scene
-            .resolve_all(predicate)
-            .into_iter()
-            .map(ResolvedNode::from)
-            .collect();
         if matches_scene(&scene, predicate) {
             return Ok(scene);
         }
-        let last_scene = Some(scene);
-        if start.elapsed() >= options.timeout {
+        let remaining = options.timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            let last_matches = scene
+                .resolve_all(predicate)
+                .into_iter()
+                .map(ResolvedNode::from)
+                .collect();
             return Err(WaitError::Timeout {
                 elapsed: start.elapsed(),
                 attempts,
-                last_scene,
+                last_scene: Some(scene),
                 last_matches,
             });
         }
-        sleep(options.interval);
+        sleep(remaining.min(options.interval));
     }
 }
 
@@ -405,27 +411,27 @@ where
     loop {
         attempts += 1;
         let scene = capture().ok_or(WaitError::CaptureFailed("scene source returned None"))?;
-        let last_matches: Vec<ResolvedNode> = scene
-            .resolve_all(predicate)
-            .into_iter()
-            .map(ResolvedNode::from)
-            .collect();
         if let Ok(resolved) = scene.resolve(predicate) {
             let resolved = ResolvedNode::from(resolved);
             if matches_resolved(&resolved) {
                 return Ok(resolved);
             }
         }
-        let last_scene = Some(scene);
-        if start.elapsed() >= options.timeout {
+        let remaining = options.timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            let last_matches = scene
+                .resolve_all(predicate)
+                .into_iter()
+                .map(ResolvedNode::from)
+                .collect();
             return Err(WaitError::Timeout {
                 elapsed: start.elapsed(),
                 attempts,
-                last_scene,
+                last_scene: Some(scene),
                 last_matches,
             });
         }
-        sleep(options.interval);
+        sleep(remaining.min(options.interval));
     }
 }
 

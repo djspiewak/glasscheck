@@ -72,7 +72,8 @@ mod imp {
                         attempts,
                     });
                 }
-                std::thread::sleep(options.interval);
+                let remaining = options.timeout.saturating_sub(started.elapsed());
+                std::thread::sleep(remaining.min(options.interval));
             }
         }
 

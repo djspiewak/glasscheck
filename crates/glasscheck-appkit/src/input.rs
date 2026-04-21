@@ -48,14 +48,14 @@ mod imp {
                 return Ok(());
             }
             if let Some(target) = target.as_deref() {
-                if self.window.parentWindow().is_some() {
+                if self.attached_child_window || self.window.parentWindow().is_some() {
                     self.window.makeFirstResponder(Some(target));
                     self.dispatch_window_mouse_click(point)?;
                 } else {
                     self.click_target(target, point)?;
                 }
             } else if let Some(content) = self.window.contentView() {
-                if self.window.parentWindow().is_some() {
+                if self.attached_child_window || self.window.parentWindow().is_some() {
                     self.window.makeFirstResponder(Some(&content));
                     self.dispatch_window_mouse_click(point)?;
                 } else {
@@ -74,7 +74,7 @@ mod imp {
             point: NSPoint,
         ) -> Result<(), InputSynthesisError> {
             self.activate_window();
-            if self.window.parentWindow().is_some() {
+            if self.attached_child_window || self.window.parentWindow().is_some() {
                 self.window.makeFirstResponder(Some(view));
                 return self.dispatch_window_mouse_click(point);
             }
@@ -300,6 +300,10 @@ mod imp {
             point: Point,
         ) -> Result<(), InputSynthesisError> {
             self.activate_window();
+            if self.attached_child_window || self.window.parentWindow().is_some() {
+                self.window.makeFirstResponder(Some(view));
+                return self.dispatch_window_mouse_click(ns_point(point));
+            }
             self.window.makeFirstResponder(Some(view));
             let point = ns_point(point);
             let window_number = self.window.windowNumber();
@@ -395,6 +399,9 @@ mod imp {
             }
         }
 
+        /// Intentionally a no-op: background test windows must not be brought to
+        /// front. Callers are responsible for ordering test windows as needed before
+        /// performing input synthesis.
         fn activate_window(&self) {}
 
         fn app(&self) -> Retained<NSApplication> {
@@ -508,7 +515,10 @@ mod imp {
                     continue;
                 };
                 unsafe {
-                    let () = msg_send![&*owner, mouseMoved: event];
+                    let sel = objc2::sel!(mouseMoved:);
+                    if msg_send![&*owner, respondsToSelector: sel] {
+                        let () = msg_send![&*owner, mouseMoved: event];
+                    }
                 }
             }
 
@@ -535,6 +545,8 @@ mod imp {
                 return self.window.isKeyWindow();
             }
             if options.contains(NSTrackingAreaOptions::ActiveInActiveApp) {
+                // Intentionally always true: for hidden background test windows we synthesize
+                // events regardless of whether the app is currently active.
                 return true;
             }
             false

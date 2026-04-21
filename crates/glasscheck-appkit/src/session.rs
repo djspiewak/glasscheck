@@ -8,7 +8,7 @@ mod imp {
     };
     use objc2::rc::Retained;
     use objc2_app_kit::{NSApplication, NSWindow};
-    use objc2_foundation::NSPoint;
+    use objc2_foundation::{MainThreadMarker, NSPoint};
 
     use crate::{AppKitHarness, AppKitWindowHost, HitPointSearch};
 
@@ -27,21 +27,39 @@ mod imp {
             }
         }
 
+        /// Registers a pre-built [`AppKitWindowHost`] under the given surface ID.
         pub fn attach_host(&self, id: impl Into<SurfaceId>, host: AppKitWindowHost) {
-            self.surfaces.borrow_mut().insert(id.into(), host);
+            let id = id.into();
+            debug_assert!(
+                !self.surfaces.borrow().contains_key(&id),
+                "surface id '{}' is already registered; use a distinct id or remove the existing surface first",
+                id.as_str()
+            );
+            self.surfaces.borrow_mut().insert(id, host);
         }
 
+        /// Wraps a raw [`NSWindow`] into a host and registers it under the given surface ID.
         pub fn attach_window(&self, id: impl Into<SurfaceId>, window: &NSWindow) {
             self.attach_host(id, self.harness.attach_window(window));
         }
 
         #[must_use]
         pub fn discover_window(&self, id: impl Into<SurfaceId>, query: &SurfaceQuery) -> bool {
+            let registered_ids: std::collections::BTreeSet<usize> = {
+                let surfaces = self.surfaces.borrow();
+                surfaces
+                    .values()
+                    .map(|host| window_id(host.window()))
+                    .collect()
+            };
             let app = NSApplication::sharedApplication(self.harness.main_thread_marker());
             let Some(window) = app
                 .orderedWindows()
                 .iter()
-                .find(|window| query.matches_title(&window.title().to_string()))
+                .find(|window| {
+                    !registered_ids.contains(&window_id(window))
+                        && query.matches_title(&window.title().to_string())
+                })
             else {
                 return false;
             };
@@ -49,6 +67,7 @@ mod imp {
             true
         }
 
+        /// Polls until a window matching `query` is found and attached; returns the poll attempt count.
         pub fn wait_for_discovered_window(
             &self,
             id: impl Into<SurfaceId>,
@@ -61,6 +80,10 @@ mod imp {
         }
 
         /// Clicks an opener on the owner surface and attaches the newly opened transient.
+        ///
+        /// Returns `PollError::Timeout` if the transient never appears within
+        /// `options`. Returns `PollError::Precondition` for precondition failures: owner surface not
+        /// registered or opener click failed.
         pub fn open_transient_with_click(
             &self,
             id: impl Into<SurfaceId>,
@@ -68,17 +91,26 @@ mod imp {
             options: PollOptions,
         ) -> Result<usize, PollError> {
             let id = id.into();
-            let Some((baseline, opener_point)) = ({
+            debug_assert!(id != spec.owner, "transient id must not equal the owner surface id");
+            let Some((baseline, opener_point, owner_window, mtm)) = ({
                 let surfaces = self.surfaces.borrow();
                 surfaces.get(&spec.owner).map(|host| {
                     let opener_point = host
                         .resolve_hit_point(&spec.opener, &HitPointSearch::default())
                         .ok()
                         .map(|point| point_in_screen_space(host, point));
-                    (transient_window_baseline(host, opener_point), opener_point)
+                    // opener_point is None if resolve_hit_point fails (e.g., zero-size frame),
+                    // in which case window_is_anchored_near is skipped and only direct parent/
+                    // child/sheet relationships are used for transient identification.
+                    let baseline = transient_window_baseline(host.window(), host.main_thread_marker(), opener_point);
+                    let w = unsafe {
+                        Retained::retain(host.window() as *const NSWindow as *mut NSWindow)
+                            .expect("owner window retain")
+                    };
+                    (baseline, opener_point, w, host.main_thread_marker())
                 })
             }) else {
-                return self.harness.wait_until(options, || false);
+                return Err(PollError::Precondition("owner surface not registered"));
             };
             let click_succeeded = {
                 let surfaces = self.surfaces.borrow();
@@ -87,15 +119,26 @@ mod imp {
                     .is_some_and(|host| host.click_node(&spec.opener).is_ok())
             };
             if !click_succeeded {
-                return self.harness.wait_until(options, || false);
+                return Err(PollError::Precondition("opener click failed"));
             }
-            let Some(owner) = self.with_surface(&spec.owner, |host| {
-                self.harness.attach_window(host.window())
-            }) else {
-                return self.harness.wait_until(options, || false);
-            };
+            debug_assert!(
+                {
+                    let surfaces = self.surfaces.borrow();
+                    surfaces
+                        .get(&spec.owner)
+                        .is_some_and(|h| std::ptr::eq(h.window() as *const _, owner_window.as_ref() as *const _))
+                },
+                "owner surface was evicted or replaced between baseline capture and transient discovery"
+            );
+            // opener_point is intentionally captured once at baseline time. Background
+            // test windows are expected to be layout-stable; recomputing each iteration
+            // would require reborrowing surfaces inside wait_until which conflicts with
+            // the reentrancy restriction.
             self.harness.wait_until(options, || {
-                let Some(window) = discover_owned_transient_window(&owner, &baseline, opener_point)
+                if !self.surfaces.borrow().contains_key(&spec.owner) {
+                    return false;
+                }
+                let Some(window) = discover_owned_transient_window(&owner_window, mtm, &baseline, opener_point)
                 else {
                     return false;
                 };
@@ -118,11 +161,20 @@ mod imp {
         }
 
         /// Waits for the named transient surface to dismiss and evicts it from the session.
+        ///
+        /// A transient is considered closed when its window is both invisible and unparented.
+        /// For tracking non-transient surface closure, use `surface_is_open` instead.
+        ///
+        /// See the GTK counterpart for comparison: GTK uses visibility-only detection
+        /// while AppKit uses invisible-AND-unparented.
         pub fn wait_for_surface_closed(
             &self,
             id: &SurfaceId,
             options: PollOptions,
         ) -> Result<usize, PollError> {
+            if !{ self.surfaces.borrow().contains_key(id) } {
+                return Ok(0);
+            }
             self.harness.wait_until(options, || {
                 let is_closed = {
                     let surfaces = self.surfaces.borrow();
@@ -135,6 +187,19 @@ mod imp {
             })
         }
 
+        /// Calls `f` with a reference to the host for the named surface.
+        ///
+        /// Returns `None` if the surface is absent or has been closed.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `f` re-enters the session via any method that accesses the
+        /// internal surface map, including `attach_host`, `attach_window`,
+        /// `remove_surface`, `surface_is_open`,
+        /// `snapshot_scene`, `click_node`, `hover_node`, `wait_for_surface_closed`,
+        /// `discover_window`, `wait_for_discovered_window`,
+        /// `open_transient_with_click`, or a nested `with_surface` call.
+        /// Only `wait_until` (on the underlying harness) is safe to call from `f`.
         pub fn with_surface<R>(
             &self,
             id: &SurfaceId,
@@ -152,11 +217,17 @@ mod imp {
             surfaces.get(id).map(f)
         }
 
+        /// Snapshots the accessibility scene for the named surface.
+        ///
+        /// Returns `None` if the surface is absent or has been closed (and evicts it as a side effect).
         #[must_use]
         pub fn snapshot_scene(&self, id: &SurfaceId) -> Option<Scene> {
             self.with_surface(id, AppKitWindowHost::snapshot_scene)
         }
 
+        /// Synthesizes a click on the node matching `predicate` in the named surface.
+        ///
+        /// Returns `None` if the surface is absent or has been closed (and evicts it as a side effect); `Some(Err(...))` if the node can't be located.
         pub fn click_node(
             &self,
             id: &SurfaceId,
@@ -165,6 +236,9 @@ mod imp {
             self.with_surface(id, |host| host.click_node(predicate))
         }
 
+        /// Synthesizes a mouse-hover over the node matching `predicate` in the named surface.
+        ///
+        /// Returns `None` if the surface is absent or has been closed (and evicts it as a side effect); `Some(Err(...))` if the node can't be located.
         pub fn hover_node(
             &self,
             id: &SurfaceId,
@@ -174,6 +248,7 @@ mod imp {
             self.with_surface(id, |host| host.hover_node(predicate, search))
         }
 
+        /// Delegates to the harness's poll loop; succeeds when `predicate` returns true.
         pub fn wait_until<F>(
             &self,
             options: PollOptions,
@@ -191,10 +266,16 @@ mod imp {
         }
     }
 
+    // Checks whether the window is still in NSApplication's window list.
+    // NOTE: Because the host retains its NSWindow (and background test windows
+    // set releasedWhenClosed=false), a window that has been closed but is still
+    // retained by this host will continue to appear in app.windows(). This
+    // cannot be resolved without tracking NSWindowWillCloseNotification.
+    // For transient lifecycle use wait_for_surface_closed instead.
     fn appkit_host_is_open(host: &AppKitWindowHost) -> bool {
         let app = NSApplication::sharedApplication(host.main_thread_marker());
         let target_id = window_id(host.window());
-        app.orderedWindows()
+        app.windows()
             .iter()
             .any(|window| window_id(&window) == target_id)
     }
@@ -209,15 +290,16 @@ mod imp {
     }
 
     fn transient_window_baseline(
-        owner: &AppKitWindowHost,
+        owner_window: &NSWindow,
+        mtm: MainThreadMarker,
         opener_point: Option<NSPoint>,
     ) -> TransientWindowBaseline {
         TransientWindowBaseline {
-            owner_linked_ids: owner_linked_transient_window_candidates(owner, opener_point)
+            owner_linked_ids: owner_linked_transient_window_candidates(owner_window, mtm, opener_point)
                 .into_iter()
                 .map(|window| window_id(&window))
                 .collect(),
-            ordered_window_ids: ordered_window_candidates(owner)
+            ordered_window_ids: ordered_window_candidates(owner_window, mtm)
                 .into_iter()
                 .map(|window| window_id(&window))
                 .collect(),
@@ -225,12 +307,13 @@ mod imp {
     }
 
     fn discover_owned_transient_window(
-        owner: &AppKitWindowHost,
+        owner_window: &NSWindow,
+        mtm: MainThreadMarker,
         baseline: &TransientWindowBaseline,
         opener_point: Option<NSPoint>,
     ) -> Option<Retained<NSWindow>> {
-        let owner_linked = owner_linked_transient_window_candidates(owner, opener_point);
-        let ordered = ordered_window_candidates(owner);
+        let owner_linked = owner_linked_transient_window_candidates(owner_window, mtm, opener_point);
+        let ordered = ordered_window_candidates(owner_window, mtm);
         let selected_id = discover_transient_window_id(
             baseline,
             owner_linked.iter().map(|window| window_id(window)),
@@ -242,12 +325,12 @@ mod imp {
             .find(|window| window_id(window) == selected_id)
     }
 
-    fn ordered_window_candidates(owner: &AppKitWindowHost) -> Vec<Retained<NSWindow>> {
-        let app = NSApplication::sharedApplication(owner.main_thread_marker());
+    fn ordered_window_candidates(owner_window: &NSWindow, mtm: MainThreadMarker) -> Vec<Retained<NSWindow>> {
+        let app = NSApplication::sharedApplication(mtm);
+        let owner_id = window_id(owner_window);
         let mut candidates = Vec::new();
         for window in app.orderedWindows().iter() {
             let candidate_id = window_id(&window);
-            let owner_id = window_id(owner.window());
             if candidate_id == owner_id {
                 continue;
             }
@@ -257,10 +340,10 @@ mod imp {
     }
 
     fn owner_linked_transient_window_candidates(
-        owner: &AppKitWindowHost,
+        owner_window: &NSWindow,
+        mtm: MainThreadMarker,
         opener_point: Option<NSPoint>,
     ) -> Vec<Retained<NSWindow>> {
-        let owner_window = owner.window();
         let owner_id = window_id(owner_window);
         let child_ids = owner_window
             .childWindows()
@@ -274,7 +357,7 @@ mod imp {
         let attached_sheet_id = owner_window
             .attachedSheet()
             .map(|window| window_id(&window));
-        let app = NSApplication::sharedApplication(owner.main_thread_marker());
+        let app = NSApplication::sharedApplication(mtm);
         let mut direct = Vec::new();
         let mut anchored = Vec::new();
         for window in app.orderedWindows().iter() {
@@ -330,6 +413,13 @@ mod imp {
         NSPoint::new(frame.origin.x + point.x, frame.origin.y + point.y)
     }
 
+    // Uses raw pointer identity rather than windowNumber() because windowNumber()
+    // returns 0 for any ordered-out window, causing collisions for background test
+    // windows. The session holds Retained<NSWindow> for every tracked window, so
+    // the address is stable for the session's lifetime. In the unlikely event that
+    // a non-retained transient candidate is released and its address reused before
+    // the next poll, discover_transient_window_id may miss the new transient; this
+    // is accepted as an extremely-low-probability edge case.
     fn window_id(window: &NSWindow) -> usize {
         window as *const NSWindow as usize
     }
