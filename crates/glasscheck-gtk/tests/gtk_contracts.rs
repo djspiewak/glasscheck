@@ -993,7 +993,7 @@ fn key_press_queued_reaches_root_legacy_controller(harness: GtkHarness) {
         if event.event_type() == gtk4::gdk::EventType::KeyPress {
             count_ref.set(count_ref.get() + 1);
         }
-        false
+        gtk4::glib::Propagation::Proceed
     });
     host.window().add_controller(legacy);
 
@@ -1061,7 +1061,7 @@ fn key_press_direct_skips_root_legacy_controller(harness: GtkHarness) {
         if event.event_type() == gtk4::gdk::EventType::KeyPress {
             count_ref.set(count_ref.get() + 1);
         }
-        false
+        gtk4::glib::Propagation::Proceed
     });
     host.window().add_controller(legacy);
 
