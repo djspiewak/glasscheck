@@ -324,8 +324,32 @@ pub trait InputDriver {
     /// Dispatches a backend key interaction.
     ///
     /// Backends may use responder, controller, or text-insertion APIs instead
-    /// of raw native key-event synthesis.
+    /// of raw native key-event synthesis. This path bypasses application-level
+    /// event monitors; use [`key_press_queued`] when monitor delivery is required.
+    ///
+    /// [`key_press_queued`]: InputDriver::key_press_queued
     fn key_press(&self, key: &str, modifiers: KeyModifiers) -> Result<(), InputSynthesisError>;
+
+    /// Dispatches a key interaction via the backend's event queue so the event
+    /// flows through application-level monitors (AppKit local event monitors,
+    /// GTK root/legacy controllers) before reaching the focused target.
+    ///
+    /// This is the preferred path when exercising keystroke filters or transforms
+    /// that act before the responder chain. Use [`key_press`] when direct
+    /// responder-chain delivery without monitor overhead is sufficient.
+    ///
+    /// Backends that cannot route through a real event queue return
+    /// `InputSynthesisError::UnsupportedBackend`.
+    ///
+    /// [`key_press`]: InputDriver::key_press
+    fn key_press_queued(
+        &self,
+        key: &str,
+        modifiers: KeyModifiers,
+    ) -> Result<(), InputSynthesisError> {
+        let _ = (key, modifiers);
+        Err(InputSynthesisError::UnsupportedBackend)
+    }
 
     /// Inserts text directly into a native text widget.
     fn type_text_direct(&self, view: &Self::NativeText, text: &str);
@@ -463,12 +487,69 @@ pub fn crop_image_bottom_left(image: &Image, rect: Rect) -> Image {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_provider_nodes, SurfaceQuery, TransientSurfaceSpec};
+    use super::{normalize_provider_nodes, InputDriver, SurfaceQuery, TransientSurfaceSpec};
     use crate::{
-        NodeProvenanceKind, Point, PropertyValue, Rect, Role, Selector, SemanticNode, Size,
-        SurfaceId,
+        InputSynthesisError, KeyModifiers, NodeProvenanceKind, Point, PropertyValue, Rect, Role,
+        Selector, SemanticNode, Size, SurfaceId, TextRange,
     };
     use std::collections::BTreeSet;
+
+    struct MinimalDriver;
+
+    impl InputDriver for MinimalDriver {
+        type NativeText = ();
+        fn click(&self, _: Point) -> Result<(), InputSynthesisError> {
+            unimplemented!()
+        }
+        fn move_mouse(&self, _: Point) -> Result<(), InputSynthesisError> {
+            unimplemented!()
+        }
+        fn key_press(&self, _: &str, _: KeyModifiers) -> Result<(), InputSynthesisError> {
+            unimplemented!()
+        }
+        fn type_text_direct(&self, _: &(), _: &str) {}
+        fn replace_text(&self, _: &(), _: &str) {}
+        fn set_selection(&self, _: &(), _: TextRange) {}
+    }
+
+    struct OverridingDriver;
+
+    impl InputDriver for OverridingDriver {
+        type NativeText = ();
+        fn click(&self, _: Point) -> Result<(), InputSynthesisError> {
+            unimplemented!()
+        }
+        fn move_mouse(&self, _: Point) -> Result<(), InputSynthesisError> {
+            unimplemented!()
+        }
+        fn key_press(&self, _: &str, _: KeyModifiers) -> Result<(), InputSynthesisError> {
+            unimplemented!()
+        }
+        fn key_press_queued(&self, _: &str, _: KeyModifiers) -> Result<(), InputSynthesisError> {
+            Ok(())
+        }
+        fn type_text_direct(&self, _: &(), _: &str) {}
+        fn replace_text(&self, _: &(), _: &str) {}
+        fn set_selection(&self, _: &(), _: TextRange) {}
+    }
+
+    #[test]
+    fn input_driver_default_key_press_queued_returns_unsupported() {
+        let driver = MinimalDriver;
+        assert_eq!(
+            driver.key_press_queued("a", KeyModifiers::default()),
+            Err(InputSynthesisError::UnsupportedBackend)
+        );
+    }
+
+    #[test]
+    fn input_driver_override_replaces_default_key_press_queued() {
+        let driver = OverridingDriver;
+        assert_eq!(
+            driver.key_press_queued("a", KeyModifiers::default()),
+            Ok(())
+        );
+    }
 
     fn rect() -> Rect {
         Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0))

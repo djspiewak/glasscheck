@@ -5,9 +5,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use glasscheck_core::{
-    KeyModifiers, NodeRecipe, PixelMatch, PixelProbe, Point, PollOptions, PropertyValue, Rect,
-    RegionResolveError, RegionSpec, Role, Selector, SemanticNode, SemanticProvider, Size,
-    SurfaceId, TextRange, TransientSurfaceSpec,
+    InputSynthesisError, KeyModifiers, NodeRecipe, PixelMatch, PixelProbe, Point, PollOptions,
+    PropertyValue, Rect, RegionResolveError, RegionSpec, Role, Selector, SemanticNode,
+    SemanticProvider, Size, SurfaceId, TextRange, TransientSurfaceSpec,
 };
 use glasscheck_gtk::{
     GtkHarness, GtkWindowHost, HitPointSearch, HitPointStrategy, InstrumentedWidget,
@@ -75,6 +75,22 @@ fn main() {
     run("key_press_dispatches_modifiers_to_event_controller", || {
         key_press_dispatches_modifiers_to_event_controller(harness)
     });
+    run("key_press_queued_reaches_root_legacy_controller", || {
+        key_press_queued_reaches_root_legacy_controller(harness)
+    });
+    run("key_press_queued_still_reaches_focused_controller", || {
+        key_press_queued_still_reaches_focused_controller(harness)
+    });
+    run("key_press_direct_skips_root_legacy_controller", || {
+        key_press_direct_skips_root_legacy_controller(harness)
+    });
+    run("key_press_queued_carries_modifier_state", || {
+        key_press_queued_carries_modifier_state(harness)
+    });
+    run(
+        "key_press_queued_returns_unsupported_key_for_unknown_name",
+        || key_press_queued_returns_unsupported_key_for_unknown_name(harness),
+    );
     run("text_range_rect_converts_to_root_coordinates", || {
         text_range_rect_converts_to_root_coordinates(harness)
     });
@@ -953,4 +969,166 @@ impl SemanticProvider for FlippingSelectorProvider {
             .into_iter()
             .collect()
     }
+}
+
+fn key_press_queued_reaches_root_legacy_controller(harness: GtkHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = fixed_root(220, 140);
+    let entry = gtk4::Entry::new();
+    entry.set_size_request(120, 36);
+    let controller = gtk4::EventControllerKey::new();
+    controller.connect_key_pressed(|_, _, _, _| gtk4::glib::Propagation::Stop);
+    entry.add_controller(controller);
+    root.put(&entry, 20.0, 20.0);
+    host.set_root(&root);
+    harness.settle(4);
+
+    entry.grab_focus();
+    harness.settle(2);
+
+    let key_press_count = Rc::new(Cell::new(0usize));
+    let count_ref = key_press_count.clone();
+    let legacy = gtk4::EventControllerLegacy::new();
+    legacy.connect_event(move |_, event| {
+        if event.event_type() == gtk4::gdk::EventType::KeyPress {
+            count_ref.set(count_ref.get() + 1);
+        }
+        false
+    });
+    host.window().add_controller(legacy);
+
+    host.input()
+        .key_press_queued("a", KeyModifiers::default())
+        .expect("queued key press should flow through root EventControllerLegacy");
+    harness.settle(2);
+
+    assert_eq!(
+        key_press_count.get(),
+        1,
+        "root EventControllerLegacy should observe the queued key-press event exactly once"
+    );
+}
+
+fn key_press_queued_still_reaches_focused_controller(harness: GtkHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = fixed_root(220, 140);
+    let entry = gtk4::Entry::new();
+    entry.set_size_request(120, 36);
+    let keys_seen = Rc::new(std::cell::RefCell::new(Vec::<Option<String>>::new()));
+    let seen = keys_seen.clone();
+    let controller = gtk4::EventControllerKey::new();
+    controller.connect_key_pressed(move |_, key, _, _| {
+        seen.borrow_mut().push(key.name().map(|n| n.to_string()));
+        gtk4::glib::Propagation::Stop
+    });
+    entry.add_controller(controller);
+    root.put(&entry, 20.0, 20.0);
+    host.set_root(&root);
+    harness.settle(4);
+
+    entry.grab_focus();
+    harness.settle(2);
+
+    host.input()
+        .key_press_queued("a", KeyModifiers::default())
+        .expect("queued key press should reach the focused EventControllerKey");
+    harness.settle(2);
+
+    let seen = keys_seen.borrow();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].as_deref(), Some("a"));
+}
+
+fn key_press_direct_skips_root_legacy_controller(harness: GtkHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = fixed_root(220, 140);
+    let entry = gtk4::Entry::new();
+    entry.set_size_request(120, 36);
+    let controller = gtk4::EventControllerKey::new();
+    controller.connect_key_pressed(|_, _, _, _| gtk4::glib::Propagation::Stop);
+    entry.add_controller(controller);
+    root.put(&entry, 20.0, 20.0);
+    host.set_root(&root);
+    harness.settle(4);
+
+    entry.grab_focus();
+    harness.settle(2);
+
+    let key_press_count = Rc::new(Cell::new(0usize));
+    let count_ref = key_press_count.clone();
+    let legacy = gtk4::EventControllerLegacy::new();
+    legacy.connect_event(move |_, event| {
+        if event.event_type() == gtk4::gdk::EventType::KeyPress {
+            count_ref.set(count_ref.get() + 1);
+        }
+        false
+    });
+    host.window().add_controller(legacy);
+
+    host.input()
+        .key_press("a", KeyModifiers::default())
+        .expect("direct key press should succeed");
+    harness.settle(2);
+
+    assert_eq!(
+        key_press_count.get(),
+        0,
+        "direct key_press should bypass root EventControllerLegacy (regression guard)"
+    );
+}
+
+fn key_press_queued_carries_modifier_state(harness: GtkHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = fixed_root(220, 140);
+    let entry = gtk4::Entry::new();
+    entry.set_size_request(120, 36);
+    let modifiers_seen = Rc::new(std::cell::RefCell::new(
+        Vec::<gtk4::gdk::ModifierType>::new(),
+    ));
+    let seen = modifiers_seen.clone();
+    let controller = gtk4::EventControllerKey::new();
+    controller.connect_key_pressed(move |_, _, _, mods| {
+        seen.borrow_mut().push(mods);
+        gtk4::glib::Propagation::Stop
+    });
+    entry.add_controller(controller);
+    root.put(&entry, 20.0, 20.0);
+    host.set_root(&root);
+    harness.settle(4);
+
+    entry.grab_focus();
+    harness.settle(2);
+
+    host.input()
+        .key_press_queued(
+            "a",
+            KeyModifiers {
+                control: true,
+                ..KeyModifiers::default()
+            },
+        )
+        .expect("queued key press with Control modifier should succeed");
+    harness.settle(2);
+
+    let seen = modifiers_seen.borrow();
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0].contains(gtk4::gdk::ModifierType::CONTROL_MASK),
+        "queued key event should carry CONTROL_MASK"
+    );
+}
+
+fn key_press_queued_returns_unsupported_key_for_unknown_name(harness: GtkHarness) {
+    let host = harness.create_window(160.0, 80.0);
+    let root = fixed_root(160, 80);
+    host.set_root(&root);
+    harness.settle(4);
+
+    let result = host
+        .input()
+        .key_press_queued("not_a_valid_key_name_xyz", KeyModifiers::default());
+    assert!(
+        matches!(result, Err(InputSynthesisError::UnsupportedKey(_))),
+        "unknown key name should return UnsupportedKey, got: {result:?}"
+    );
 }

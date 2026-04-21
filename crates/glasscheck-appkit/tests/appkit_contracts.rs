@@ -20,8 +20,9 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSBezierPath, NSButton, NSColor, NSEvent, NSEventMask, NSFont, NSTextInputClient, NSTextView,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowOrderingMode,
+    NSBezierPath, NSButton, NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSFont,
+    NSTextInputClient, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowOrderingMode,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSSize, NSString};
 
@@ -357,6 +358,22 @@ fn main() {
         "background_window_click_reaches_local_mouse_up_monitor",
         || background_window_click_reaches_local_mouse_up_monitor(harness),
     );
+    run("key_press_queued_reaches_local_key_down_monitor", || {
+        key_press_queued_reaches_local_key_down_monitor(harness)
+    });
+    run("key_press_queued_reaches_local_key_up_monitor", || {
+        key_press_queued_reaches_local_key_up_monitor(harness)
+    });
+    run(
+        "key_press_queued_delivers_to_first_responder_after_monitor",
+        || key_press_queued_delivers_to_first_responder_after_monitor(harness),
+    );
+    run("key_press_direct_bypasses_local_key_monitor", || {
+        key_press_direct_bypasses_local_key_monitor(harness)
+    });
+    run("key_press_queued_carries_modifier_flags", || {
+        key_press_queued_carries_modifier_flags(harness)
+    });
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -4799,5 +4816,223 @@ fn assert_picker_label(scene: &glasscheck_core::Scene, text: &str) {
         node.properties.get("text"),
         Some(&PropertyValue::string(text)),
         "expected picker label text to match"
+    );
+}
+
+fn key_press_queued_reaches_local_key_down_monitor(harness: AppKitHarness) {
+    struct KeyMonitorGuard(Option<Retained<AnyObject>>);
+    impl Drop for KeyMonitorGuard {
+        fn drop(&mut self) {
+            if let Some(monitor) = self.0.take() {
+                unsafe { NSEvent::removeMonitor(&monitor) };
+            }
+        }
+    }
+
+    let host = harness.create_window(180.0, 120.0);
+    let view = RoutingTrackingView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    host.set_content_view(&view);
+    host.window().makeFirstResponder(Some(&*view));
+    harness.settle(2);
+
+    let monitor_count = Rc::new(Cell::new(0usize));
+    let count_ref = monitor_count.clone();
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        count_ref.set(count_ref.get() + 1);
+        event.as_ptr()
+    });
+    let _monitor = KeyMonitorGuard(unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &block)
+    });
+
+    host.input()
+        .key_press_queued("a", glasscheck_core::KeyModifiers::default())
+        .expect("queued key press should succeed");
+    harness.settle(2);
+
+    assert_eq!(
+        monitor_count.get(),
+        1,
+        "local key-down monitor should see the queued event exactly once"
+    );
+}
+
+fn key_press_queued_reaches_local_key_up_monitor(harness: AppKitHarness) {
+    struct KeyMonitorGuard(Option<Retained<AnyObject>>);
+    impl Drop for KeyMonitorGuard {
+        fn drop(&mut self) {
+            if let Some(monitor) = self.0.take() {
+                unsafe { NSEvent::removeMonitor(&monitor) };
+            }
+        }
+    }
+
+    let host = harness.create_window(180.0, 120.0);
+    let view = RoutingTrackingView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    host.set_content_view(&view);
+    host.window().makeFirstResponder(Some(&*view));
+    harness.settle(2);
+
+    let monitor_count = Rc::new(Cell::new(0usize));
+    let count_ref = monitor_count.clone();
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        count_ref.set(count_ref.get() + 1);
+        event.as_ptr()
+    });
+    let _monitor = KeyMonitorGuard(unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyUp, &block)
+    });
+
+    host.input()
+        .key_press_queued("a", glasscheck_core::KeyModifiers::default())
+        .expect("queued key press should succeed");
+    harness.settle(2);
+
+    assert_eq!(
+        monitor_count.get(),
+        1,
+        "local key-up monitor should see the paired queued up event"
+    );
+}
+
+fn key_press_queued_delivers_to_first_responder_after_monitor(harness: AppKitHarness) {
+    struct KeyMonitorGuard(Option<Retained<AnyObject>>);
+    impl Drop for KeyMonitorGuard {
+        fn drop(&mut self) {
+            if let Some(monitor) = self.0.take() {
+                unsafe { NSEvent::removeMonitor(&monitor) };
+            }
+        }
+    }
+
+    let host = harness.create_window(180.0, 120.0);
+    let view = RoutingTrackingView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    host.set_content_view(&view);
+    host.window().makeFirstResponder(Some(&*view));
+    harness.settle(2);
+
+    let monitor_count = Rc::new(Cell::new(0usize));
+    let count_ref = monitor_count.clone();
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        count_ref.set(count_ref.get() + 1);
+        event.as_ptr()
+    });
+    let _monitor = KeyMonitorGuard(unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &block)
+    });
+
+    host.input()
+        .key_press_queued("a", glasscheck_core::KeyModifiers::default())
+        .expect("queued key press should succeed");
+    harness.settle(2);
+
+    assert_eq!(
+        monitor_count.get(),
+        1,
+        "local monitor should observe the queued key-down event"
+    );
+    assert_eq!(
+        view.ivars().key_downs.get(),
+        1,
+        "first responder should receive keyDown: after the monitor"
+    );
+}
+
+fn key_press_direct_bypasses_local_key_monitor(harness: AppKitHarness) {
+    struct KeyMonitorGuard(Option<Retained<AnyObject>>);
+    impl Drop for KeyMonitorGuard {
+        fn drop(&mut self) {
+            if let Some(monitor) = self.0.take() {
+                unsafe { NSEvent::removeMonitor(&monitor) };
+            }
+        }
+    }
+
+    let host = harness.create_window(180.0, 120.0);
+    let view = RoutingTrackingView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    host.set_content_view(&view);
+    host.window().makeFirstResponder(Some(&*view));
+    harness.settle(2);
+
+    let monitor_count = Rc::new(Cell::new(0usize));
+    let count_ref = monitor_count.clone();
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        count_ref.set(count_ref.get() + 1);
+        event.as_ptr()
+    });
+    let _monitor = KeyMonitorGuard(unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &block)
+    });
+
+    host.input()
+        .key_press("a", glasscheck_core::KeyModifiers::default())
+        .unwrap();
+    harness.settle(2);
+
+    assert_eq!(
+        monitor_count.get(),
+        0,
+        "direct key_press should bypass local monitors (regression guard)"
+    );
+}
+
+fn key_press_queued_carries_modifier_flags(harness: AppKitHarness) {
+    struct KeyMonitorGuard(Option<Retained<AnyObject>>);
+    impl Drop for KeyMonitorGuard {
+        fn drop(&mut self) {
+            if let Some(monitor) = self.0.take() {
+                unsafe { NSEvent::removeMonitor(&monitor) };
+            }
+        }
+    }
+
+    let host = harness.create_window(180.0, 120.0);
+    let view = RoutingTrackingView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    host.set_content_view(&view);
+    host.window().makeFirstResponder(Some(&*view));
+    harness.settle(2);
+
+    let saw_control = Rc::new(Cell::new(false));
+    let saw_ref = saw_control.clone();
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        let flags = unsafe { event.as_ref() }.modifierFlags();
+        if flags.contains(NSEventModifierFlags::Control) {
+            saw_ref.set(true);
+        }
+        event.as_ptr()
+    });
+    let _monitor = KeyMonitorGuard(unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &block)
+    });
+
+    host.input()
+        .key_press_queued(
+            "a",
+            glasscheck_core::KeyModifiers {
+                control: true,
+                ..glasscheck_core::KeyModifiers::default()
+            },
+        )
+        .expect("queued key press with modifier should succeed");
+    harness.settle(2);
+
+    assert!(
+        saw_control.get(),
+        "queued key event should carry the Control modifier flag"
     );
 }

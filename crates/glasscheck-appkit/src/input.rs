@@ -4,8 +4,8 @@ mod imp {
     use objc2::runtime::{AnyObject, Sel};
     use objc2::{msg_send, ClassType};
     use objc2_app_kit::{
-        NSApplication, NSControl, NSEvent, NSEventModifierFlags, NSEventType, NSTextInputClient,
-        NSTextView, NSTrackingAreaOptions, NSView, NSWindow,
+        NSApplication, NSControl, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
+        NSTextInputClient, NSTextView, NSTrackingAreaOptions, NSView, NSWindow,
     };
     use objc2_foundation::{
         MainThreadMarker, NSDate, NSDefaultRunLoopMode, NSPoint, NSRange, NSRunLoop, NSString,
@@ -181,6 +181,10 @@ mod imp {
         }
 
         /// Synthesizes a key press and release with the provided metadata.
+        ///
+        /// Dispatches directly into the window's responder chain via `sendEvent`,
+        /// bypassing local event monitors. Use [`key_press_raw_queued`] when the
+        /// event must flow through monitors first.
         pub fn key_press_raw(
             &self,
             key_code: u16,
@@ -229,12 +233,86 @@ mod imp {
         }
 
         /// Synthesizes a key press and release using backend-neutral modifiers.
+        ///
+        /// Bypasses local event monitors; use [`key_press_queued`] when the event
+        /// must be observed by application-level monitors before the responder chain.
         pub fn key_press(
             &self,
             characters: &str,
             modifiers: KeyModifiers,
         ) -> Result<(), InputSynthesisError> {
             self.key_press_raw(0, ns_modifiers(modifiers), characters)
+        }
+
+        /// Synthesizes a key press and release via the application event queue,
+        /// so the event flows through local event monitors before the responder chain.
+        ///
+        /// Posts both `KeyDown` and `KeyUp` events via `postEvent_atStart` and then
+        /// drains them through `nextEventMatchingMask` so that any registered local
+        /// event monitors observe them before the first responder receives the event.
+        /// The caller must ensure the desired first responder is set on the window
+        /// (via `window.makeFirstResponder`) before invoking this method.
+        /// Use [`key_press_raw`] for direct responder-chain delivery without monitor
+        /// involvement.
+        pub fn key_press_raw_queued(
+            &self,
+            key_code: u16,
+            modifiers: NSEventModifierFlags,
+            characters: &str,
+        ) -> Result<(), InputSynthesisError> {
+            let chars = NSString::from_str(characters);
+            let chars_ignoring = NSString::from_str(characters);
+            let point = NSPoint::new(0.0, 0.0);
+            self.activate_window();
+            let window_number = self.window.windowNumber().max(0);
+
+            let down = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                NSEventType::KeyDown,
+                point,
+                modifiers,
+                0.0,
+                window_number,
+                None,
+                &chars,
+                &chars_ignoring,
+                false,
+                key_code,
+            )
+            .ok_or(InputSynthesisError::TransportFailure("key-down event creation"))?;
+
+            let up = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+                NSEventType::KeyUp,
+                point,
+                modifiers,
+                0.0,
+                window_number,
+                None,
+                &chars,
+                &chars_ignoring,
+                false,
+                key_code,
+            )
+            .ok_or(InputSynthesisError::TransportFailure("key-up event creation"))?;
+
+            // Post both events then drain them through nextEventMatchingMask so that
+            // application-level local event monitors observe them before the responder chain.
+            self.app().postEvent_atStart(&down, false);
+            self.app().postEvent_atStart(&up, false);
+            self.drain_queued_key_events();
+            Ok(())
+        }
+
+        /// Synthesizes a queued key press using backend-neutral modifiers.
+        ///
+        /// The event passes through local event monitors before reaching the first
+        /// responder. Use [`key_press`] for direct responder-chain delivery when
+        /// monitor observation is not needed.
+        pub fn key_press_queued(
+            &self,
+            characters: &str,
+            modifiers: KeyModifiers,
+        ) -> Result<(), InputSynthesisError> {
+            self.key_press_raw_queued(0, ns_modifiers(modifiers), characters)
         }
 
         /// Inserts `text` directly through the `NSTextInputClient` API.
@@ -548,6 +626,38 @@ mod imp {
                 .runMode_beforeDate(unsafe { NSDefaultRunLoopMode }, &date);
         }
 
+        /// Dequeues pending key events through `nextEventMatchingMask` (which invokes local
+        /// event monitors), then dispatches each via `app.sendEvent` for standard routing.
+        ///
+        /// Drains queued key events through `nextEventMatchingMask` so that local
+        /// event monitors observe them before the responder chain.
+        ///
+        /// Local event monitors fire inside `app.sendEvent`, not during the dequeue
+        /// step. `app.sendEvent` routes to the current key window's responder; for
+        /// background (non-key) test windows that routes to a different window, so we
+        /// also call `window.sendEvent` to reach our own first responder. For key
+        /// windows `app.sendEvent` already targets our window, so the direct call is
+        /// skipped to avoid double dispatch.
+        fn drain_queued_key_events(&self) {
+            let mask = NSEventMask::KeyDown | NSEventMask::KeyUp;
+            for _ in 0..2 {
+                let expiry = NSDate::dateWithTimeIntervalSinceNow(0.05);
+                if let Some(event) = self.app().nextEventMatchingMask_untilDate_inMode_dequeue(
+                    mask,
+                    Some(&expiry),
+                    unsafe { NSDefaultRunLoopMode },
+                    true,
+                ) {
+                    if self.window.isKeyWindow() {
+                        self.app().sendEvent(&event);
+                    } else {
+                        self.app().sendEvent(&event);
+                        self.window.sendEvent(&event);
+                    }
+                }
+            }
+        }
+
         fn is_control_target(&self, target: Option<&NSView>) -> bool {
             let Some(target) = target else {
                 return false;
@@ -583,6 +693,14 @@ mod imp {
 
         fn key_press(&self, key: &str, modifiers: KeyModifiers) -> Result<(), InputSynthesisError> {
             Self::key_press(self, key, modifiers)
+        }
+
+        fn key_press_queued(
+            &self,
+            key: &str,
+            modifiers: KeyModifiers,
+        ) -> Result<(), InputSynthesisError> {
+            Self::key_press_queued(self, key, modifiers)
         }
 
         fn type_text_direct(&self, view: &Self::NativeText, text: &str) {
@@ -638,6 +756,51 @@ mod imp {
             && point.x <= rect.origin.x + rect.size.width
             && point.y >= rect.origin.y
             && point.y <= rect.origin.y + rect.size.height
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::ns_modifiers;
+        use glasscheck_core::KeyModifiers;
+        use objc2_app_kit::NSEventModifierFlags;
+
+        #[test]
+        fn ns_modifiers_covers_every_key_modifier() {
+            let all = KeyModifiers {
+                shift: true,
+                control: true,
+                alt: true,
+                meta: true,
+            };
+            let flags = ns_modifiers(all);
+            assert!(flags.contains(NSEventModifierFlags::Shift));
+            assert!(flags.contains(NSEventModifierFlags::Control));
+            assert!(flags.contains(NSEventModifierFlags::Option));
+            assert!(flags.contains(NSEventModifierFlags::Command));
+
+            let none = ns_modifiers(KeyModifiers::default());
+            assert!(none.is_empty());
+
+            assert!(ns_modifiers(KeyModifiers {
+                shift: true,
+                ..Default::default()
+            })
+            .contains(NSEventModifierFlags::Shift));
+            assert!(ns_modifiers(KeyModifiers {
+                control: true,
+                ..Default::default()
+            })
+            .contains(NSEventModifierFlags::Control));
+            assert!(ns_modifiers(KeyModifiers {
+                alt: true,
+                ..Default::default()
+            })
+            .contains(NSEventModifierFlags::Option));
+            assert!(ns_modifiers(KeyModifiers {
+                meta: true,
+                ..Default::default()
+            })
+            .contains(NSEventModifierFlags::Command));
+        }
     }
 }
 

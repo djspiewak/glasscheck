@@ -169,6 +169,9 @@ fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::Win
     let input = host.input();
     assert_input_driver(&input);
     input.move_mouse(Point::new(resolved.origin.x + 2.0, resolved.origin.y + 2.0));
+    input
+        .key_press_queued("a", glasscheck::KeyModifiers::default())
+        .expect("queued key press should succeed through the shared facade");
 
     let renderer = host.text_renderer();
     assert_text_harness(&renderer);

@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 mod imp {
     use std::ffi::CString;
-    use std::os::raw::{c_char, c_int, c_ulong};
+    use std::os::raw::{c_char, c_int, c_uchar, c_ulong};
     use std::sync::OnceLock;
 
     use glasscheck_core::{InputDriver, InputSynthesisError, KeyModifiers, Point, TextRange};
@@ -28,6 +28,8 @@ mod imp {
             unsafe extern "C" fn(*mut std::ffi::c_void, c_uint, c_int, c_ulong) -> c_int,
         fake_motion_event:
             unsafe extern "C" fn(*mut std::ffi::c_void, c_int, c_int, c_int, c_ulong) -> c_int,
+        fake_key_event:
+            unsafe extern "C" fn(*mut std::ffi::c_void, c_uint, c_int, c_ulong) -> c_int,
     }
 
     struct GdkX11Api {
@@ -49,6 +51,8 @@ mod imp {
             *mut c_int,
             *mut c_ulong,
         ) -> c_int,
+        keysym_to_keycode: unsafe extern "C" fn(*mut std::ffi::c_void, c_ulong) -> c_uchar,
+        string_to_keysym: unsafe extern "C" fn(*const c_char) -> c_ulong,
     }
 
     impl<'a> GtkInputDriver<'a> {
@@ -78,7 +82,92 @@ mod imp {
             Ok(())
         }
 
+        /// Synthesizes a key press via the X11 event queue so root-level and legacy
+        /// controllers observe the event before the focused widget's handlers.
+        ///
+        /// The caller must ensure the target widget has focus (e.g. `widget.grab_focus()`)
+        /// before invoking this method; unlike [`key_press`] the queued path does not
+        /// locate or refocus the target itself.
+        ///
+        /// Falls back to `UnsupportedBackend` when the GDK backend is not X11.
+        /// See [`key_press`] for the direct (controller-emitting) counterpart.
+        pub fn key_press_queued(
+            &self,
+            key: &str,
+            modifiers: KeyModifiers,
+        ) -> Result<(), InputSynthesisError> {
+            let context = self.x11_context()?;
+            let x11 = x11_api()?;
+
+            let key_c = CString::new(key)
+                .map_err(|_| InputSynthesisError::UnsupportedKey(key.to_string()))?;
+            let keysym = unsafe { (x11.string_to_keysym)(key_c.as_ptr()) };
+            if keysym == 0 {
+                return Err(InputSynthesisError::UnsupportedKey(key.to_string()));
+            }
+            let keycode = unsafe { (x11.keysym_to_keycode)(context.display, keysym) } as c_uint;
+            if keycode == 0 {
+                return Err(InputSynthesisError::UnsupportedKey(key.to_string()));
+            }
+
+            let modifier_syms = queued_modifier_keysyms(modifiers);
+            let mut modifier_codes: Vec<c_uint> = Vec::with_capacity(modifier_syms.len());
+            for name in &modifier_syms {
+                let name_c = CString::new(*name)
+                    .map_err(|_| InputSynthesisError::TransportFailure("modifier keysym name"))?;
+                let sym = unsafe { (x11.string_to_keysym)(name_c.as_ptr()) };
+                if sym == 0 {
+                    return Err(InputSynthesisError::UnsupportedKey(name.to_string()));
+                }
+                let code = unsafe { (x11.keysym_to_keycode)(context.display, sym) } as c_uint;
+                if code == 0 {
+                    return Err(InputSynthesisError::TransportFailure(
+                        "queued modifier keycode",
+                    ));
+                }
+                modifier_codes.push(code);
+            }
+
+            // Press modifiers, fire the key, then release modifiers in reverse.
+            // On any failure the recovery block below releases keys already pressed
+            // and flushes via sync_display before propagating the error, so the X
+            // server is not left with stuck keys or buffered-but-unflushed events.
+            let mut pressed = 0usize;
+            for &code in &modifier_codes {
+                if let Err(e) = xtest_key(context.display, code, true) {
+                    for &c in modifier_codes[..pressed].iter().rev() {
+                        let _ = xtest_key(context.display, c, false);
+                    }
+                    let _ = sync_display(context.display);
+                    return Err(e);
+                }
+                pressed += 1;
+            }
+            let press_ok = xtest_key(context.display, keycode, true);
+            let key_result = press_ok.and_then(|()| xtest_key(context.display, keycode, false));
+            // If the press succeeded but the release failed, attempt a recovery release
+            // so the primary key does not remain held down and autorepeat into other windows.
+            if key_result.is_err() {
+                let _ = xtest_key(context.display, keycode, false);
+            }
+            for &code in modifier_codes.iter().rev() {
+                let _ = xtest_key(context.display, code, false);
+            }
+            if key_result.is_err() {
+                let _ = sync_display(context.display);
+                return key_result;
+            }
+
+            sync_display(context.display)?;
+            Ok(())
+        }
+
         /// Synthesizes a key press using backend-neutral modifiers.
+        ///
+        /// Emits events directly on each `EventControllerKey` in the focused widget's
+        /// controller chain, bypassing root-level and legacy controllers. Use
+        /// [`key_press_queued`] when the event must be observed by root-level or
+        /// `EventControllerLegacy` handlers before the focused widget receives it.
         pub fn key_press(
             &self,
             key: &str,
@@ -181,6 +270,14 @@ mod imp {
 
         fn key_press(&self, key: &str, modifiers: KeyModifiers) -> Result<(), InputSynthesisError> {
             Self::key_press(self, key, modifiers)
+        }
+
+        fn key_press_queued(
+            &self,
+            key: &str,
+            modifiers: KeyModifiers,
+        ) -> Result<(), InputSynthesisError> {
+            Self::key_press_queued(self, key, modifiers)
         }
 
         fn type_text_direct(&self, view: &Self::NativeText, text: &str) {
@@ -298,6 +395,19 @@ mod imp {
         Ok(())
     }
 
+    fn xtest_key(
+        display: *mut std::ffi::c_void,
+        keycode: c_uint,
+        is_press: bool,
+    ) -> Result<(), InputSynthesisError> {
+        let api = xtest_api()?;
+        let status = unsafe { (api.fake_key_event)(display, keycode, is_press as c_int, 0) };
+        if status == 0 {
+            return Err(InputSynthesisError::TransportFailure("key event"));
+        }
+        Ok(())
+    }
+
     fn xtest_api() -> Result<&'static XTestApi, InputSynthesisError> {
         static XTEST_API: OnceLock<Result<XTestApi, InputSynthesisError>> = OnceLock::new();
         XTEST_API
@@ -311,6 +421,7 @@ mod imp {
         Ok(XTestApi {
             fake_button_event: load_xtest_symbol(handle, "XTestFakeButtonEvent")?,
             fake_motion_event: load_xtest_symbol(handle, "XTestFakeMotionEvent")?,
+            fake_key_event: load_xtest_symbol(handle, "XTestFakeKeyEvent")?,
         })
     }
 
@@ -369,6 +480,8 @@ mod imp {
             default_root_window: load_symbol(handle, "XDefaultRootWindow")?,
             sync: load_symbol(handle, "XSync")?,
             translate_coordinates: load_symbol(handle, "XTranslateCoordinates")?,
+            keysym_to_keycode: load_symbol(handle, "XKeysymToKeycode")?,
+            string_to_keysym: load_symbol(handle, "XStringToKeysym")?,
         })
     }
 
@@ -404,6 +517,102 @@ mod imp {
     }
 
     const RTLD_NOW: c_int = 2;
+
+    /// Returns the ordered list of modifier keysym names that must be pressed
+    /// (and released in reverse) around a primary key for `modifiers`.
+    ///
+    /// Uses left-modifier variants (`Shift_L`, `Control_L`, etc.), which are
+    /// defined on all standard X keyboards and produce the same modifier bits
+    /// as their right-side counterparts.
+    fn queued_modifier_keysyms(modifiers: KeyModifiers) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if modifiers.shift {
+            names.push("Shift_L");
+        }
+        if modifiers.control {
+            names.push("Control_L");
+        }
+        if modifiers.alt {
+            names.push("Alt_L");
+        }
+        if modifiers.meta {
+            names.push("Super_L");
+        }
+        names
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{modifier_state, queued_modifier_keysyms};
+        use glasscheck_core::KeyModifiers;
+        use gtk4::gdk;
+
+        #[test]
+        fn modifier_state_for_queued_path_covers_all_flags() {
+            let all = KeyModifiers {
+                shift: true,
+                control: true,
+                alt: true,
+                meta: true,
+            };
+            let state = modifier_state(all);
+            assert!(state.contains(gdk::ModifierType::SHIFT_MASK));
+            assert!(state.contains(gdk::ModifierType::CONTROL_MASK));
+            assert!(state.contains(gdk::ModifierType::ALT_MASK));
+            assert!(state.contains(gdk::ModifierType::META_MASK));
+            assert!(state.contains(gdk::ModifierType::SUPER_MASK));
+
+            let none = modifier_state(KeyModifiers::default());
+            assert!(none.is_empty());
+        }
+
+        #[test]
+        fn queued_modifier_keysyms_empty_for_default() {
+            assert!(queued_modifier_keysyms(KeyModifiers::default()).is_empty());
+        }
+
+        #[test]
+        fn xtest_modifier_keysym_for_flag_returns_expected_ordering() {
+            let shift_only = queued_modifier_keysyms(KeyModifiers {
+                shift: true,
+                ..Default::default()
+            });
+            assert_eq!(shift_only, vec!["Shift_L"]);
+
+            let ctrl_only = queued_modifier_keysyms(KeyModifiers {
+                control: true,
+                ..Default::default()
+            });
+            assert_eq!(ctrl_only, vec!["Control_L"]);
+
+            let alt_only = queued_modifier_keysyms(KeyModifiers {
+                alt: true,
+                ..Default::default()
+            });
+            assert_eq!(alt_only, vec!["Alt_L"]);
+
+            let meta_only = queued_modifier_keysyms(KeyModifiers {
+                meta: true,
+                ..Default::default()
+            });
+            assert_eq!(meta_only, vec!["Super_L"]);
+
+            let multi = queued_modifier_keysyms(KeyModifiers {
+                shift: true,
+                control: true,
+                ..Default::default()
+            });
+            assert_eq!(multi, vec!["Shift_L", "Control_L"]);
+
+            let all = queued_modifier_keysyms(KeyModifiers {
+                shift: true,
+                control: true,
+                alt: true,
+                meta: true,
+            });
+            assert_eq!(all, vec!["Shift_L", "Control_L", "Alt_L", "Super_L"]);
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
