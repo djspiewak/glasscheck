@@ -96,7 +96,10 @@ mod imp {
             key: &str,
             modifiers: KeyModifiers,
         ) -> Result<(), InputSynthesisError> {
-            let context = self.x11_context()?;
+            // Obtain the X11 display without calling activate_window so that
+            // the caller's grab_focus() on the intended target widget is not
+            // disturbed by an implicit window.grab_focus() side-effect.
+            let display = self.x11_display()?;
             let x11 = x11_api()?;
 
             let key_c = CString::new(key)
@@ -105,7 +108,7 @@ mod imp {
             if keysym == 0 {
                 return Err(InputSynthesisError::UnsupportedKey(key.to_string()));
             }
-            let keycode = unsafe { (x11.keysym_to_keycode)(context.display, keysym) } as c_uint;
+            let keycode = unsafe { (x11.keysym_to_keycode)(display, keysym) } as c_uint;
             if keycode == 0 {
                 return Err(InputSynthesisError::UnsupportedKey(key.to_string()));
             }
@@ -119,7 +122,7 @@ mod imp {
                 if sym == 0 {
                     return Err(InputSynthesisError::UnsupportedKey(name.to_string()));
                 }
-                let code = unsafe { (x11.keysym_to_keycode)(context.display, sym) } as c_uint;
+                let code = unsafe { (x11.keysym_to_keycode)(display, sym) } as c_uint;
                 if code == 0 {
                     return Err(InputSynthesisError::TransportFailure(
                         "queued modifier keycode",
@@ -134,31 +137,31 @@ mod imp {
             // server is not left with stuck keys or buffered-but-unflushed events.
             let mut pressed = 0usize;
             for &code in &modifier_codes {
-                if let Err(e) = xtest_key(context.display, code, true) {
+                if let Err(e) = xtest_key(display, code, true) {
                     for &c in modifier_codes[..pressed].iter().rev() {
-                        let _ = xtest_key(context.display, c, false);
+                        let _ = xtest_key(display, c, false);
                     }
-                    let _ = sync_display(context.display);
+                    let _ = sync_display(display);
                     return Err(e);
                 }
                 pressed += 1;
             }
-            let press_ok = xtest_key(context.display, keycode, true);
-            let key_result = press_ok.and_then(|()| xtest_key(context.display, keycode, false));
+            let press_ok = xtest_key(display, keycode, true);
+            let key_result = press_ok.and_then(|()| xtest_key(display, keycode, false));
             // If the press succeeded but the release failed, attempt a recovery release
             // so the primary key does not remain held down and autorepeat into other windows.
             if key_result.is_err() {
-                let _ = xtest_key(context.display, keycode, false);
+                let _ = xtest_key(display, keycode, false);
             }
             for &code in modifier_codes.iter().rev() {
-                let _ = xtest_key(context.display, code, false);
+                let _ = xtest_key(display, code, false);
             }
             if key_result.is_err() {
-                let _ = sync_display(context.display);
+                let _ = sync_display(display);
                 return key_result;
             }
 
-            sync_display(context.display)?;
+            sync_display(display)?;
             Ok(())
         }
 
@@ -214,6 +217,25 @@ mod imp {
             present_window_offscreen(self.window);
             self.window.grab_focus();
             gtk4::prelude::WidgetExt::realize(self.window);
+        }
+
+        /// Returns the raw X11 display pointer without activating the window.
+        /// Used by `key_press_queued` so the caller's grab_focus() is not disturbed.
+        fn x11_display(&self) -> Result<*mut std::ffi::c_void, InputSynthesisError> {
+            let surface = self
+                .window
+                .surface()
+                .ok_or(InputSynthesisError::MissingSurface)?;
+            let display = surface.display();
+            if !display.backend().is_x11() {
+                return Err(InputSynthesisError::UnsupportedBackend);
+            }
+            let gdk_x11 = gdk_x11_api()?;
+            let xdisplay = unsafe { (gdk_x11.display_get_xdisplay)(display.to_glib_none().0) };
+            if xdisplay.is_null() {
+                return Err(InputSynthesisError::UnsupportedBackend);
+            }
+            Ok(xdisplay)
         }
 
         fn x11_context(&self) -> Result<X11WindowContext, InputSynthesisError> {
