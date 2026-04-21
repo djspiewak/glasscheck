@@ -294,6 +294,7 @@ dependencies = [
 name = "glasscheck-appkit"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "glasscheck-core",
  "objc2",
  "objc2-app-kit",

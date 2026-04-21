@@ -36,6 +36,7 @@ objc2-app-kit = { version = "0.3", features = [
     "NSGraphicsContext",
     "NSUserInterfaceItemIdentification",
 ] }
+block2 = "0.6"
 objc2-core-graphics = { version = "0.3", features = [
     "CGEvent",
     "CGEventTypes",

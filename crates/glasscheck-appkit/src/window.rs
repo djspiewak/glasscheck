@@ -141,6 +141,7 @@ mod imp {
         provider: RefCell<Option<Box<dyn AppKitSceneSource>>>,
         detached_root_view: bool,
         tracks_window_content: bool,
+        attached_child_window_at_attach: bool,
     }
 
     impl AppKitWindowHost {
@@ -177,6 +178,7 @@ mod imp {
                 provider: RefCell::new(None),
                 detached_root_view: false,
                 tracks_window_content: true,
+                attached_child_window_at_attach: false,
             }
         }
 
@@ -187,6 +189,7 @@ mod imp {
         /// capability.
         #[must_use]
         pub fn from_window(window: &NSWindow, mtm: MainThreadMarker) -> Self {
+            let attached_child_window_at_attach = window.parentWindow().is_some();
             let retained = unsafe {
                 Retained::retain(window as *const NSWindow as *mut NSWindow)
                     .expect("window attachment should retain successfully")
@@ -204,6 +207,7 @@ mod imp {
                 provider: RefCell::new(None),
                 detached_root_view: false,
                 tracks_window_content: true,
+                attached_child_window_at_attach,
             }
         }
 
@@ -215,6 +219,8 @@ mod imp {
         /// Prefer `AppKitHarness::attach_root_view` when a harness is already in scope.
         #[must_use]
         pub fn from_root(view: &NSView, window: Option<&NSWindow>, mtm: MainThreadMarker) -> Self {
+            let attached_child_window_at_attach =
+                window.is_some_and(|window| window.parentWindow().is_some());
             let root = unsafe {
                 Retained::retain(view as *const NSView as *mut NSView)
                     .expect("root view attachment should retain successfully")
@@ -234,6 +240,7 @@ mod imp {
                 provider: RefCell::new(None),
                 detached_root_view: window.is_none(),
                 tracks_window_content: false,
+                attached_child_window_at_attach,
             }
         }
 
@@ -329,7 +336,11 @@ mod imp {
         /// call-site argument.
         #[must_use]
         pub fn input(&self) -> AppKitInputDriver<'_> {
-            AppKitInputDriver::new(&self.window, self.mtm)
+            AppKitInputDriver::new(
+                &self.window,
+                self.mtm,
+                self.uses_attached_child_click_path(),
+            )
         }
 
         /// Clicks the semantic hit point of the unique node matching `predicate`.
@@ -398,7 +409,8 @@ mod imp {
         /// Clicks the unique node matching `predicate` using semantic hit-point search.
         ///
         /// Standard `NSControl` targets are activated via `performClick:` when
-        /// available; other views use point-based input dispatch.
+        /// available, including unregistered controls found by hit-testing;
+        /// other views use point-based input dispatch.
         pub fn click_node_with_search(
             &self,
             predicate: &Selector,
@@ -423,16 +435,20 @@ mod imp {
                 }
                 return Ok(());
             }
-            let (point, click_view) = match self.click_target(
+            let (root_point, click_view) = match self.click_target(
                 root_view.as_deref(),
                 registered_view.as_deref(),
                 node,
                 search,
             ) {
-                Some((point, click_view)) => (self.root_point_to_window_point(point), click_view),
+                Some((point, click_view)) => (point, click_view),
                 None => return Err(RegionResolveError::InputUnavailable),
             };
-            if let Some(view) = click_view.or(registered_view) {
+            let point = self.root_point_to_window_point(root_point);
+            let control_fallback = (click_view.is_none() && registered_view.is_none())
+                .then(|| hit_test_control_view(root_view.as_deref(), root_point))
+                .flatten();
+            if let Some(view) = click_view.or(registered_view).or(control_fallback) {
                 if is_control_view(&view) {
                     unsafe {
                         let () = msg_send![&*view, performClick: std::ptr::null::<AnyObject>()];
@@ -447,9 +463,15 @@ mod imp {
             if self.window.contentView().is_none() {
                 return Err(RegionResolveError::InputUnavailable);
             }
-            self.input()
-                .click(Point::new(point.x, point.y))
-                .map_err(map_input_error)?;
+            if self.tracks_window_content {
+                self.input()
+                    .click_window_point_with_local_mouse_up_monitor(Point::new(point.x, point.y))
+                    .map_err(map_input_error)?;
+            } else {
+                self.input()
+                    .click(Point::new(point.x, point.y))
+                    .map_err(map_input_error)?;
+            }
             Ok(())
         }
 
@@ -763,6 +785,10 @@ mod imp {
             })
         }
 
+        fn uses_attached_child_click_path(&self) -> bool {
+            self.attached_child_window_at_attach || self.window.parentWindow().is_some()
+        }
+
         fn provider_snapshot(&self) -> Option<ProviderSnapshot> {
             self.provider
                 .borrow()
@@ -1003,6 +1029,14 @@ mod imp {
             }
             Some(_) | None => None,
         }
+    }
+
+    fn hit_test_control_view(
+        root_view: Option<&NSView>,
+        point: NSPoint,
+    ) -> Option<Retained<NSView>> {
+        let hit = root_view?.hitTest(point)?;
+        is_control_view(&hit).then_some(hit)
     }
 
     fn rect_in_root(view: &NSView, root_view: Option<&NSView>) -> Rect {

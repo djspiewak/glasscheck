@@ -16,13 +16,22 @@ mod imp {
     pub struct AppKitInputDriver<'a> {
         window: &'a NSWindow,
         mtm: MainThreadMarker,
+        attached_child_window: bool,
     }
 
     impl<'a> AppKitInputDriver<'a> {
         /// Creates an input driver for `window`.
         #[must_use]
-        pub fn new(window: &'a NSWindow, mtm: MainThreadMarker) -> Self {
-            Self { window, mtm }
+        pub fn new(
+            window: &'a NSWindow,
+            mtm: MainThreadMarker,
+            attached_child_window: bool,
+        ) -> Self {
+            Self {
+                window,
+                mtm,
+                attached_child_window,
+            }
         }
 
         /// Synthesizes a left mouse click at `point` in window coordinates.
@@ -70,39 +79,92 @@ mod imp {
                 return self.dispatch_window_mouse_click(point);
             }
             let window_number = self.window.windowNumber();
-            if let Some(down) =
-                NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                    NSEventType::LeftMouseDown,
-                    point,
-                    NSEventModifierFlags::empty(),
-                    0.0,
-                    window_number,
-                    None,
-                    0,
-                    1,
-                    1.0,
-                )
-            {
-                view.mouseDown(&down);
-            } else {
+            let Some(down) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                NSEventType::LeftMouseDown,
+                point,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window_number,
+                None,
+                0,
+                1,
+                1.0,
+            ) else {
                 return Err(InputSynthesisError::TransportFailure("mouse-down event creation"));
-            }
-            if let Some(up) =
-                NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
-                    NSEventType::LeftMouseUp,
-                    point,
-                    NSEventModifierFlags::empty(),
-                    0.0,
-                    window_number,
-                    None,
-                    0,
-                    1,
-                    1.0,
-                )
-            {
-                view.mouseUp(&up);
-            } else {
+            };
+            view.mouseDown(&down);
+            let Some(up) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                NSEventType::LeftMouseUp,
+                point,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window_number,
+                None,
+                0,
+                1,
+                1.0,
+            ) else {
                 return Err(InputSynthesisError::TransportFailure("mouse-up event creation"));
+            };
+            view.mouseUp(&up);
+            Ok(())
+        }
+
+        /// Synthesizes a click that preserves NSApplication local mouse-up monitors.
+        pub fn click_window_point_with_local_mouse_up_monitor(
+            &self,
+            point: Point,
+        ) -> Result<(), InputSynthesisError> {
+            self.activate_window();
+            let point = ns_point(point);
+            let target = self
+                .target_view(point)
+                .or_else(|| self.window.contentView())
+                .ok_or(InputSynthesisError::MissingTarget)?;
+            if let Some(text_view) = self.text_view_target(&target) {
+                if self.attached_child_window || self.window.parentWindow().is_some() {
+                    self.window.makeFirstResponder(Some(text_view));
+                    return self.dispatch_window_mouse_click(point);
+                }
+                return self
+                    .click_text_view_with_posted_mouse_up(text_view, Point::new(point.x, point.y));
+            }
+            if self.attached_child_window || self.window.parentWindow().is_some() {
+                self.window.makeFirstResponder(Some(&target));
+            }
+            let window_number = self.window.windowNumber();
+            let Some(down) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                NSEventType::LeftMouseDown,
+                point,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window_number,
+                None,
+                0,
+                1,
+                1.0,
+            ) else {
+                return Err(InputSynthesisError::TransportFailure("mouse-down event creation"));
+            };
+            target.mouseDown(&down);
+            let Some(up) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                NSEventType::LeftMouseUp,
+                point,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window_number,
+                None,
+                0,
+                1,
+                1.0,
+            ) else {
+                return Err(InputSynthesisError::TransportFailure("mouse-up event creation"));
+            };
+            self.app().sendEvent(&up);
+            // Hidden background test windows let local monitors observe the mouse-up,
+            // but AppKit does not reliably route that event back into generic views.
+            if !self.window.isVisible() {
+                target.mouseUp(&up);
             }
             Ok(())
         }
@@ -125,13 +187,18 @@ mod imp {
         /// Synthesizes a mouse-move event at `point` in window coordinates.
         pub fn move_mouse(&self, point: Point) -> Result<(), InputSynthesisError> {
             self.activate_window();
-            self.dispatch_mouse_move(
+            let accepts_mouse_moved_events = self.window.acceptsMouseMovedEvents();
+            self.window.setAcceptsMouseMovedEvents(true);
+            let result = self.dispatch_mouse_move(
                 NSEventType::MouseMoved,
                 ns_point(point),
                 NSEventModifierFlags::empty(),
                 0,
                 0.0,
-            )
+            );
+            self.window
+                .setAcceptsMouseMovedEvents(accepts_mouse_moved_events);
+            result
         }
 
         /// Synthesizes a key press and release with the provided metadata.
@@ -265,6 +332,59 @@ mod imp {
             self.app().postEvent_atStart(&up, false);
             view.mouseDown(&down);
             self.drain_run_loop();
+            Ok(())
+        }
+
+        fn click_text_view_with_posted_mouse_up(
+            &self,
+            view: &NSTextView,
+            point: Point,
+        ) -> Result<(), InputSynthesisError> {
+            self.activate_window();
+            self.window.makeFirstResponder(Some(view));
+            self.click_text_view_with_posted_mouse_up_impl(view, point)
+        }
+
+        fn click_text_view_with_posted_mouse_up_impl(
+            &self,
+            view: &NSTextView,
+            point: Point,
+        ) -> Result<(), InputSynthesisError> {
+            let point = ns_point(point);
+            let window_number = self.window.windowNumber();
+            let Some(down) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                NSEventType::LeftMouseDown,
+                point,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window_number,
+                None,
+                0,
+                1,
+                1.0,
+            ) else {
+                return Err(InputSynthesisError::TransportFailure("mouse-down event creation"));
+            };
+            let Some(up) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                NSEventType::LeftMouseUp,
+                point,
+                NSEventModifierFlags::empty(),
+                0.0,
+                window_number,
+                None,
+                0,
+                1,
+                1.0,
+            ) else {
+                return Err(InputSynthesisError::TransportFailure("mouse-up event creation"));
+            };
+            view.mouseDown(&down);
+            self.app().sendEvent(&up);
+            // Hidden background test windows let local monitors observe the mouse-up,
+            // but AppKit does not reliably route that event back into the text view.
+            if !self.window.isVisible() {
+                view.mouseUp(&up);
+            }
             Ok(())
         }
 
@@ -415,7 +535,7 @@ mod imp {
                 return self.window.isKeyWindow();
             }
             if options.contains(NSTrackingAreaOptions::ActiveInActiveApp) {
-                return self.app().isActive();
+                return true;
             }
             false
         }
@@ -431,6 +551,14 @@ mod imp {
                 return false;
             };
             unsafe { msg_send![target, isKindOfClass: NSControl::class()] }
+        }
+
+        fn text_view_target<'b>(&self, view: &'b NSView) -> Option<&'b NSTextView> {
+            if unsafe { msg_send![view, isKindOfClass: NSTextView::class()] } {
+                Some(unsafe { &*(view as *const NSView).cast::<NSTextView>() })
+            } else {
+                None
+            }
         }
 
         fn target_view(&self, point: NSPoint) -> Option<objc2::rc::Retained<NSView>> {

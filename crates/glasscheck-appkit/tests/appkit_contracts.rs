@@ -1,8 +1,10 @@
 #![cfg(target_os = "macos")]
 
 use std::cell::{Cell, RefCell};
+use std::ptr::NonNull;
 use std::rc::Rc;
 
+use block2::RcBlock;
 use glasscheck_appkit::{
     AppKitHarness, AppKitSceneSource, AppKitSnapshotContext, HitPointSearch, HitPointStrategy,
     InstrumentedView,
@@ -18,7 +20,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSBezierPath, NSButton, NSColor, NSEvent, NSFont, NSTextInputClient, NSTextView,
+    NSBezierPath, NSButton, NSColor, NSEvent, NSEventMask, NSFont, NSTextInputClient, NSTextView,
     NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowOrderingMode,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSSize, NSString};
@@ -60,6 +62,22 @@ fn main() {
     run("selected_text_range_reports_scalar_offsets", || {
         selected_text_range_reports_scalar_offsets(harness)
     });
+    run(
+        "provider_only_text_click_reaches_local_mouse_up_monitor_without_duplicate_mouse_up",
+        || {
+            provider_only_text_click_reaches_local_mouse_up_monitor_without_duplicate_mouse_up(
+                harness,
+            )
+        },
+    );
+    run(
+        "provider_only_background_click_reaches_local_mouse_up_monitor_without_dropping_mouse_up",
+        || {
+            provider_only_background_click_reaches_local_mouse_up_monitor_without_dropping_mouse_up(
+                harness,
+            )
+        },
+    );
     run("click_text_position_moves_real_nstextview_caret", || {
         click_text_position_moves_real_nstextview_caret(harness)
     });
@@ -92,6 +110,12 @@ fn main() {
     run(
         "semantic_click_targets_attached_child_window_even_when_parent_window_is_present",
         || semantic_click_targets_attached_child_window_even_when_parent_window_is_present(harness),
+    );
+    run(
+        "provider_only_semantic_click_targets_attached_child_window_even_when_parent_window_is_present",
+        || {
+            provider_only_semantic_click_targets_attached_child_window_even_when_parent_window_is_present(harness)
+        },
     );
     run(
         "click_text_position_moves_attached_child_nstextview_caret",
@@ -214,6 +238,10 @@ fn main() {
         semantic_click_targets_registered_node(harness)
     });
     run(
+        "provider_only_semantic_click_invokes_unregistered_control",
+        || provider_only_semantic_click_invokes_unregistered_control(harness),
+    );
+    run(
         "provider_click_after_content_swap_does_not_dispatch_to_stale_registered_view",
         || provider_click_after_content_swap_does_not_dispatch_to_stale_registered_view(harness),
     );
@@ -320,6 +348,14 @@ fn main() {
     run(
         "scene_source_recipe_is_omitted_when_anchor_is_missing",
         || scene_source_recipe_is_omitted_when_anchor_is_missing(harness),
+    );
+    run(
+        "background_window_hover_updates_active_in_active_app_tracking_state",
+        || background_window_hover_updates_active_in_active_app_tracking_state(harness),
+    );
+    run(
+        "background_window_click_reaches_local_mouse_up_monitor",
+        || background_window_click_reaches_local_mouse_up_monitor(harness),
     );
 }
 
@@ -1421,6 +1457,201 @@ fn transient_surface_hover_delivers_single_mouse_moved_callback_per_step(harness
     assert_picker_label(&picker_scene, "4 × 2");
 }
 
+fn background_window_hover_updates_active_in_active_app_tracking_state(harness: AppKitHarness) {
+    let fixture = open_background_picker_fixture(harness);
+    assert!(
+        !fixture.window().isVisible(),
+        "background picker window should start hidden before hover"
+    );
+    assert!(
+        !fixture.window().isKeyWindow(),
+        "background picker window should start non-key before hover"
+    );
+
+    fixture
+        .host()
+        .hover_node(
+            &Selector::id_eq("table.picker.cell.3.4"),
+            &HitPointSearch::default(),
+        )
+        .expect("background picker host should resolve hover targets");
+    harness.settle(2);
+
+    assert_eq!(fixture.tracking_mouse_moved_count(), 1);
+
+    let picker_scene = fixture.host().snapshot_scene();
+    assert_highlighted_picker_cell(&picker_scene, 3, 4);
+    assert_picker_label(&picker_scene, "3 × 4");
+    assert!(
+        !fixture.window().isVisible(),
+        "background picker window should remain hidden after hover"
+    );
+    assert!(
+        !fixture.window().isKeyWindow(),
+        "background picker window should remain non-key after hover"
+    );
+}
+
+fn background_window_click_reaches_local_mouse_up_monitor(harness: AppKitHarness) {
+    let fixture = open_background_picker_fixture(harness);
+    assert!(
+        !fixture.window().isVisible(),
+        "background picker window should start hidden before click"
+    );
+    assert!(
+        !fixture.window().isKeyWindow(),
+        "background picker window should start non-key before click"
+    );
+
+    fixture
+        .host()
+        .click_node(&Selector::id_eq("table.picker.cell.2.3"))
+        .expect("background picker host should resolve click targets");
+    harness.settle(2);
+
+    assert_eq!(fixture.inserted_dims(), Some((2, 3)));
+    assert!(
+        !fixture.window().isVisible(),
+        "background picker window should remain hidden after click"
+    );
+    assert!(
+        !fixture.window().isKeyWindow(),
+        "background picker window should remain non-key after click"
+    );
+}
+
+fn provider_only_text_click_reaches_local_mouse_up_monitor_without_duplicate_mouse_up(
+    harness: AppKitHarness,
+) {
+    struct MouseUpMonitorGuard(Option<Retained<AnyObject>>);
+
+    impl Drop for MouseUpMonitorGuard {
+        fn drop(&mut self) {
+            if let Some(monitor) = self.0.take() {
+                unsafe { NSEvent::removeMonitor(&monitor) };
+            }
+        }
+    }
+
+    let mtm = harness.main_thread_marker();
+    let host = harness.create_window(220.0, 140.0);
+    let root = make_view(mtm, NSSize::new(220.0, 140.0));
+    let view = ClickTrackingChildView::new(
+        mtm,
+        NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(180.0, 80.0)),
+    );
+    view.setEditable(true);
+    view.setSelectable(true);
+    view.setDrawsBackground(false);
+    view.setString(&NSString::from_str("abcdefg"));
+    view.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+    root.addSubview(&view);
+    host.set_content_view(&root);
+    let text_view: &NSTextView = &view;
+    host.set_contextual_scene_source(Box::new(ContextualTextSceneSource {
+        view: unsafe {
+            Retained::retain(text_view as *const NSTextView as *mut NSTextView)
+                .expect("context text view should retain")
+        },
+    }));
+
+    let monitor_calls = Rc::new(Cell::new(0));
+    let monitor_calls_for_block = monitor_calls.clone();
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        let _event_ref = unsafe { event.as_ref() };
+        monitor_calls_for_block.set(monitor_calls_for_block.get() + 1);
+        event.as_ptr()
+    });
+    let _monitor = MouseUpMonitorGuard(unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &block)
+    });
+
+    harness.settle(2);
+    assert!(
+        !host.window().isVisible(),
+        "provider-only text click should keep the background test window hidden"
+    );
+    assert!(!host.window().isKeyWindow());
+
+    host.click_node(&Selector::selector_eq("context.text"))
+        .unwrap();
+    harness.settle(2);
+
+    assert_eq!(
+        (
+            monitor_calls.get(),
+            view.ivars().mouse_downs.get(),
+            view.ivars().mouse_ups.get(),
+        ),
+        (1, 1, 1)
+    );
+    assert!(
+        !host.window().isVisible(),
+        "provider-only text click should not surface the background test window"
+    );
+    assert!(!host.window().isKeyWindow());
+}
+
+fn provider_only_background_click_reaches_local_mouse_up_monitor_without_dropping_mouse_up(
+    harness: AppKitHarness,
+) {
+    struct MouseUpMonitorGuard(Option<Retained<AnyObject>>);
+
+    impl Drop for MouseUpMonitorGuard {
+        fn drop(&mut self) {
+            if let Some(monitor) = self.0.take() {
+                unsafe { NSEvent::removeMonitor(&monitor) };
+            }
+        }
+    }
+
+    let host = harness.create_window(180.0, 120.0);
+    let root = ClickTrackingContainerView::new(
+        harness.main_thread_marker(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    host.set_content_view(&root);
+    host.set_semantic_provider(Box::new(ProviderOnlySceneProvider));
+
+    let window_number = host.window().windowNumber();
+    let monitor_calls = Rc::new(Cell::new(0));
+    let monitor_calls_for_block = monitor_calls.clone();
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        let event_ref = unsafe { event.as_ref() };
+        if event_ref.windowNumber() == window_number {
+            monitor_calls_for_block.set(monitor_calls_for_block.get() + 1);
+        }
+        event.as_ptr()
+    });
+    let _monitor = MouseUpMonitorGuard(unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &block)
+    });
+
+    harness.settle(2);
+    assert!(
+        !host.window().isVisible(),
+        "provider-only background click should keep the background test window hidden"
+    );
+    assert!(!host.window().isKeyWindow());
+
+    host.click_node(&Selector::id_eq("provider-node")).unwrap();
+    harness.settle(2);
+
+    assert_eq!(
+        (
+            monitor_calls.get(),
+            root.ivars().mouse_downs.get(),
+            root.ivars().mouse_ups.get(),
+        ),
+        (1, 1, 1)
+    );
+    assert!(
+        !host.window().isVisible(),
+        "provider-only background click should not surface the background test window"
+    );
+    assert!(!host.window().isKeyWindow());
+}
+
 fn click_targets_attached_child_window_even_when_parent_window_is_present(harness: AppKitHarness) {
     let mtm = harness.main_thread_marker();
     let parent = harness.create_window(180.0, 120.0);
@@ -1523,6 +1754,85 @@ fn semantic_click_targets_attached_child_window_even_when_parent_window_is_prese
     assert_eq!(parent_view.ivars().mouse_downs.get(), 0);
     assert_eq!(other_view.ivars().mouse_downs.get(), 0);
     assert!(!child.window().isKeyWindow());
+}
+
+fn provider_only_semantic_click_targets_attached_child_window_even_when_parent_window_is_present(
+    harness: AppKitHarness,
+) {
+    let mtm = harness.main_thread_marker();
+    let parent = harness.create_window(180.0, 120.0);
+    let parent_view = RoutingTrackingView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    parent.set_content_view(&parent_view);
+    parent.window().makeFirstResponder(Some(&parent_view));
+
+    let child = harness.create_window(220.0, 120.0);
+    let child_root = make_view(mtm, NSSize::new(220.0, 120.0));
+    let child_view = make_text_view(mtm, NSSize::new(180.0, 80.0), "ab");
+    child_view.setEditable(true);
+    child_view.setSelectable(true);
+    child_view.setDrawsBackground(false);
+    child_view.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+    child_view.setFrameOrigin(NSPoint::new(20.0, 20.0));
+    child_root.addSubview(&child_view);
+    child.set_content_view(&child_root);
+
+    unsafe {
+        parent
+            .window()
+            .addChildWindow_ordered(child.window(), NSWindowOrderingMode::Above);
+    }
+
+    let other = harness.create_window(180.0, 120.0);
+    let other_view = RoutingTrackingView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 120.0)),
+    );
+    other.set_content_view(&other_view);
+    other.window().makeFirstResponder(Some(&other_view));
+    other.window().makeKeyWindow();
+    harness.settle(2);
+    let other_was_key = other.window().isKeyWindow();
+
+    assert!(child.window().parentWindow().is_some());
+    assert!(!child.window().isKeyWindow());
+
+    let attached = harness.attach_window(child.window());
+    attached
+        .input()
+        .set_selection(&child_view, TextRange::new(2, 0));
+    attached.set_contextual_scene_source(Box::new(AttachedChildCaretSceneSource {
+        view: unsafe {
+            Retained::retain(&*child_view as *const NSTextView as *mut NSTextView)
+                .expect("attached child text view should retain")
+        },
+        location: 1,
+    }));
+    let raw_point = attached
+        .resolve_hit_point(
+            &Selector::selector_eq("provider.caret"),
+            &HitPointSearch::default(),
+        )
+        .unwrap();
+    child.input().click_window_point(raw_point).unwrap();
+    harness.settle(2);
+    let expected = attached.selected_text_range(&child_view);
+
+    attached
+        .input()
+        .set_selection(&child_view, TextRange::new(2, 0));
+    attached
+        .click_node(&Selector::selector_eq("provider.caret"))
+        .unwrap();
+    harness.settle(2);
+
+    assert_eq!(attached.selected_text_range(&child_view), expected);
+    assert_eq!(other_view.ivars().mouse_downs.get(), 0);
+    assert_eq!(other_view.ivars().key_downs.get(), 0);
+    assert!(!child.window().isKeyWindow());
+    assert_eq!(other.window().isKeyWindow(), other_was_key);
 }
 
 fn attached_window_refreshes_after_content_view_swap(harness: AppKitHarness) {
@@ -2732,6 +3042,34 @@ fn semantic_click_targets_registered_node(harness: AppKitHarness) {
     assert_eq!(view.ivars().mouse_downs.get(), 1);
 }
 
+fn provider_only_semantic_click_invokes_unregistered_control(harness: AppKitHarness) {
+    let host = harness.create_window(180.0, 120.0);
+    let root = make_view(harness.main_thread_marker(), NSSize::new(180.0, 120.0));
+    let target = ButtonActionTarget::new(harness.main_thread_marker());
+    let button = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str("Provider Button"),
+            Some(target.as_ref()),
+            Some(sel!(buttonPressed:)),
+            harness.main_thread_marker(),
+        )
+    };
+    button.setFrame(NSRect::new(
+        NSPoint::new(24.0, 28.0),
+        NSSize::new(120.0, 32.0),
+    ));
+    root.addSubview(&button);
+    host.set_content_view(&root);
+    host.set_semantic_provider(Box::new(ProviderControlOverlay));
+    harness.settle(2);
+
+    host.click_node(&Selector::id_eq("provider-control"))
+        .unwrap();
+    harness.settle(2);
+
+    assert_eq!(target.ivars().actions.get(), 1);
+}
+
 fn provider_click_after_content_swap_does_not_dispatch_to_stale_registered_view(
     harness: AppKitHarness,
 ) {
@@ -3472,9 +3810,7 @@ define_class!(
             self.ivars()
                 .mouse_ups
                 .set(self.ivars().mouse_ups.get() + 1);
-            unsafe {
-                let () = msg_send![super(self), mouseUp: event];
-            }
+            let _ = event;
         }
     }
 );
@@ -3597,8 +3933,15 @@ impl ReleaseTrackingView {
 
 struct ProviderOnlySceneProvider;
 
+struct ProviderControlOverlay;
+
 struct ContextualTextSceneSource {
     view: Retained<NSTextView>,
+}
+
+struct AttachedChildCaretSceneSource {
+    view: Retained<NSTextView>,
+    location: usize,
 }
 
 impl SemanticProvider for ProviderOnlySceneProvider {
@@ -3611,6 +3954,17 @@ impl SemanticProvider for ProviderOnlySceneProvider {
         .with_label("Provider Node")
         .with_selector("provider.node")
         .with_property("provider", PropertyValue::Bool(true))]
+    }
+}
+
+impl SemanticProvider for ProviderControlOverlay {
+    fn snapshot_nodes(&self) -> Vec<SemanticNode> {
+        vec![SemanticNode::new(
+            "provider-control",
+            Role::Button,
+            Rect::new(Point::new(24.0, 28.0), Size::new(120.0, 32.0)),
+        )
+        .with_selector("provider.control")]
     }
 }
 
@@ -3629,6 +3983,23 @@ impl AppKitSceneSource for ContextualTextSceneSource {
                 SemanticNode::new("context-caret", Role::Marker, caret_rect)
                     .with_selector("context.caret"),
             ],
+            Vec::new(),
+        )
+    }
+}
+
+impl AppKitSceneSource for AttachedChildCaretSceneSource {
+    fn snapshot(&self, context: &AppKitSnapshotContext<'_>) -> SemanticSnapshot {
+        let caret_rect = context
+            .insertion_caret_rect(&self.view, self.location)
+            .expect("attached child caret geometry should resolve");
+        let hit_rect = Rect::new(
+            Point::new(caret_rect.origin.x - 2.0, caret_rect.origin.y),
+            Size::new(4.0, caret_rect.size.height.max(4.0)),
+        );
+        SemanticSnapshot::new(
+            vec![SemanticNode::new("provider-caret", Role::Marker, hit_rect)
+                .with_selector("provider.caret")],
             Vec::new(),
         )
     }
@@ -4188,6 +4559,41 @@ impl PickerContractFixture {
     }
 }
 
+struct BackgroundPickerFixture {
+    host: glasscheck_appkit::AppKitWindowHost,
+    inserted_dims: Rc<RefCell<Option<(usize, usize)>>>,
+    tracking_mouse_moved_calls: Rc<Cell<usize>>,
+    monitor: Option<Retained<AnyObject>>,
+    _tracking_area: Retained<NSTrackingArea>,
+    _tracking_owner: Retained<PickerTrackingOwner>,
+}
+
+impl BackgroundPickerFixture {
+    fn host(&self) -> &glasscheck_appkit::AppKitWindowHost {
+        &self.host
+    }
+
+    fn window(&self) -> &NSWindow {
+        self.host.window()
+    }
+
+    fn inserted_dims(&self) -> Option<(usize, usize)> {
+        *self.inserted_dims.borrow()
+    }
+
+    fn tracking_mouse_moved_count(&self) -> usize {
+        self.tracking_mouse_moved_calls.get()
+    }
+}
+
+impl Drop for BackgroundPickerFixture {
+    fn drop(&mut self) {
+        if let Some(monitor) = self.monitor.take() {
+            unsafe { NSEvent::removeMonitor(&monitor) };
+        }
+    }
+}
+
 fn open_picker_contract_fixture(harness: AppKitHarness) -> PickerContractFixture {
     let mtm = harness.main_thread_marker();
     let picker_state = Rc::new(RefCell::new(PickerState::default()));
@@ -4292,6 +4698,78 @@ fn open_picker_contract_fixture(harness: AppKitHarness) -> PickerContractFixture
         _tracking_area: tracking_area,
         _tracking_owner: tracking_owner,
         _opener_target: opener_target,
+    }
+}
+
+fn open_background_picker_fixture(harness: AppKitHarness) -> BackgroundPickerFixture {
+    let mtm = harness.main_thread_marker();
+    let picker_state = Rc::new(RefCell::new(PickerState::default()));
+    let inserted_dims = Rc::new(RefCell::new(None));
+    let tracking_mouse_moved_calls = Rc::new(Cell::new(0));
+    let tracking_mouse_exited_calls = Rc::new(Cell::new(0));
+
+    let host = harness.create_window(PICKER_WINDOW_WIDTH, PICKER_WINDOW_HEIGHT);
+    let root = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(PICKER_WINDOW_WIDTH, PICKER_WINDOW_HEIGHT),
+        ),
+    );
+    host.set_content_view(&root);
+    host.set_scene_source(Box::new(PickerSceneProvider {
+        state: picker_state.clone(),
+    }));
+
+    let tracking_owner = PickerTrackingOwner::new(
+        mtm,
+        &root,
+        picker_state,
+        tracking_mouse_moved_calls.clone(),
+        tracking_mouse_exited_calls,
+    );
+    let tracking_options = NSTrackingAreaOptions::MouseMoved
+        | NSTrackingAreaOptions::MouseEnteredAndExited
+        | NSTrackingAreaOptions::ActiveInActiveApp
+        | NSTrackingAreaOptions::InVisibleRect;
+    let owner_object: &AnyObject = unsafe { &*(std::ptr::from_ref(&*tracking_owner).cast()) };
+    let tracking_area = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            NSTrackingArea::alloc(),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
+            tracking_options,
+            Some(owner_object),
+            None,
+        )
+    };
+    root.addTrackingArea(&tracking_area);
+
+    let window_number = host.window().windowNumber();
+    let inserted_dims_for_monitor = inserted_dims.clone();
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        let event_ref = unsafe { event.as_ref() };
+        if event_ref.windowNumber() != window_number {
+            return event.as_ptr();
+        }
+        let Some((row, col)) = picker_cell_at_point(event_ref.locationInWindow()) else {
+            return event.as_ptr();
+        };
+        *inserted_dims_for_monitor.borrow_mut() = Some((row, col));
+        std::ptr::null_mut()
+    });
+    let monitor = unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &block)
+    };
+
+    harness.settle(2);
+
+    BackgroundPickerFixture {
+        host,
+        inserted_dims,
+        tracking_mouse_moved_calls,
+        monitor,
+        _tracking_area: tracking_area,
+        _tracking_owner: tracking_owner,
     }
 }
 
