@@ -103,7 +103,10 @@ impl SurfaceQuery {
     #[must_use]
     pub fn title_contains(title: impl Into<String>) -> Self {
         let title = title.into();
-        debug_assert!(!title.is_empty(), "SurfaceQuery::title_contains pattern must not be empty");
+        debug_assert!(
+            !title.is_empty(),
+            "SurfaceQuery::title_contains pattern must not be empty"
+        );
         Self::TitleContains(title)
     }
 

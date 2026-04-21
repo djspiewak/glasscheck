@@ -53,14 +53,10 @@ mod imp {
                     .collect()
             };
             let app = NSApplication::sharedApplication(self.harness.main_thread_marker());
-            let Some(window) = app
-                .orderedWindows()
-                .iter()
-                .find(|window| {
-                    !registered_ids.contains(&window_id(window))
-                        && query.matches_title(&window.title().to_string())
-                })
-            else {
+            let Some(window) = app.orderedWindows().iter().find(|window| {
+                !registered_ids.contains(&window_id(window))
+                    && query.matches_title(&window.title().to_string())
+            }) else {
                 return false;
             };
             self.attach_window(id, &window);
@@ -91,7 +87,10 @@ mod imp {
             options: PollOptions,
         ) -> Result<usize, PollError> {
             let id = id.into();
-            debug_assert!(id != spec.owner, "transient id must not equal the owner surface id");
+            debug_assert!(
+                id != spec.owner,
+                "transient id must not equal the owner surface id"
+            );
             let Some((baseline, opener_point, owner_window, mtm)) = ({
                 let surfaces = self.surfaces.borrow();
                 surfaces.get(&spec.owner).map(|host| {
@@ -102,7 +101,11 @@ mod imp {
                     // opener_point is None if resolve_hit_point fails (e.g., zero-size frame),
                     // in which case window_is_anchored_near is skipped and only direct parent/
                     // child/sheet relationships are used for transient identification.
-                    let baseline = transient_window_baseline(host.window(), host.main_thread_marker(), opener_point);
+                    let baseline = transient_window_baseline(
+                        host.window(),
+                        host.main_thread_marker(),
+                        opener_point,
+                    );
                     let w = unsafe {
                         Retained::retain(host.window() as *const NSWindow as *mut NSWindow)
                             .expect("owner window retain")
@@ -138,7 +141,8 @@ mod imp {
                 if !self.surfaces.borrow().contains_key(&spec.owner) {
                     return false;
                 }
-                let Some(window) = discover_owned_transient_window(&owner_window, mtm, &baseline, opener_point)
+                let Some(window) =
+                    discover_owned_transient_window(&owner_window, mtm, &baseline, opener_point)
                 else {
                     return false;
                 };
@@ -295,10 +299,14 @@ mod imp {
         opener_point: Option<NSPoint>,
     ) -> TransientWindowBaseline {
         TransientWindowBaseline {
-            owner_linked_ids: owner_linked_transient_window_candidates(owner_window, mtm, opener_point)
-                .into_iter()
-                .map(|window| window_id(&window))
-                .collect(),
+            owner_linked_ids: owner_linked_transient_window_candidates(
+                owner_window,
+                mtm,
+                opener_point,
+            )
+            .into_iter()
+            .map(|window| window_id(&window))
+            .collect(),
             ordered_window_ids: ordered_window_candidates(owner_window, mtm)
                 .into_iter()
                 .map(|window| window_id(&window))
@@ -312,7 +320,8 @@ mod imp {
         baseline: &TransientWindowBaseline,
         opener_point: Option<NSPoint>,
     ) -> Option<Retained<NSWindow>> {
-        let owner_linked = owner_linked_transient_window_candidates(owner_window, mtm, opener_point);
+        let owner_linked =
+            owner_linked_transient_window_candidates(owner_window, mtm, opener_point);
         let ordered = ordered_window_candidates(owner_window, mtm);
         let selected_id = discover_transient_window_id(
             baseline,
@@ -325,7 +334,10 @@ mod imp {
             .find(|window| window_id(window) == selected_id)
     }
 
-    fn ordered_window_candidates(owner_window: &NSWindow, mtm: MainThreadMarker) -> Vec<Retained<NSWindow>> {
+    fn ordered_window_candidates(
+        owner_window: &NSWindow,
+        mtm: MainThreadMarker,
+    ) -> Vec<Retained<NSWindow>> {
         let app = NSApplication::sharedApplication(mtm);
         let owner_id = window_id(owner_window);
         let mut candidates = Vec::new();

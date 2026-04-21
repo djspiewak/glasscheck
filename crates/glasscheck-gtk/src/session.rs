@@ -109,11 +109,15 @@ mod imp {
             options: PollOptions,
         ) -> Result<usize, PollError> {
             let id = id.into();
-            debug_assert!(id != spec.owner, "transient id must not equal the owner surface id");
+            debug_assert!(
+                id != spec.owner,
+                "transient id must not equal the owner surface id"
+            );
             let Some((baseline, owner_window, owner_root)) = ({
                 let surfaces = self.surfaces.borrow();
                 surfaces.get(&spec.owner).map(|host| {
-                    let baseline = transient_candidate_ids(host.window(), host.root_widget().as_ref());
+                    let baseline =
+                        transient_candidate_ids(host.window(), host.root_widget().as_ref());
                     let owner_window = host.window().clone();
                     let owner_root = host.root_widget().clone();
                     (baseline, owner_window, owner_root)
@@ -143,7 +147,11 @@ mod imp {
                 if !self.surfaces.borrow().contains_key(&spec.owner) {
                     return false;
                 }
-                let Some(candidate) = discover_owned_transient_candidate(&owner_window, owner_root.as_ref(), &baseline) else {
+                let Some(candidate) = discover_owned_transient_candidate(
+                    &owner_window,
+                    owner_root.as_ref(),
+                    &baseline,
+                ) else {
                     return false;
                 };
                 match candidate {
@@ -285,7 +293,10 @@ mod imp {
         host.window().is_visible()
     }
 
-    fn transient_candidate_ids(owner_window: &Window, owner_root: Option<&Widget>) -> BTreeSet<usize> {
+    fn transient_candidate_ids(
+        owner_window: &Window,
+        owner_root: Option<&Widget>,
+    ) -> BTreeSet<usize> {
         owned_transient_candidates(owner_window, owner_root)
             .into_iter()
             .map(|candidate| transient_candidate_id(&candidate))
