@@ -1091,8 +1091,12 @@ fn key_press_queued_carries_modifier_state(harness: GtkHarness) {
     let seen = modifiers_seen.clone();
     let controller = gtk4::EventControllerKey::new();
     controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
-    controller.connect_key_pressed(move |_, _, _, mods| {
-        seen.borrow_mut().push(mods);
+    controller.connect_key_pressed(move |_, key, _, mods| {
+        // Only record modifier state for the primary key, not for modifier
+        // keys injected separately by XTest (e.g. Control_L press).
+        if key.name().as_deref() == Some("a") {
+            seen.borrow_mut().push(mods);
+        }
         gtk4::glib::Propagation::Stop
     });
     entry.add_controller(controller);
@@ -1115,7 +1119,11 @@ fn key_press_queued_carries_modifier_state(harness: GtkHarness) {
     harness.settle(2);
 
     let seen = modifiers_seen.borrow();
-    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen.len(),
+        1,
+        "exactly one key_pressed event for \"a\" should be observed"
+    );
     assert!(
         seen[0].contains(gtk4::gdk::ModifierType::CONTROL_MASK),
         "queued key event should carry CONTROL_MASK"
