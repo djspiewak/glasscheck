@@ -84,7 +84,7 @@ mod imp {
                 self.window.makeFirstResponder(Some(view));
                 return self.dispatch_window_mouse_click(point);
             }
-            let window_number = self.window.windowNumber();
+            let window_number = self.window.windowNumber().max(0);
             let Some(down) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
                 NSEventType::LeftMouseDown,
                 point,
@@ -142,7 +142,7 @@ mod imp {
             {
                 self.window.makeFirstResponder(Some(&target));
             }
-            let window_number = self.window.windowNumber();
+            let window_number = self.window.windowNumber().max(0);
             let Some(down) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
                 NSEventType::LeftMouseDown,
                 point,
@@ -318,7 +318,7 @@ mod imp {
             }
             self.window.makeFirstResponder(Some(view));
             let point = ns_point(point);
-            let window_number = self.window.windowNumber();
+            let window_number = self.window.windowNumber().max(0);
             let Some(down) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
                 NSEventType::LeftMouseDown,
                 point,
@@ -367,7 +367,7 @@ mod imp {
             point: Point,
         ) -> Result<(), InputSynthesisError> {
             let point = ns_point(point);
-            let window_number = self.window.windowNumber();
+            let window_number = self.window.windowNumber().max(0);
             let Some(down) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
                 NSEventType::LeftMouseDown,
                 point,
