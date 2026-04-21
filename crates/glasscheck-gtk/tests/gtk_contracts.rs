@@ -1018,6 +1018,7 @@ fn key_press_queued_still_reaches_focused_controller(harness: GtkHarness) {
     let keys_seen = Rc::new(std::cell::RefCell::new(Vec::<Option<String>>::new()));
     let seen = keys_seen.clone();
     let controller = gtk4::EventControllerKey::new();
+    controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
     controller.connect_key_pressed(move |_, key, _, _| {
         seen.borrow_mut().push(key.name().map(|n| n.to_string()));
         gtk4::glib::Propagation::Stop
@@ -1089,6 +1090,7 @@ fn key_press_queued_carries_modifier_state(harness: GtkHarness) {
     ));
     let seen = modifiers_seen.clone();
     let controller = gtk4::EventControllerKey::new();
+    controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
     controller.connect_key_pressed(move |_, _, _, mods| {
         seen.borrow_mut().push(mods);
         gtk4::glib::Propagation::Stop
