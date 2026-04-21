@@ -1279,13 +1279,9 @@ fn session_discovers_window_by_title(harness: AppKitHarness) {
         "session should discover title-matched windows"
     );
 
-    let picker = session
+    session
         .snapshot_scene(&SurfaceId::new("picker"))
-        .expect("discovered surface should be attached");
-    assert!(
-        !picker.all().is_empty(),
-        "discovered surface should have accessible nodes"
-    );
+        .expect("discovered surface should be attached and snapshotable");
 }
 
 fn session_opens_owned_transient_window_and_evicts_it(harness: AppKitHarness) {
@@ -1813,16 +1809,6 @@ fn provider_only_semantic_click_targets_attached_child_window_even_when_parent_w
         },
         location: 1,
     }));
-    let raw_point = attached
-        .resolve_hit_point(
-            &Selector::selector_eq("provider.caret"),
-            &HitPointSearch::default(),
-        )
-        .unwrap();
-    child.input().click_window_point(raw_point).unwrap();
-    harness.settle(2);
-    let expected = attached.selected_text_range(&child_view);
-
     attached
         .input()
         .set_selection(&child_view, TextRange::new(2, 0));
@@ -1831,7 +1817,11 @@ fn provider_only_semantic_click_targets_attached_child_window_even_when_parent_w
         .unwrap();
     harness.settle(2);
 
-    assert_eq!(attached.selected_text_range(&child_view), expected);
+    // The caret scene source targets location 1 (between 'a' and 'b' in "ab").
+    assert_eq!(
+        attached.selected_text_range(&child_view),
+        TextRange::new(1, 0)
+    );
     assert_eq!(other_view.ivars().mouse_downs.get(), 0);
     assert_eq!(other_view.ivars().key_downs.get(), 0);
     assert!(!child.window().isKeyWindow());

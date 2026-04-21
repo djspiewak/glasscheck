@@ -48,14 +48,18 @@ mod imp {
                 return Ok(());
             }
             if let Some(target) = target.as_deref() {
-                if self.attached_child_window || self.window.parentWindow().is_some() {
+                if (self.attached_child_window || self.window.parentWindow().is_some())
+                    && self.window.windowNumber() > 0
+                {
                     self.window.makeFirstResponder(Some(target));
                     self.dispatch_window_mouse_click(point)?;
                 } else {
                     self.click_target(target, point)?;
                 }
             } else if let Some(content) = self.window.contentView() {
-                if self.attached_child_window || self.window.parentWindow().is_some() {
+                if (self.attached_child_window || self.window.parentWindow().is_some())
+                    && self.window.windowNumber() > 0
+                {
                     self.window.makeFirstResponder(Some(&content));
                     self.dispatch_window_mouse_click(point)?;
                 } else {
@@ -74,7 +78,9 @@ mod imp {
             point: NSPoint,
         ) -> Result<(), InputSynthesisError> {
             self.activate_window();
-            if self.attached_child_window || self.window.parentWindow().is_some() {
+            if (self.attached_child_window || self.window.parentWindow().is_some())
+                && self.window.windowNumber() > 0
+            {
                 self.window.makeFirstResponder(Some(view));
                 return self.dispatch_window_mouse_click(point);
             }
@@ -122,14 +128,18 @@ mod imp {
                 .or_else(|| self.window.contentView())
                 .ok_or(InputSynthesisError::MissingTarget)?;
             if let Some(text_view) = self.text_view_target(&target) {
-                if self.attached_child_window || self.window.parentWindow().is_some() {
+                if (self.attached_child_window || self.window.parentWindow().is_some())
+                    && self.window.windowNumber() > 0
+                {
                     self.window.makeFirstResponder(Some(text_view));
                     return self.dispatch_window_mouse_click(point);
                 }
                 return self
                     .click_text_view_with_posted_mouse_up(text_view, Point::new(point.x, point.y));
             }
-            if self.attached_child_window || self.window.parentWindow().is_some() {
+            if (self.attached_child_window || self.window.parentWindow().is_some())
+                && self.window.windowNumber() > 0
+            {
                 self.window.makeFirstResponder(Some(&target));
             }
             let window_number = self.window.windowNumber();
@@ -300,7 +310,9 @@ mod imp {
             point: Point,
         ) -> Result<(), InputSynthesisError> {
             self.activate_window();
-            if self.attached_child_window || self.window.parentWindow().is_some() {
+            if (self.attached_child_window || self.window.parentWindow().is_some())
+                && self.window.windowNumber() > 0
+            {
                 self.window.makeFirstResponder(Some(view));
                 return self.dispatch_window_mouse_click(ns_point(point));
             }
@@ -382,6 +394,18 @@ mod imp {
             ) else {
                 return Err(InputSynthesisError::TransportFailure("mouse-up event creation"));
             };
+            // Child windows may remain tracking-eligible (isVisible-like) even when
+            // ordered-out, so NSTextView's tracking loop blocks waiting for mouse-up.
+            // Post the up event at the front of the queue (atStart: true) before
+            // calling mouseDown, so the tracking loop dequeues it before any events
+            // that becomeFirstResponder may have appended. Plain ordered-out windows
+            // without a parent don't have this problem and continue to use sendEvent.
+            if self.window.parentWindow().is_some() {
+                self.app().postEvent_atStart(&up, true);
+                view.mouseDown(&down);
+                self.drain_run_loop();
+                return Ok(());
+            }
             view.mouseDown(&down);
             self.app().sendEvent(&up);
             // Hidden background test windows let local monitors observe the mouse-up,
