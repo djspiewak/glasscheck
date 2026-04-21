@@ -48,23 +48,9 @@ mod imp {
                 return Ok(());
             }
             if let Some(target) = target.as_deref() {
-                if (self.attached_child_window || self.window.parentWindow().is_some())
-                    && self.window.windowNumber() > 0
-                {
-                    self.window.makeFirstResponder(Some(target));
-                    self.dispatch_window_mouse_click(point)?;
-                } else {
-                    self.click_target(target, point)?;
-                }
+                self.click_target(target, point)?;
             } else if let Some(content) = self.window.contentView() {
-                if (self.attached_child_window || self.window.parentWindow().is_some())
-                    && self.window.windowNumber() > 0
-                {
-                    self.window.makeFirstResponder(Some(&content));
-                    self.dispatch_window_mouse_click(point)?;
-                } else {
-                    self.click_target(&content, point)?;
-                }
+                self.click_target(&content, point)?;
             } else {
                 return Err(InputSynthesisError::MissingTarget);
             }
@@ -78,12 +64,6 @@ mod imp {
             point: NSPoint,
         ) -> Result<(), InputSynthesisError> {
             self.activate_window();
-            if (self.attached_child_window || self.window.parentWindow().is_some())
-                && self.window.windowNumber() > 0
-            {
-                self.window.makeFirstResponder(Some(view));
-                return self.dispatch_window_mouse_click(point);
-            }
             let window_number = self.window.windowNumber().max(0);
             let Some(down) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
                 NSEventType::LeftMouseDown,
@@ -128,19 +108,8 @@ mod imp {
                 .or_else(|| self.window.contentView())
                 .ok_or(InputSynthesisError::MissingTarget)?;
             if let Some(text_view) = self.text_view_target(&target) {
-                if (self.attached_child_window || self.window.parentWindow().is_some())
-                    && self.window.windowNumber() > 0
-                {
-                    self.window.makeFirstResponder(Some(text_view));
-                    return self.dispatch_window_mouse_click(point);
-                }
                 return self
                     .click_text_view_with_posted_mouse_up(text_view, Point::new(point.x, point.y));
-            }
-            if (self.attached_child_window || self.window.parentWindow().is_some())
-                && self.window.windowNumber() > 0
-            {
-                self.window.makeFirstResponder(Some(&target));
             }
             let window_number = self.window.windowNumber().max(0);
             let Some(down) = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
@@ -310,12 +279,6 @@ mod imp {
             point: Point,
         ) -> Result<(), InputSynthesisError> {
             self.activate_window();
-            if (self.attached_child_window || self.window.parentWindow().is_some())
-                && self.window.windowNumber() > 0
-            {
-                self.window.makeFirstResponder(Some(view));
-                return self.dispatch_window_mouse_click(ns_point(point));
-            }
             self.window.makeFirstResponder(Some(view));
             let point = ns_point(point);
             let window_number = self.window.windowNumber().max(0);
@@ -345,7 +308,10 @@ mod imp {
             ) else {
                 return Err(InputSynthesisError::TransportFailure("mouse-up event creation"));
             };
-            self.app().postEvent_atStart(&up, false);
+            // Child windows may still be tracking-eligible; post at front so NSTextView's
+            // tracking loop dequeues the up event before any becomeFirstResponder events.
+            let at_start = self.attached_child_window || self.window.parentWindow().is_some();
+            self.app().postEvent_atStart(&up, at_start);
             view.mouseDown(&down);
             self.drain_run_loop();
             Ok(())
