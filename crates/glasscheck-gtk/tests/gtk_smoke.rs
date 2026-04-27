@@ -25,38 +25,38 @@ mod linux {
     pub(super) fn run() {
         let harness = GtkHarness::new().expect("GTK should initialize for native smoke tests");
 
-        run("capture_returns_non_empty_image", || {
+        run_case("capture_returns_non_empty_image", || {
             capture_returns_non_empty_image(harness)
         });
-        run(
+        run_case(
             "root_attachment_starts_window_offscreen_for_all_connected_displays",
             || root_attachment_starts_window_offscreen_for_all_connected_displays(harness),
         );
-        run(
+        run_case(
             "input_activation_keeps_window_offscreen_for_all_connected_displays",
             || input_activation_keeps_window_offscreen_for_all_connected_displays(harness),
         );
-        run("query_reports_registered_widget_geometry", || {
+        run_case("query_reports_registered_widget_geometry", || {
             query_reports_registered_widget_geometry(harness)
         });
-        run("direct_text_input_changes_rendered_content", || {
+        run_case("direct_text_input_changes_rendered_content", || {
             direct_text_input_changes_rendered_content(harness)
         });
-        run("capture_region_matches_registered_widget_bounds", || {
+        run_case("capture_region_matches_registered_widget_bounds", || {
             capture_region_matches_registered_widget_bounds(harness)
         });
-        run("rendered_text_assertion_matches_live_text", || {
+        run_case("rendered_text_assertion_matches_live_text", || {
             rendered_text_assertion_matches_live_text(harness)
         });
-        run("anchored_text_assertion_matches_semantic_region", || {
+        run_case("anchored_text_assertion_matches_semantic_region", || {
             anchored_text_assertion_matches_semantic_region(harness)
         });
-        run("click_button_activates_once", || {
+        run_case("click_button_activates_once", || {
             click_button_activates_once(harness)
         });
     }
 
-    fn run(name: &str, test: impl FnOnce()) {
+    fn run_case(name: &str, test: impl FnOnce()) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
         match result {
             Ok(()) => println!("test {name} ... ok"),

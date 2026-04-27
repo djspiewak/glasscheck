@@ -282,6 +282,7 @@ mod imp {
                 root_view_index,
                 &mut nodes,
             );
+            prune_duplicate_button_label_nodes(&mut nodes);
         }
         if kind == AppKitDialogKind::Alert {
             add_alert_fallback_buttons(&mut nodes);
@@ -454,6 +455,55 @@ mod imp {
                 nodes,
             );
         }
+    }
+
+    fn prune_duplicate_button_label_nodes(nodes: &mut Vec<SemanticNode>) {
+        let remove = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| duplicate_button_label_leaf(nodes, index, node))
+            .collect::<Vec<_>>();
+        let mut index = 0;
+        nodes.retain(|_| {
+            let keep = !remove[index];
+            index += 1;
+            keep
+        });
+    }
+
+    fn duplicate_button_label_leaf(
+        nodes: &[SemanticNode],
+        index: usize,
+        node: &SemanticNode,
+    ) -> bool {
+        if node.role != Role::Label
+            || nodes
+                .iter()
+                .any(|candidate| candidate.parent_id.as_deref() == Some(node.id.as_str()))
+        {
+            return false;
+        }
+        let Some(label) = node.label.as_deref() else {
+            return false;
+        };
+        let mut parent_id = node.parent_id.as_deref();
+        while let Some(id) = parent_id {
+            let Some((parent_index, parent)) = nodes
+                .iter()
+                .enumerate()
+                .find(|(_, candidate)| candidate.id == id)
+            else {
+                return false;
+            };
+            if parent_index == index {
+                return false;
+            }
+            if parent.role == Role::Button && parent.label.as_deref() == Some(label) {
+                return true;
+            }
+            parent_id = parent.parent_id.as_deref();
+        }
+        false
     }
 
     fn apply_view_semantics(view: &NSView, node: &mut SemanticNode) {
@@ -988,9 +1038,10 @@ mod imp {
         use glasscheck_core::{Point, Rect, Role, SemanticNode, Size};
 
         use super::{
-            next_child_index, open_panel_path_intent, save_panel_path_intent, selector_fragment,
-            usable_selector_text, usable_visible_text, AppKitDialogError, AppKitDialogKind,
-            AppKitDialogQuery, OpenPanelPathIntent, SavePanelPathIntent,
+            duplicate_button_label_leaf, next_child_index, open_panel_path_intent,
+            save_panel_path_intent, selector_fragment, usable_selector_text, usable_visible_text,
+            AppKitDialogError, AppKitDialogKind, AppKitDialogQuery, OpenPanelPathIntent,
+            SavePanelPathIntent,
         };
 
         #[test]
@@ -1038,6 +1089,25 @@ mod imp {
             assert_eq!(next_child_index(&nodes, "root"), 2);
             assert_eq!(next_child_index(&nodes, "left"), 1);
             assert_eq!(next_child_index(&nodes, "missing"), 0);
+        }
+
+        #[test]
+        fn duplicate_button_label_leaf_only_prunes_redundant_button_text() {
+            let rect = Rect::new(Point::new(0.0, 0.0), Size::new(0.0, 0.0));
+            let nodes = vec![
+                SemanticNode::new("button", Role::Button, rect).with_label("Review"),
+                SemanticNode::new("button.label", Role::Label, rect)
+                    .with_label("Review")
+                    .with_parent("button", 0),
+                SemanticNode::new("button.field", Role::TextInput, rect).with_parent("button", 1),
+                SemanticNode::new("button.other", Role::Label, rect)
+                    .with_label("Details")
+                    .with_parent("button", 2),
+            ];
+
+            assert!(duplicate_button_label_leaf(&nodes, 1, &nodes[1]));
+            assert!(!duplicate_button_label_leaf(&nodes, 2, &nodes[2]));
+            assert!(!duplicate_button_label_leaf(&nodes, 3, &nodes[3]));
         }
 
         #[test]

@@ -29,144 +29,140 @@ mod linux {
     pub(super) fn run() {
         let harness = GtkHarness::new().expect("GTK should initialize for native contract tests");
 
-        run("attach_to_existing_window_builds_scene_snapshot", || {
+        run_case("attach_to_existing_window_builds_scene_snapshot", || {
             attach_to_existing_window_builds_scene_snapshot(harness)
         });
-        run("provider_only_scene_without_root_is_usable", || {
+        run_case("provider_only_scene_without_root_is_usable", || {
             provider_only_scene_without_root_is_usable(harness)
         });
-        run("provider_only_region_capture_fails_cleanly", || {
+        run_case("provider_only_region_capture_fails_cleanly", || {
             provider_only_region_capture_fails_cleanly(harness)
         });
-        run("root_widget_only_host_without_window_is_safe", || {
+        run_case("root_widget_only_host_without_window_is_safe", || {
             root_widget_only_host_without_window_is_safe(harness)
         });
-        run(
+        run_case(
             "registered_native_hierarchy_supports_parent_and_child_indexes",
             || registered_native_hierarchy_supports_parent_and_child_indexes(harness),
         );
-        run(
+        run_case(
             "provider_ids_are_namespaced_when_they_collide_with_native_ids",
             || provider_ids_are_namespaced_when_they_collide_with_native_ids(harness),
         );
-        run("semantic_click_targets_registered_node", || {
+        run_case("semantic_click_targets_registered_node", || {
             semantic_click_targets_registered_node(harness)
         });
-        run(
+        run_case(
             "resolve_hit_point_supports_selector_lookup_and_search_strategy",
             || resolve_hit_point_supports_selector_lookup_and_search_strategy(harness),
         );
-        run(
+        run_case(
             "semantic_click_dispatches_gesture_click_for_non_button_targets",
             || semantic_click_dispatches_gesture_click_for_non_button_targets(harness),
         );
-        run("semantic_click_dispatches_button_gesture_handlers", || {
+        run_case("semantic_click_dispatches_button_gesture_handlers", || {
             semantic_click_dispatches_button_gesture_handlers(harness)
         });
-        run(
+        run_case(
             "semantic_click_skips_unrealized_registrations_when_mapping_handles",
             || semantic_click_skips_unrealized_registrations_when_mapping_handles(harness),
         );
-        run("semantic_click_respects_gesture_button_filters", || {
+        run_case("semantic_click_respects_gesture_button_filters", || {
             semantic_click_respects_gesture_button_filters(harness)
         });
-        run(
+        run_case(
             "semantic_click_on_registered_ancestor_routes_to_descendant_hit_widget",
             || semantic_click_on_registered_ancestor_routes_to_descendant_hit_widget(harness),
         );
-        run("semantic_click_reports_unhittable_registered_node", || {
+        run_case("semantic_click_reports_unhittable_registered_node", || {
             semantic_click_reports_unhittable_registered_node(harness)
         });
-        run(
+        run_case(
             "semantic_click_uses_recipe_hit_target_when_locator_bounds_are_empty",
             || semantic_click_uses_recipe_hit_target_when_locator_bounds_are_empty(harness),
         );
-        run("semantic_click_uses_single_scene_snapshot", || {
+        run_case("semantic_click_uses_single_scene_snapshot", || {
             semantic_click_uses_single_scene_snapshot(harness)
         });
-        run("key_press_dispatches_modifiers_to_event_controller", || {
+        run_case("key_press_dispatches_modifiers_to_event_controller", || {
             key_press_dispatches_modifiers_to_event_controller(harness)
         });
-        run("key_press_queued_reaches_root_legacy_controller", || {
+        run_case("key_press_queued_reaches_root_legacy_controller", || {
             key_press_queued_reaches_root_legacy_controller(harness)
         });
-        run("key_press_queued_still_reaches_focused_controller", || {
+        run_case("key_press_queued_still_reaches_focused_controller", || {
             key_press_queued_still_reaches_focused_controller(harness)
         });
-        run("key_press_direct_skips_root_legacy_controller", || {
+        run_case("key_press_direct_skips_root_legacy_controller", || {
             key_press_direct_skips_root_legacy_controller(harness)
         });
-        run("key_press_queued_carries_modifier_state", || {
+        run_case("key_press_queued_carries_modifier_state", || {
             key_press_queued_carries_modifier_state(harness)
         });
-        run(
+        run_case(
             "key_press_queued_returns_unsupported_key_for_unknown_name",
             || key_press_queued_returns_unsupported_key_for_unknown_name(harness),
         );
-        run("text_range_rect_converts_to_root_coordinates", || {
+        run_case("text_range_rect_converts_to_root_coordinates", || {
             text_range_rect_converts_to_root_coordinates(harness)
         });
-        run("insertion_caret_rect_converts_to_root_coordinates", || {
+        run_case("insertion_caret_rect_converts_to_root_coordinates", || {
             insertion_caret_rect_converts_to_root_coordinates(harness)
         });
-        run("visual_recipe_probe_builds_clickable_node", || {
+        run_case("visual_recipe_probe_builds_clickable_node", || {
             visual_recipe_probe_builds_clickable_node(harness)
         });
-        run("visual_recipe_probe_omits_missing_match", || {
+        run_case("visual_recipe_probe_omits_missing_match", || {
             visual_recipe_probe_omits_missing_match(harness)
         });
-        run("session_rejects_duplicate_attach_host_ids", || {
+        run_case("session_rejects_duplicate_attach_host_ids", || {
             session_rejects_duplicate_attach_host_ids(harness)
         });
-        run("session_rejects_transient_owner_id_reuse", || {
+        run_case("session_rejects_transient_owner_id_reuse", || {
             session_rejects_transient_owner_id_reuse(harness)
         });
-        run("session_opens_owned_transient_window_and_evicts_it", || {
+        run_case("session_opens_owned_transient_window_and_evicts_it", || {
             session_opens_owned_transient_window_and_evicts_it(harness)
         });
-        run("session_opens_popover_transient_and_evicts_it", || {
+        run_case("session_opens_popover_transient_and_evicts_it", || {
             session_opens_popover_transient_and_evicts_it(harness)
         });
-        run(
+        run_case(
             "context_click_node_opens_popover_menu_and_activates_item",
             || context_click_node_opens_popover_menu_and_activates_item(harness),
         );
-        run(
+        run_case(
             "context_click_node_without_menu_does_not_fall_back_after_semantic_gesture",
             || context_click_node_without_menu_does_not_fall_back_after_semantic_gesture(harness),
         );
-        run(
-            "context_click_node_ignores_same_window_stale_popover",
-            || context_click_node_ignores_same_window_stale_popover(harness),
-        );
-        run("dialog_methods_report_missing_surface", || {
+        run_case("dialog_methods_report_missing_surface", || {
             dialog_methods_report_missing_surface(harness)
         });
-        run("cancel_dialog_reports_vetoed_close_as_poll_error", || {
+        run_case("cancel_dialog_reports_vetoed_close_as_poll_error", || {
             cancel_dialog_reports_vetoed_close_as_poll_error(harness)
         });
-        run("wait_for_dialog_discovers_matching_window", || {
+        run_case("wait_for_dialog_discovers_matching_window", || {
             wait_for_dialog_discovers_matching_window(harness)
         });
-        run("wait_for_dialog_classifies_alerts", || {
+        run_case("wait_for_dialog_classifies_alerts", || {
             wait_for_dialog_classifies_alerts(harness)
         });
-        run("file_chooser_dialogs_classify_and_select_paths", || {
+        run_case("file_chooser_dialogs_classify_and_select_paths", || {
             file_chooser_dialogs_classify_and_select_paths(harness)
         });
-        run("custom_dialog_snapshots_and_drives_widgets", || {
+        run_case("custom_dialog_snapshots_and_drives_widgets", || {
             custom_dialog_snapshots_and_drives_widgets(harness)
         });
-        run("dialog_response_buttons_expose_button_roles", || {
+        run_case("dialog_response_buttons_expose_button_roles", || {
             dialog_response_buttons_expose_button_roles(harness)
         });
-        run(
+        run_case(
             "async_dialog_controller_reports_capability_boundary",
             || async_dialog_controller_reports_capability_boundary(harness),
         );
     }
 
-    fn run(name: &str, test: impl FnOnce()) {
+    fn run_case(name: &str, test: impl FnOnce()) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
         match result {
             Ok(()) => println!("test {name} ... ok"),

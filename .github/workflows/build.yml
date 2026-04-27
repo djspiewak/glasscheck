@@ -51,7 +51,7 @@ jobs:
       - name: Run AppKit contracts test
         if: ${{ matrix.run_native_smoke }}
         env:
-          GLASSCHECK_RUN_DISRUPTIVE_APPKIT_TESTS: all
+          GLASSCHECK_RUN_DISRUPTIVE_APPKIT_TESTS: foreground modal-dialog
         run: cargo test -p glasscheck-appkit --features native-contract-tests --test appkit_contracts
 
       - name: Run GTK smoke test

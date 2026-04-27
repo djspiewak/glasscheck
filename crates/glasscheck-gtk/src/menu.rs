@@ -174,7 +174,7 @@ mod imp {
         baseline: &BTreeSet<usize>,
     ) -> Option<Popover> {
         if let Ok(popover) = widget.clone().downcast::<Popover>() {
-            if popover.is_visible() && !baseline.contains(&(popover.as_ptr() as usize)) {
+            if popover_is_open(&popover) && !baseline.contains(&(popover.as_ptr() as usize)) {
                 return Some(popover);
             }
         }
@@ -190,7 +190,7 @@ mod imp {
 
     fn collect_visible_popover_ids(widget: &Widget, ids: &mut BTreeSet<usize>) {
         if let Ok(popover) = widget.clone().downcast::<Popover>() {
-            if popover.is_visible() {
+            if popover_is_open(&popover) {
                 ids.insert(popover.as_ptr() as usize);
             }
         }
@@ -199,6 +199,10 @@ mod imp {
             collect_visible_popover_ids(&current, ids);
             child = current.next_sibling();
         }
+    }
+
+    fn popover_is_open(popover: &Popover) -> bool {
+        popover.is_visible() && popover.is_mapped()
     }
 
     fn context_menu_nodes(popover: &Popover) -> Vec<SemanticNode> {

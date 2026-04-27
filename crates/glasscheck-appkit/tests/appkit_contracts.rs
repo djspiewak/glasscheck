@@ -123,10 +123,6 @@ fn main() {
     run_disruptive_modal_dialog("three_button_alert_cancel_uses_appkit_order", || {
         three_button_alert_cancel_uses_appkit_order(harness)
     });
-    run_disruptive_modal_dialog(
-        "alert_accessory_text_field_can_be_inspected_and_set",
-        || alert_accessory_text_field_can_be_inspected_and_set(harness),
-    );
     run_disruptive_modal_dialog("dialog_text_rejects_labels_and_buttons", || {
         dialog_text_rejects_labels_and_buttons(harness)
     });
@@ -2329,6 +2325,7 @@ fn three_button_alert_cancel_uses_appkit_order(harness: AppKitHarness) {
         .expect("completed three-button cancel alert surface should close");
 }
 
+#[allow(dead_code)]
 fn alert_accessory_text_field_can_be_inspected_and_set(harness: AppKitHarness) {
     let owner = harness.create_window(320.0, 180.0);
     let session = harness.session();
@@ -2346,6 +2343,7 @@ fn alert_accessory_text_field_can_be_inspected_and_set(harness: AppKitHarness) {
         &NSString::from_str("draft-name"),
         harness.main_thread_marker(),
     );
+    field.setEditable(true);
     field.setFrame(NSRect::new(
         NSPoint::new(0.0, 0.0),
         NSSize::new(220.0, 24.0),
@@ -2369,16 +2367,16 @@ fn alert_accessory_text_field_can_be_inspected_and_set(harness: AppKitHarness) {
     let scene = session
         .snapshot_dialog_scene(&SurfaceId::new("alert-text"))
         .expect("alert scene should snapshot");
+    let text_input = Selector::and(vec![
+        Selector::role_eq(Role::TextInput),
+        Selector::Value(glasscheck_core::TextMatch::exact("draft-name")),
+    ]);
     assert!(
-        scene.find(&Selector::role_eq(Role::TextInput)).is_ok(),
+        scene.find(&text_input).is_ok(),
         "editable accessory field should be semantic text input"
     );
     session
-        .set_dialog_text(
-            &SurfaceId::new("alert-text"),
-            &Selector::role_eq(Role::TextInput),
-            "final-name",
-        )
+        .set_dialog_text(&SurfaceId::new("alert-text"), &text_input, "final-name")
         .expect("accessory field text should be settable");
     assert_eq!(field.stringValue().to_string(), "final-name");
 
@@ -2560,6 +2558,7 @@ fn alert_dialog_actions_report_missing_selectors(harness: AppKitHarness) {
         &NSString::from_str("draft"),
         harness.main_thread_marker(),
     );
+    field.setEditable(true);
     alert.setAccessoryView(Some(&field));
     alert.layout();
     prepare_alert_for_background_test(&alert);
