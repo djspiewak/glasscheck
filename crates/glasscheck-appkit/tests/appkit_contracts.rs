@@ -39,6 +39,9 @@ fn main() {
     let mtm = MainThreadMarker::new().expect("AppKit tests must run on the main thread");
     let harness = AppKitHarness::new(mtm);
 
+    run("disruptive_appkit_test_switch_parses_categories", || {
+        disruptive_appkit_test_switch_parses_categories()
+    });
     run("attach_to_existing_window_builds_scene_snapshot", || {
         attach_to_existing_window_builds_scene_snapshot(harness)
     });
@@ -88,52 +91,52 @@ fn main() {
             )
         },
     );
-    run_live_foreground_appkit("click_text_position_moves_real_nstextview_caret", || {
+    run_disruptive_foreground_appkit("click_text_position_moves_real_nstextview_caret", || {
         click_text_position_moves_real_nstextview_caret(harness)
     });
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "click_text_position_synthesizes_text_view_mouse_down",
         || click_text_position_synthesizes_text_view_mouse_down(harness),
     );
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "click_text_position_completes_before_follow_up_input",
         || click_text_position_completes_before_follow_up_input(harness),
     );
     run("session_discovers_window_by_title", || {
         session_discovers_window_by_title(harness)
     });
-    run_live_foreground_appkit("session_opens_owned_transient_window_and_evicts_it", || {
+    run_disruptive_foreground_appkit("session_opens_owned_transient_window_and_evicts_it", || {
         session_opens_owned_transient_window_and_evicts_it(harness)
     });
-    run_live_modal_dialog("session_waits_for_alert_and_clicks_button", || {
+    run_disruptive_modal_dialog("session_waits_for_alert_and_clicks_button", || {
         session_waits_for_alert_and_clicks_button(harness)
     });
-    run_live_modal_dialog("three_button_alert_click_uses_appkit_order", || {
+    run_disruptive_modal_dialog("three_button_alert_click_uses_appkit_order", || {
         three_button_alert_click_uses_appkit_order(harness)
     });
-    run_live_modal_dialog("three_button_alert_cancel_uses_appkit_order", || {
+    run_disruptive_modal_dialog("three_button_alert_cancel_uses_appkit_order", || {
         three_button_alert_cancel_uses_appkit_order(harness)
     });
-    run_live_modal_dialog(
+    run_disruptive_modal_dialog(
         "alert_accessory_text_field_can_be_inspected_and_set",
         || alert_accessory_text_field_can_be_inspected_and_set(harness),
     );
-    run_live_modal_dialog("dialog_text_rejects_labels_and_buttons", || {
+    run_disruptive_modal_dialog("dialog_text_rejects_labels_and_buttons", || {
         dialog_text_rejects_labels_and_buttons(harness)
     });
-    run_live_modal_dialog("dialog_query_miss_times_out_cleanly", || {
+    run_disruptive_modal_dialog("dialog_query_miss_times_out_cleanly", || {
         dialog_query_miss_times_out_cleanly(harness)
     });
     run("dialog_methods_report_missing_surface", || {
         dialog_methods_report_missing_surface(harness)
     });
-    run_live_modal_dialog("alert_dialog_actions_report_missing_selectors", || {
+    run_disruptive_modal_dialog("alert_dialog_actions_report_missing_selectors", || {
         alert_dialog_actions_report_missing_selectors(harness)
     });
-    run("save_panel_path_selection_is_deterministic", || {
+    run_disruptive_file_panel("save_panel_path_selection_is_deterministic", || {
         save_panel_path_selection_is_deterministic(harness)
     });
-    run_live_modal_dialog("save_panel_rejects_wrong_dialog_kind", || {
+    run_disruptive_modal_dialog("save_panel_rejects_wrong_dialog_kind", || {
         save_panel_rejects_wrong_dialog_kind(harness)
     });
     run("custom_panel_with_button_stays_panel_kind", || {
@@ -142,39 +145,39 @@ fn main() {
     run("ordinary_window_is_not_discovered_as_dialog_panel", || {
         ordinary_window_is_not_discovered_as_dialog_panel(harness)
     });
-    run("open_panel_reports_missing_paths_and_cancels", || {
+    run_disruptive_file_panel("open_panel_reports_missing_paths_and_cancels", || {
         open_panel_reports_missing_paths_and_cancels(harness)
     });
-    run("open_panel_live_file_selection_is_explicit", || {
+    run_disruptive_file_panel("open_panel_live_file_selection_is_explicit", || {
         open_panel_live_file_selection_is_explicit(harness)
     });
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "transient_surface_hover_updates_active_always_mouse_moved_tracking_state",
         || transient_surface_hover_updates_active_always_mouse_moved_tracking_state(harness),
     );
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "transient_surface_hover_delivers_single_mouse_moved_callback_per_step",
         || transient_surface_hover_delivers_single_mouse_moved_callback_per_step(harness),
     );
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "click_targets_attached_child_window_even_when_parent_window_is_present",
         || click_targets_attached_child_window_even_when_parent_window_is_present(harness),
     );
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "semantic_click_targets_attached_child_window_even_when_parent_window_is_present",
         || semantic_click_targets_attached_child_window_even_when_parent_window_is_present(harness),
     );
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "provider_only_semantic_click_targets_attached_child_window_even_when_parent_window_is_present",
         || {
             provider_only_semantic_click_targets_attached_child_window_even_when_parent_window_is_present(harness)
         },
     );
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "provider_only_semantic_click_uses_standalone_path_after_attached_child_detach",
         || provider_only_semantic_click_uses_standalone_path_after_attached_child_detach(harness),
     );
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "click_text_position_moves_attached_child_nstextview_caret",
         || click_text_position_moves_attached_child_nstextview_caret(harness),
     );
@@ -356,7 +359,7 @@ fn main() {
         "attached_window_prunes_stale_registered_views_after_content_swap",
         || attached_window_prunes_stale_registered_views_after_content_swap(harness),
     );
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "move_mouse_targets_attached_window_even_when_another_window_is_key",
         || move_mouse_targets_attached_window_even_when_another_window_is_key(harness),
     );
@@ -364,11 +367,11 @@ fn main() {
         "synthesized_input_keeps_background_test_windows_hidden",
         || synthesized_input_keeps_background_test_windows_hidden(harness),
     );
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "key_press_targets_attached_window_even_when_another_window_is_key",
         || key_press_targets_attached_window_even_when_another_window_is_key(harness),
     );
-    run_live_foreground_appkit(
+    run_disruptive_foreground_appkit(
         "making_peer_window_key_does_not_surface_background_test_windows",
         || making_peer_window_key_does_not_surface_background_test_windows(harness),
     );
@@ -482,19 +485,72 @@ fn run(name: &str, test: impl FnOnce()) {
     }
 }
 
-fn run_live_modal_dialog(name: &str, test: impl FnOnce()) {
-    if live_modal_dialog_contracts_enabled() {
+fn run_disruptive_modal_dialog(name: &str, test: impl FnOnce()) {
+    run_disruptive_appkit_contract(name, DisruptiveAppKitContract::ModalDialog, test);
+}
+
+fn run_disruptive_foreground_appkit(name: &str, test: impl FnOnce()) {
+    run_disruptive_appkit_contract(name, DisruptiveAppKitContract::Foreground, test);
+}
+
+fn run_disruptive_file_panel(name: &str, test: impl FnOnce()) {
+    run_disruptive_appkit_contract(name, DisruptiveAppKitContract::FilePanel, test);
+}
+
+fn run_disruptive_appkit_contract(name: &str, kind: DisruptiveAppKitContract, test: impl FnOnce()) {
+    if disruptive_appkit_contracts_enabled(kind) {
         run(name, test);
     } else {
-        println!("test {name} ... skipped; set GLASSCHECK_RUN_NATIVE_MODAL_DIALOG_TESTS=1 to run");
+        println!(
+            "test {name} ... skipped; set {DISRUPTIVE_APPKIT_TESTS_ENV}={} or all to run",
+            kind.token()
+        );
     }
 }
 
-fn run_live_foreground_appkit(name: &str, test: impl FnOnce()) {
-    if live_foreground_appkit_contracts_enabled() {
-        run(name, test);
-    } else {
-        println!("test {name} ... skipped; set GLASSCHECK_RUN_NATIVE_FOREGROUND_TESTS=1 to run");
+fn disruptive_appkit_test_switch_parses_categories() {
+    assert!(disruptive_appkit_token_enables_kind(
+        "all",
+        DisruptiveAppKitContract::Foreground
+    ));
+    assert!(disruptive_appkit_token_enables_kind(
+        "foreground",
+        DisruptiveAppKitContract::Foreground
+    ));
+    assert!(disruptive_appkit_token_enables_kind(
+        "modal-dialog",
+        DisruptiveAppKitContract::ModalDialog
+    ));
+    assert!(disruptive_appkit_token_enables_kind(
+        "modal",
+        DisruptiveAppKitContract::ModalDialog
+    ));
+    assert!(disruptive_appkit_token_enables_kind(
+        "file_panel",
+        DisruptiveAppKitContract::FilePanel
+    ));
+    assert!(!disruptive_appkit_token_enables_kind(
+        "modal-dialog",
+        DisruptiveAppKitContract::FilePanel
+    ));
+}
+
+const DISRUPTIVE_APPKIT_TESTS_ENV: &str = "GLASSCHECK_RUN_DISRUPTIVE_APPKIT_TESTS";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisruptiveAppKitContract {
+    Foreground,
+    ModalDialog,
+    FilePanel,
+}
+
+impl DisruptiveAppKitContract {
+    fn token(self) -> &'static str {
+        match self {
+            Self::Foreground => "foreground",
+            Self::ModalDialog => "modal-dialog",
+            Self::FilePanel => "file-panel",
+        }
     }
 }
 
@@ -984,16 +1040,29 @@ fn prepare_alert_for_background_test(alert: &NSAlert) {
     hide_native_dialog_window(&window);
 }
 
-fn native_file_panel_contracts_enabled() -> bool {
-    std::env::var_os("GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS").is_some()
+fn disruptive_file_panel_contracts_enabled() -> bool {
+    disruptive_appkit_contracts_enabled(DisruptiveAppKitContract::FilePanel)
 }
 
-fn live_modal_dialog_contracts_enabled() -> bool {
-    std::env::var_os("GLASSCHECK_RUN_NATIVE_MODAL_DIALOG_TESTS").is_some()
+fn disruptive_appkit_contracts_enabled(kind: DisruptiveAppKitContract) -> bool {
+    std::env::var(DISRUPTIVE_APPKIT_TESTS_ENV)
+        .ok()
+        .is_some_and(|value| {
+            value
+                .split(|ch: char| ch == ',' || ch == ';' || ch.is_ascii_whitespace())
+                .any(|token| disruptive_appkit_token_enables_kind(token, kind))
+        })
 }
 
-fn live_foreground_appkit_contracts_enabled() -> bool {
-    std::env::var_os("GLASSCHECK_RUN_NATIVE_FOREGROUND_TESTS").is_some()
+fn disruptive_appkit_token_enables_kind(token: &str, kind: DisruptiveAppKitContract) -> bool {
+    let token = token.trim().to_ascii_lowercase().replace('_', "-");
+    match token.as_str() {
+        "1" | "true" | "all" => true,
+        "foreground" => kind == DisruptiveAppKitContract::Foreground,
+        "modal" | "modal-dialog" => kind == DisruptiveAppKitContract::ModalDialog,
+        "file-panel" => kind == DisruptiveAppKitContract::FilePanel,
+        _ => false,
+    }
 }
 
 fn short_poll_options() -> PollOptions {
@@ -2494,9 +2563,9 @@ fn alert_dialog_actions_report_missing_selectors(harness: AppKitHarness) {
 }
 
 fn save_panel_path_selection_is_deterministic(harness: AppKitHarness) {
-    if !native_file_panel_contracts_enabled() {
+    if !disruptive_file_panel_contracts_enabled() {
         println!(
-            "skipping live NSSavePanel contract; set GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS=1 to run"
+            "skipping disruptive NSSavePanel contract; set GLASSCHECK_RUN_DISRUPTIVE_APPKIT_TESTS=file-panel or all to run"
         );
         return;
     }
@@ -2821,9 +2890,9 @@ fn ordinary_window_is_not_discovered_as_dialog_panel(harness: AppKitHarness) {
 }
 
 fn open_panel_reports_missing_paths_and_cancels(harness: AppKitHarness) {
-    if !native_file_panel_contracts_enabled() {
+    if !disruptive_file_panel_contracts_enabled() {
         println!(
-            "skipping live NSOpenPanel contract; set GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS=1 to run"
+            "skipping disruptive NSOpenPanel contract; set GLASSCHECK_RUN_DISRUPTIVE_APPKIT_TESTS=file-panel or all to run"
         );
         return;
     }
@@ -2855,9 +2924,9 @@ fn open_panel_reports_missing_paths_and_cancels(harness: AppKitHarness) {
 }
 
 fn open_panel_live_file_selection_is_explicit(harness: AppKitHarness) {
-    if !native_file_panel_contracts_enabled() {
+    if !disruptive_file_panel_contracts_enabled() {
         println!(
-            "skipping live NSOpenPanel selection contract; set GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS=1 to run"
+            "skipping disruptive NSOpenPanel selection contract; set GLASSCHECK_RUN_DISRUPTIVE_APPKIT_TESTS=file-panel or all to run"
         );
         return;
     }

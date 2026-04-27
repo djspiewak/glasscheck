@@ -327,11 +327,13 @@ Use the normal AppKit native contract command for default local and CI-style ver
 
 That default run keeps live foreground-window contracts, live `NSAlert` sheet/modal contracts, and live `NSSavePanel`/`NSOpenPanel` interaction contracts skipped. Those contracts are separate because making native windows key/front, presenting AppKit modal UI, or presenting system file panels can interrupt focus, beep, launch macOS file-panel services, or surface visible system UI, which conflicts with hidden/background-only local verification.
 
-Run the live foreground, modal-dialog, and file-panel contracts only when visible/system AppKit behavior is acceptable in the current session:
+Run the disruptive foreground, modal-dialog, and file-panel contracts only when focus interruption or visible/system AppKit behavior is acceptable in the current session:
 
-- `GLASSCHECK_RUN_NATIVE_FOREGROUND_TESTS=1 GLASSCHECK_RUN_NATIVE_MODAL_DIALOG_TESTS=1 GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS=1 cargo test -p glasscheck-appkit --test appkit_contracts --features native-contract-tests`
+- `GLASSCHECK_RUN_DISRUPTIVE_APPKIT_TESTS=all cargo test -p glasscheck-appkit --test appkit_contracts --features native-contract-tests`
 
-The macOS CI AppKit contracts step enables these environment variables to keep that live coverage in CI while preserving the non-disruptive default local command.
+For narrower local runs, `GLASSCHECK_RUN_DISRUPTIVE_APPKIT_TESTS` also accepts comma-separated categories: `foreground`, `modal-dialog`, and `file-panel`.
+
+The macOS CI AppKit contracts step enables `GLASSCHECK_RUN_DISRUPTIVE_APPKIT_TESTS=all` to keep that coverage in CI while preserving the non-disruptive default local command.
 
 ## GTK Verification
 
