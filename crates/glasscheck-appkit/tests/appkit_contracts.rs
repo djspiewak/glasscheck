@@ -119,6 +119,10 @@ fn main() {
         },
     );
     run(
+        "provider_only_semantic_click_uses_standalone_path_after_attached_child_detach",
+        || provider_only_semantic_click_uses_standalone_path_after_attached_child_detach(harness),
+    );
+    run(
         "click_text_position_moves_attached_child_nstextview_caret",
         || click_text_position_moves_attached_child_nstextview_caret(harness),
     );
@@ -1843,6 +1847,85 @@ fn provider_only_semantic_click_targets_attached_child_window_even_when_parent_w
     assert_eq!(other_view.ivars().key_downs.get(), 0);
     assert!(!child.window().isKeyWindow());
     assert_eq!(other.window().isKeyWindow(), other_was_key);
+}
+
+fn provider_only_semantic_click_uses_standalone_path_after_attached_child_detach(
+    harness: AppKitHarness,
+) {
+    struct MouseUpMonitorGuard(Option<Retained<AnyObject>>);
+
+    impl Drop for MouseUpMonitorGuard {
+        fn drop(&mut self) {
+            if let Some(monitor) = self.0.take() {
+                unsafe { NSEvent::removeMonitor(&monitor) };
+            }
+        }
+    }
+
+    let mtm = harness.main_thread_marker();
+    let parent = harness.create_window(180.0, 120.0);
+    let child = harness.create_window(220.0, 120.0);
+    let child_root = make_view(mtm, NSSize::new(220.0, 120.0));
+    let child_view = make_text_view(mtm, NSSize::new(180.0, 80.0), "ab");
+    child_view.setEditable(true);
+    child_view.setSelectable(true);
+    child_view.setDrawsBackground(false);
+    child_view.setFont(Some(&NSFont::systemFontOfSize(13.0)));
+    child_view.setFrameOrigin(NSPoint::new(20.0, 20.0));
+    child_root.addSubview(&child_view);
+    child.set_content_view(&child_root);
+
+    unsafe {
+        parent
+            .window()
+            .addChildWindow_ordered(child.window(), NSWindowOrderingMode::Above);
+    }
+    assert!(child.window().parentWindow().is_some());
+
+    let attached = harness.attach_window(child.window());
+    attached.set_contextual_scene_source(Box::new(AttachedChildCaretSceneSource {
+        view: unsafe {
+            Retained::retain(&*child_view as *const NSTextView as *mut NSTextView)
+                .expect("attached child text view should retain")
+        },
+        location: 1,
+    }));
+
+    parent.window().removeChildWindow(child.window());
+    harness.settle(2);
+    assert!(child.window().parentWindow().is_none());
+    assert!(!child.window().isVisible());
+    assert!(!child.window().isKeyWindow());
+
+    let window_number = child.window().windowNumber();
+    let monitor_calls = Rc::new(Cell::new(0));
+    let monitor_calls_for_block = monitor_calls.clone();
+    let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        let event_ref = unsafe { event.as_ref() };
+        if event_ref.windowNumber() == window_number {
+            monitor_calls_for_block.set(monitor_calls_for_block.get() + 1);
+        }
+        event.as_ptr()
+    });
+    let _monitor = MouseUpMonitorGuard(unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &block)
+    });
+
+    attached
+        .input()
+        .set_selection(&child_view, TextRange::new(2, 0));
+    attached
+        .click_node(&Selector::selector_eq("provider.caret"))
+        .unwrap();
+    harness.settle(2);
+
+    assert_eq!(monitor_calls.get(), 1);
+    assert_ne!(
+        attached.selected_text_range(&child_view),
+        TextRange::new(2, 0)
+    );
+    assert!(!child.window().isVisible());
+    assert!(!child.window().isKeyWindow());
 }
 
 fn attached_window_refreshes_after_content_view_swap(harness: AppKitHarness) {
