@@ -26,6 +26,9 @@ fn main() {
         let fixture = mount_fixture(&harness);
         exercise_host_contracts(&harness, &fixture.host);
     });
+    run_case("appkit_dialog_api_is_reexported", || {
+        appkit_dialog_api_is_reexported(&harness)
+    });
 }
 
 struct Fixture {
@@ -178,6 +181,38 @@ fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::Win
 
     let scene = host.snapshot_scene();
     assert_eq!(node_label(&scene, "click-state"), Some("Clicked"));
+}
+
+fn appkit_dialog_api_is_reexported(harness: &glasscheck::Harness) {
+    let query = glasscheck::AppKitDialogQuery::save_panel()
+        .title_eq("Export")
+        .title_contains("Doc");
+    let session = harness.session();
+    let wait: fn(
+        &glasscheck::Session,
+        &glasscheck::AppKitDialogQuery,
+    ) -> Result<usize, glasscheck::PollError> = wait_for_dialog_signature;
+
+    assert_eq!(
+        glasscheck::AppKitDialogKind::OpenPanel.as_str(),
+        "open_panel"
+    );
+    assert!(matches!(
+        glasscheck::AppKitDialogError::MissingSurface,
+        glasscheck::AppKitDialogError::MissingSurface
+    ));
+    assert!(matches!(
+        session.dialog_kind(&glasscheck::SurfaceId::new("missing-dialog")),
+        Err(glasscheck::AppKitDialogError::MissingSurface)
+    ));
+    let _ = (query, session, wait);
+}
+
+fn wait_for_dialog_signature(
+    session: &glasscheck::Session,
+    query: &glasscheck::AppKitDialogQuery,
+) -> Result<usize, glasscheck::PollError> {
+    session.wait_for_dialog("dialog", query, glasscheck::PollOptions::default())
 }
 
 fn status_expectation(content: &str) -> AnchoredTextExpectation {

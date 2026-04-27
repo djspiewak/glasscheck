@@ -11,8 +11,14 @@
 //! `AppKitHarness::menu_bar()` exposes `NSApplication.mainMenu` for semantic
 //! assertions, offscreen menu capture, and AppKit menu-item activation without
 //! showing a native menu popup on the default capture path.
+//! `AppKitSession` also exposes AppKit-only dialog helpers for `NSAlert`,
+//! `NSOpenPanel`, and `NSSavePanel` surfaces using semantic scenes plus public
+//! AppKit operations. Live file-panel contract tests are opt-in with
+//! `GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS=1` because presenting system file
+//! panels can launch macOS services and visible UI.
 
 mod capture;
+mod dialog;
 mod harness;
 mod input;
 mod menu;
@@ -22,6 +28,7 @@ mod text;
 mod window;
 
 pub use capture::capture_view_image;
+pub use dialog::{AppKitDialogError, AppKitDialogKind, AppKitDialogQuery};
 pub use glasscheck_core::{HitPointSearch, HitPointStrategy, InstrumentedNode};
 pub use harness::AppKitHarness;
 pub use input::AppKitInputDriver;

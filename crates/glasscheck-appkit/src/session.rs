@@ -2,6 +2,7 @@
 mod imp {
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
 
     use glasscheck_core::{
         PollError, PollOptions, Scene, Selector, SurfaceId, SurfaceQuery, TransientSurfaceSpec,
@@ -10,6 +11,7 @@ mod imp {
     use objc2_app_kit::{NSApplication, NSWindow};
     use objc2_foundation::{MainThreadMarker, NSPoint};
 
+    use crate::dialog::{self, AppKitDialogError, AppKitDialogKind, AppKitDialogQuery};
     use crate::{AppKitContextMenu, AppKitHarness, AppKitWindowHost, HitPointSearch};
 
     /// Coordinator for multi-surface AppKit test flows.
@@ -73,6 +75,49 @@ mod imp {
             let id = id.into();
             self.harness
                 .wait_until(options, || self.discover_window(id.clone(), query))
+        }
+
+        /// Polls until a native AppKit dialog or panel matching `query` is found and attached.
+        pub fn wait_for_dialog(
+            &self,
+            id: impl Into<SurfaceId>,
+            query: &AppKitDialogQuery,
+            options: PollOptions,
+        ) -> Result<usize, PollError> {
+            let id = id.into();
+            self.harness.wait_until(options, || {
+                let (registered_ids, owner_windows): (BTreeSet<usize>, Vec<Retained<NSWindow>>) = {
+                    let surfaces = self.surfaces.borrow();
+                    (
+                        surfaces
+                            .values()
+                            .map(|host| window_id(host.window()))
+                            .collect(),
+                        surfaces
+                            .values()
+                            .map(|host| unsafe {
+                                Retained::retain(host.window() as *const NSWindow as *mut NSWindow)
+                                    .expect("owner window retain")
+                            })
+                            .collect(),
+                    )
+                };
+                let Some(window) =
+                    dialog_window_candidates(self.harness.main_thread_marker(), &owner_windows)
+                        .into_iter()
+                        .find(|window| {
+                            !registered_ids.contains(&window_id(window))
+                                && query.matches_window(window)
+                        })
+                else {
+                    return false;
+                };
+                self.attach_host(
+                    id.clone(),
+                    dialog::attach_dialog_window(self.harness, &window),
+                );
+                true
+            })
         }
 
         /// Clicks an opener on the owner surface and attaches the newly opened transient.
@@ -229,6 +274,77 @@ mod imp {
             self.with_surface(id, AppKitWindowHost::snapshot_scene)
         }
 
+        /// Returns the native AppKit dialog kind for the named surface.
+        pub fn dialog_kind(&self, id: &SurfaceId) -> Result<AppKitDialogKind, AppKitDialogError> {
+            self.with_surface(id, |host| {
+                dialog::classify_window(host.window()).ok_or(AppKitDialogError::NotDialog)
+            })
+            .ok_or(AppKitDialogError::MissingSurface)?
+        }
+
+        /// Snapshots the named dialog or panel into a semantic scene.
+        pub fn snapshot_dialog_scene(&self, id: &SurfaceId) -> Result<Scene, AppKitDialogError> {
+            self.with_surface(id, dialog::snapshot_dialog_scene)
+                .ok_or(AppKitDialogError::MissingSurface)?
+        }
+
+        /// Synthesizes a click on a dialog button matching `predicate`.
+        pub fn click_dialog_button(
+            &self,
+            id: &SurfaceId,
+            predicate: &Selector,
+        ) -> Result<(), AppKitDialogError> {
+            self.with_surface(id, |host| dialog::click_dialog_button(host, predicate))
+                .ok_or(AppKitDialogError::MissingSurface)?
+        }
+
+        /// Sets text on a native text field or text view within a dialog.
+        pub fn set_dialog_text(
+            &self,
+            id: &SurfaceId,
+            predicate: &Selector,
+            text: &str,
+        ) -> Result<(), AppKitDialogError> {
+            self.with_surface(id, |host| dialog::set_dialog_text(host, predicate, text))
+                .ok_or(AppKitDialogError::MissingSurface)?
+        }
+
+        /// Chooses a deterministic save destination in a live `NSSavePanel`.
+        pub fn choose_save_panel_path(
+            &self,
+            id: &SurfaceId,
+            path: &Path,
+            options: PollOptions,
+        ) -> Result<usize, AppKitDialogError> {
+            self.with_surface(id, |host| {
+                dialog::choose_save_panel_path(host, path, options)
+            })
+            .ok_or(AppKitDialogError::MissingSurface)?
+        }
+
+        /// Chooses deterministic paths in a live `NSOpenPanel` when the OS panel exposes them.
+        pub fn choose_open_panel_paths(
+            &self,
+            id: &SurfaceId,
+            paths: &[PathBuf],
+            options: PollOptions,
+        ) -> Result<usize, AppKitDialogError> {
+            self.with_surface(id, |host| {
+                dialog::choose_open_panel_paths(host, paths, options)
+            })
+            .ok_or(AppKitDialogError::MissingSurface)?
+        }
+
+        /// Cancels the named native dialog or panel.
+        pub fn cancel_dialog(
+            &self,
+            id: &SurfaceId,
+            options: PollOptions,
+        ) -> Result<usize, AppKitDialogError> {
+            self.with_surface(id, |host| dialog::cancel_dialog(host, options))
+                .ok_or(AppKitDialogError::MissingSurface)?
+        }
+
         /// Synthesizes a click on the node matching `predicate` in the named surface.
         ///
         /// Returns `None` if the surface is absent or has been closed (and evicts it as a side effect); `Some(Err(...))` if the node can't be located.
@@ -345,6 +461,38 @@ mod imp {
             .into_iter()
             .chain(ordered)
             .find(|window| window_id(window) == selected_id)
+    }
+
+    fn dialog_window_candidates(
+        mtm: MainThreadMarker,
+        owner_windows: &[Retained<NSWindow>],
+    ) -> Vec<Retained<NSWindow>> {
+        let app = NSApplication::sharedApplication(mtm);
+        let mut seen = BTreeSet::new();
+        let mut candidates = Vec::new();
+        for window in app.orderedWindows().iter().chain(app.windows().iter()) {
+            let id = window_id(&window);
+            if seen.insert(id) {
+                candidates.push(window);
+            }
+        }
+        for owner in owner_windows {
+            if let Some(sheet) = owner.attachedSheet() {
+                let id = window_id(&sheet);
+                if seen.insert(id) {
+                    candidates.push(sheet);
+                }
+            }
+            if let Some(children) = owner.childWindows() {
+                for child in children.iter() {
+                    let id = window_id(&child);
+                    if seen.insert(id) {
+                        candidates.push(child);
+                    }
+                }
+            }
+        }
+        candidates
     }
 
     fn ordered_window_candidates(

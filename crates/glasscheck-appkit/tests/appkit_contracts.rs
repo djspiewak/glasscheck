@@ -1,12 +1,16 @@
 #![cfg(target_os = "macos")]
 
 use std::cell::{Cell, RefCell};
+use std::fs;
+use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use block2::RcBlock;
 use glasscheck_appkit::{
-    AppKitHarness, AppKitMenuCaptureOptions, AppKitMenuError, AppKitMenuTarget, AppKitSceneSource,
+    AppKitDialogError, AppKitDialogKind, AppKitDialogQuery, AppKitHarness,
+    AppKitMenuCaptureOptions, AppKitMenuError, AppKitMenuTarget, AppKitSceneSource,
     AppKitSnapshotContext, HitPointSearch, HitPointStrategy, InstrumentedView,
 };
 use glasscheck_core::{
@@ -20,10 +24,12 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationDelegate, NSBezierPath, NSButton, NSColor,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSAlertThirdButtonReturn,
+    NSApplication, NSApplicationDelegate, NSBackingStoreType, NSBezierPath, NSButton, NSColor,
     NSControlStateValueMixed, NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags,
-    NSEventType, NSFont, NSMenu, NSMenuItem, NSTextInputClient, NSTextView, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowOrderingMode,
+    NSEventType, NSFont, NSMenu, NSMenuItem, NSOpenPanel, NSPanel, NSSavePanel, NSTextField,
+    NSTextInputClient, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
+    NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{
     MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
@@ -98,6 +104,49 @@ fn main() {
     });
     run("session_opens_owned_transient_window_and_evicts_it", || {
         session_opens_owned_transient_window_and_evicts_it(harness)
+    });
+    run("session_waits_for_alert_and_clicks_button", || {
+        session_waits_for_alert_and_clicks_button(harness)
+    });
+    run("three_button_alert_click_uses_appkit_order", || {
+        three_button_alert_click_uses_appkit_order(harness)
+    });
+    run("three_button_alert_cancel_uses_appkit_order", || {
+        three_button_alert_cancel_uses_appkit_order(harness)
+    });
+    run(
+        "alert_accessory_text_field_can_be_inspected_and_set",
+        || alert_accessory_text_field_can_be_inspected_and_set(harness),
+    );
+    run("dialog_text_rejects_labels_and_buttons", || {
+        dialog_text_rejects_labels_and_buttons(harness)
+    });
+    run("dialog_query_miss_times_out_cleanly", || {
+        dialog_query_miss_times_out_cleanly(harness)
+    });
+    run("dialog_methods_report_missing_surface", || {
+        dialog_methods_report_missing_surface(harness)
+    });
+    run("alert_dialog_actions_report_missing_selectors", || {
+        alert_dialog_actions_report_missing_selectors(harness)
+    });
+    run("save_panel_path_selection_is_deterministic", || {
+        save_panel_path_selection_is_deterministic(harness)
+    });
+    run("save_panel_rejects_wrong_dialog_kind", || {
+        save_panel_rejects_wrong_dialog_kind(harness)
+    });
+    run("custom_panel_with_button_stays_panel_kind", || {
+        custom_panel_with_button_stays_panel_kind(harness)
+    });
+    run("ordinary_window_is_not_discovered_as_dialog_panel", || {
+        ordinary_window_is_not_discovered_as_dialog_panel(harness)
+    });
+    run("open_panel_reports_missing_paths_and_cancels", || {
+        open_panel_reports_missing_paths_and_cancels(harness)
+    });
+    run("open_panel_live_file_selection_is_explicit", || {
+        open_panel_live_file_selection_is_explicit(harness)
     });
     run(
         "transient_surface_hover_updates_active_always_mouse_moved_tracking_state",
@@ -895,6 +944,39 @@ fn opened_menu_activation_invokes_action_and_rejects_invalid_items(harness: AppK
         Err(AppKitMenuError::ItemNotFound(_))
     ));
     assert_eq!(fixture.activations.get(), 1);
+}
+
+fn temp_test_dir(label: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("glasscheck-{label}-{stamp}"));
+    fs::create_dir_all(&path).expect("temporary test directory should be creatable");
+    path
+}
+
+fn hide_native_dialog_window(window: &NSWindow) {
+    window.setExcludedFromWindowsMenu(true);
+    window.setCanHide(false);
+    window.setHidesOnDeactivate(true);
+    window.setAlphaValue(0.0);
+}
+
+fn prepare_alert_for_background_test(alert: &NSAlert) {
+    let window = alert.window();
+    hide_native_dialog_window(&window);
+}
+
+fn native_file_panel_contracts_enabled() -> bool {
+    std::env::var_os("GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS").is_some()
+}
+
+fn short_poll_options() -> PollOptions {
+    PollOptions {
+        timeout: Duration::from_millis(80),
+        interval: Duration::from_millis(8),
+    }
 }
 
 fn attach_to_existing_window_builds_scene_snapshot(harness: AppKitHarness) {
@@ -1902,6 +1984,848 @@ fn session_opens_owned_transient_window_and_evicts_it(harness: AppKitHarness) {
         main_scene.find(&Selector::id_eq("inserted-table")).is_ok(),
         "main scene should reflect the table insertion after the popover action"
     );
+}
+
+fn session_waits_for_alert_and_clicks_button(harness: AppKitHarness) {
+    let owner = harness.create_window(320.0, 180.0);
+    let session = harness.session();
+    session.attach_host("main", owner);
+    let result = Rc::new(Cell::new(None));
+    let result_for_block = result.clone();
+    let block = RcBlock::new(move |response: isize| {
+        result_for_block.set(Some(response));
+    });
+    let alert = NSAlert::new(harness.main_thread_marker());
+    alert.setMessageText(&NSString::from_str("Discard Changes?"));
+    alert.setInformativeText(&NSString::from_str("Unsaved edits will be lost."));
+    alert.addButtonWithTitle(&NSString::from_str("Discard"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    prepare_alert_for_background_test(&alert);
+
+    session.with_surface(&SurfaceId::new("main"), |host| {
+        alert.beginSheetModalForWindow_completionHandler(host.window(), Some(&block));
+    });
+    harness.settle(2);
+
+    session
+        .wait_for_dialog(
+            "alert",
+            &AppKitDialogQuery::alert().title_contains("Discard"),
+            PollOptions::default(),
+        )
+        .expect("alert sheet should be discovered");
+    session.with_surface(&SurfaceId::new("alert"), |host| {
+        assert!(
+            host.window().alphaValue() == 0.0,
+            "discovered alert sheet should stay transparent under the background test policy"
+        );
+    });
+    assert_eq!(
+        session
+            .dialog_kind(&SurfaceId::new("alert"))
+            .expect("alert kind should be available"),
+        AppKitDialogKind::Alert
+    );
+    let scene = session
+        .snapshot_dialog_scene(&SurfaceId::new("alert"))
+        .expect("alert scene should snapshot");
+    assert!(
+        scene
+            .find_all(&Selector::label(glasscheck_core::TextMatch::contains(
+                "Discard"
+            )))
+            .len()
+            >= 1,
+        "alert scene should expose visible alert text"
+    );
+    assert!(
+        scene
+            .find(&Selector::property_eq(
+                "appkit:button_role",
+                PropertyValue::string("confirm")
+            ))
+            .is_ok(),
+        "alert scene should expose a confirm button"
+    );
+
+    session
+        .click_dialog_button(
+            &SurfaceId::new("alert"),
+            &Selector::property_eq("appkit:button_role", PropertyValue::string("confirm")),
+        )
+        .expect("confirm button should be clickable");
+    harness
+        .wait_until(PollOptions::default(), || result.get().is_some())
+        .expect("alert completion should run after button click");
+    assert_eq!(result.get(), Some(NSAlertFirstButtonReturn));
+    session
+        .wait_for_surface_closed(&SurfaceId::new("alert"), PollOptions::default())
+        .expect("completed alert surface should close");
+}
+
+fn three_button_alert_click_uses_appkit_order(harness: AppKitHarness) {
+    let owner = harness.create_window(320.0, 180.0);
+    let session = harness.session();
+    session.attach_host("main", owner);
+    let result = Rc::new(Cell::new(None));
+    let result_for_block = result.clone();
+    let block = RcBlock::new(move |response: isize| {
+        result_for_block.set(Some(response));
+    });
+    let alert = NSAlert::new(harness.main_thread_marker());
+    alert.setMessageText(&NSString::from_str("Three Button Order"));
+    alert.addButtonWithTitle(&NSString::from_str("Keep"));
+    alert.addButtonWithTitle(&NSString::from_str("Review"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    prepare_alert_for_background_test(&alert);
+
+    session.with_surface(&SurfaceId::new("main"), |host| {
+        alert.beginSheetModalForWindow_completionHandler(host.window(), Some(&block));
+    });
+    harness.settle(2);
+    session
+        .wait_for_dialog(
+            "three-button-alert",
+            &AppKitDialogQuery::alert().title_contains("Three Button"),
+            PollOptions::default(),
+        )
+        .expect("three-button alert should be discovered");
+
+    session
+        .click_dialog_button(
+            &SurfaceId::new("three-button-alert"),
+            &Selector::label(glasscheck_core::TextMatch::exact("Review")),
+        )
+        .expect("middle alert button should be clicked through the real AppKit button");
+    harness
+        .wait_until(PollOptions::default(), || result.get().is_some())
+        .expect("three-button alert completion should run");
+    assert_eq!(result.get(), Some(NSAlertSecondButtonReturn));
+    session
+        .wait_for_surface_closed(
+            &SurfaceId::new("three-button-alert"),
+            PollOptions::default(),
+        )
+        .expect("completed three-button alert surface should close");
+}
+
+fn three_button_alert_cancel_uses_appkit_order(harness: AppKitHarness) {
+    let owner = harness.create_window(320.0, 180.0);
+    let session = harness.session();
+    session.attach_host("main", owner);
+    let result = Rc::new(Cell::new(None));
+    let result_for_block = result.clone();
+    let block = RcBlock::new(move |response: isize| {
+        result_for_block.set(Some(response));
+    });
+    let alert = NSAlert::new(harness.main_thread_marker());
+    alert.setMessageText(&NSString::from_str("Three Button Cancel Order"));
+    alert.addButtonWithTitle(&NSString::from_str("Keep"));
+    alert.addButtonWithTitle(&NSString::from_str("Review"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    prepare_alert_for_background_test(&alert);
+
+    session.with_surface(&SurfaceId::new("main"), |host| {
+        alert.beginSheetModalForWindow_completionHandler(host.window(), Some(&block));
+    });
+    harness.settle(2);
+    session
+        .wait_for_dialog(
+            "three-button-cancel-alert",
+            &AppKitDialogQuery::alert().title_contains("Three Button Cancel"),
+            PollOptions::default(),
+        )
+        .expect("three-button cancel alert should be discovered");
+
+    let scene = session
+        .snapshot_dialog_scene(&SurfaceId::new("three-button-cancel-alert"))
+        .expect("three-button cancel alert should snapshot");
+    let keep = scene
+        .node(
+            scene
+                .find(&Selector::label(glasscheck_core::TextMatch::exact("Keep")))
+                .expect("keep button should be present"),
+        )
+        .unwrap();
+    let review = scene
+        .node(
+            scene
+                .find(&Selector::label(glasscheck_core::TextMatch::exact(
+                    "Review",
+                )))
+                .expect("review button should be present"),
+        )
+        .unwrap();
+    let cancel = scene
+        .node(
+            scene
+                .find(&Selector::label(glasscheck_core::TextMatch::exact(
+                    "Cancel",
+                )))
+                .expect("cancel button should be present"),
+        )
+        .unwrap();
+    assert_eq!(keep.parent_id.as_deref(), review.parent_id.as_deref());
+    assert_eq!(review.parent_id.as_deref(), cancel.parent_id.as_deref());
+    assert_eq!(keep.child_index, 0);
+    assert_eq!(review.child_index, 1);
+    assert_eq!(cancel.child_index, 2);
+
+    session
+        .cancel_dialog(
+            &SurfaceId::new("three-button-cancel-alert"),
+            PollOptions::default(),
+        )
+        .expect("three-button alert should cancel through the real AppKit button");
+    harness
+        .wait_until(PollOptions::default(), || result.get().is_some())
+        .expect("three-button cancel completion should run");
+    assert_eq!(result.get(), Some(NSAlertThirdButtonReturn));
+    session
+        .wait_for_surface_closed(
+            &SurfaceId::new("three-button-cancel-alert"),
+            PollOptions::default(),
+        )
+        .expect("completed three-button cancel alert surface should close");
+}
+
+fn alert_accessory_text_field_can_be_inspected_and_set(harness: AppKitHarness) {
+    let owner = harness.create_window(320.0, 180.0);
+    let session = harness.session();
+    session.attach_host("main", owner);
+    let result = Rc::new(Cell::new(None));
+    let result_for_block = result.clone();
+    let block = RcBlock::new(move |response: isize| {
+        result_for_block.set(Some(response));
+    });
+    let alert = NSAlert::new(harness.main_thread_marker());
+    alert.setMessageText(&NSString::from_str("Name Export"));
+    alert.addButtonWithTitle(&NSString::from_str("OK"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    let field = NSTextField::textFieldWithString(
+        &NSString::from_str("draft-name"),
+        harness.main_thread_marker(),
+    );
+    field.setFrame(NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(220.0, 24.0),
+    ));
+    alert.setAccessoryView(Some(&field));
+    alert.layout();
+    prepare_alert_for_background_test(&alert);
+
+    session.with_surface(&SurfaceId::new("main"), |host| {
+        alert.beginSheetModalForWindow_completionHandler(host.window(), Some(&block));
+    });
+    harness.settle(2);
+    session
+        .wait_for_dialog(
+            "alert-text",
+            &AppKitDialogQuery::alert().title_contains("Name Export"),
+            PollOptions::default(),
+        )
+        .expect("alert with accessory should be discovered");
+
+    let scene = session
+        .snapshot_dialog_scene(&SurfaceId::new("alert-text"))
+        .expect("alert scene should snapshot");
+    assert!(
+        scene.find(&Selector::role_eq(Role::TextInput)).is_ok(),
+        "editable accessory field should be semantic text input"
+    );
+    session
+        .set_dialog_text(
+            &SurfaceId::new("alert-text"),
+            &Selector::role_eq(Role::TextInput),
+            "final-name",
+        )
+        .expect("accessory field text should be settable");
+    assert_eq!(field.stringValue().to_string(), "final-name");
+
+    session
+        .click_dialog_button(
+            &SurfaceId::new("alert-text"),
+            &Selector::property_eq("appkit:button_role", PropertyValue::string("confirm")),
+        )
+        .expect("confirm button should be clickable");
+    harness
+        .wait_until(PollOptions::default(), || result.get().is_some())
+        .expect("alert completion should run");
+    assert_eq!(result.get(), Some(NSAlertFirstButtonReturn));
+    session
+        .wait_for_surface_closed(&SurfaceId::new("alert-text"), PollOptions::default())
+        .expect("completed alert surface should close");
+}
+
+fn dialog_text_rejects_labels_and_buttons(harness: AppKitHarness) {
+    let owner = harness.create_window(320.0, 180.0);
+    let session = harness.session();
+    session.attach_host("main", owner);
+    let result = Rc::new(Cell::new(None));
+    let result_for_block = result.clone();
+    let block = RcBlock::new(move |response: isize| {
+        result_for_block.set(Some(response));
+    });
+    let alert = NSAlert::new(harness.main_thread_marker());
+    alert.setMessageText(&NSString::from_str("Text Mutation Guard"));
+    let ok_button = alert.addButtonWithTitle(&NSString::from_str("OK"));
+    let label = NSTextField::labelWithString(
+        &NSString::from_str("Read Only Label"),
+        harness.main_thread_marker(),
+    );
+    label.setFrame(NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(220.0, 24.0),
+    ));
+    alert.setAccessoryView(Some(&label));
+    alert.layout();
+    prepare_alert_for_background_test(&alert);
+
+    session.with_surface(&SurfaceId::new("main"), |host| {
+        alert.beginSheetModalForWindow_completionHandler(host.window(), Some(&block));
+    });
+    harness.settle(2);
+    session
+        .wait_for_dialog(
+            "text-guard",
+            &AppKitDialogQuery::alert().title_contains("Text Mutation"),
+            PollOptions::default(),
+        )
+        .expect("text guard alert should be discovered");
+
+    let label_error = session
+        .set_dialog_text(
+            &SurfaceId::new("text-guard"),
+            &Selector::label(glasscheck_core::TextMatch::exact("Read Only Label")),
+            "mutated label",
+        )
+        .unwrap_err();
+    assert!(matches!(label_error, AppKitDialogError::InputUnavailable));
+    assert_eq!(label.stringValue().to_string(), "Read Only Label");
+
+    let button_error = session
+        .set_dialog_text(
+            &SurfaceId::new("text-guard"),
+            &Selector::label(glasscheck_core::TextMatch::exact("OK")),
+            "mutated button",
+        )
+        .unwrap_err();
+    assert!(matches!(button_error, AppKitDialogError::InputUnavailable));
+    assert_eq!(ok_button.title().to_string(), "OK");
+
+    session.with_surface(&SurfaceId::new("main"), |host| {
+        host.window()
+            .endSheet_returnCode(&alert.window(), NSAlertSecondButtonReturn);
+    });
+    harness
+        .wait_until(PollOptions::default(), || result.get().is_some())
+        .expect("text guard alert should clean up");
+}
+
+fn dialog_query_miss_times_out_cleanly(harness: AppKitHarness) {
+    let owner = harness.create_window(320.0, 180.0);
+    let session = harness.session();
+    session.attach_host("main", owner);
+    let result = Rc::new(Cell::new(None));
+    let result_for_block = result.clone();
+    let block = RcBlock::new(move |response: isize| {
+        result_for_block.set(Some(response));
+    });
+    let alert = NSAlert::new(harness.main_thread_marker());
+    alert.setMessageText(&NSString::from_str("Actual Dialog Title"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    prepare_alert_for_background_test(&alert);
+
+    session.with_surface(&SurfaceId::new("main"), |host| {
+        alert.beginSheetModalForWindow_completionHandler(host.window(), Some(&block));
+    });
+    harness.settle(2);
+
+    let error = session
+        .wait_for_dialog(
+            "missing-dialog",
+            &AppKitDialogQuery::alert().title_eq("Different Dialog Title"),
+            short_poll_options(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, glasscheck_core::PollError::Timeout { .. }),
+        "non-matching dialog query should time out, got {error:?}"
+    );
+    assert!(matches!(
+        session.snapshot_dialog_scene(&SurfaceId::new("missing-dialog")),
+        Err(AppKitDialogError::MissingSurface)
+    ));
+
+    session.with_surface(&SurfaceId::new("main"), |host| {
+        host.window()
+            .endSheet_returnCode(&alert.window(), NSAlertSecondButtonReturn);
+    });
+    harness
+        .wait_until(PollOptions::default(), || result.get().is_some())
+        .expect("negative query fixture should be cleaned up");
+}
+
+fn dialog_methods_report_missing_surface(harness: AppKitHarness) {
+    let session = harness.session();
+    let missing = SurfaceId::new("missing-dialog");
+    let save_path = temp_test_dir("missing-save-surface").join("export.txt");
+    let open_path = temp_test_dir("missing-open-surface").join("fixture.txt");
+    fs::write(&open_path, "fixture").expect("open fixture should be writable");
+
+    assert!(matches!(
+        session.dialog_kind(&missing),
+        Err(AppKitDialogError::MissingSurface)
+    ));
+    assert!(matches!(
+        session.snapshot_dialog_scene(&missing),
+        Err(AppKitDialogError::MissingSurface)
+    ));
+    assert!(matches!(
+        session.click_dialog_button(&missing, &Selector::role_eq(Role::Button)),
+        Err(AppKitDialogError::MissingSurface)
+    ));
+    assert!(matches!(
+        session.set_dialog_text(&missing, &Selector::role_eq(Role::TextInput), "ignored"),
+        Err(AppKitDialogError::MissingSurface)
+    ));
+    assert!(matches!(
+        session.choose_save_panel_path(&missing, &save_path, short_poll_options()),
+        Err(AppKitDialogError::MissingSurface)
+    ));
+    assert!(matches!(
+        session.choose_open_panel_paths(&missing, &[open_path], short_poll_options()),
+        Err(AppKitDialogError::MissingSurface)
+    ));
+    assert!(matches!(
+        session.cancel_dialog(&missing, short_poll_options()),
+        Err(AppKitDialogError::MissingSurface)
+    ));
+}
+
+fn alert_dialog_actions_report_missing_selectors(harness: AppKitHarness) {
+    let owner = harness.create_window(320.0, 180.0);
+    let session = harness.session();
+    session.attach_host("main", owner);
+    let result = Rc::new(Cell::new(None));
+    let result_for_block = result.clone();
+    let block = RcBlock::new(move |response: isize| {
+        result_for_block.set(Some(response));
+    });
+    let alert = NSAlert::new(harness.main_thread_marker());
+    alert.setMessageText(&NSString::from_str("Selector Negative Coverage"));
+    alert.addButtonWithTitle(&NSString::from_str("OK"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    let field = NSTextField::textFieldWithString(
+        &NSString::from_str("draft"),
+        harness.main_thread_marker(),
+    );
+    alert.setAccessoryView(Some(&field));
+    alert.layout();
+    prepare_alert_for_background_test(&alert);
+
+    session.with_surface(&SurfaceId::new("main"), |host| {
+        alert.beginSheetModalForWindow_completionHandler(host.window(), Some(&block));
+    });
+    harness.settle(2);
+    session
+        .wait_for_dialog(
+            "selector-negative",
+            &AppKitDialogQuery::alert().title_contains("Selector Negative"),
+            PollOptions::default(),
+        )
+        .expect("alert should be discovered");
+
+    let missing_text = session
+        .set_dialog_text(
+            &SurfaceId::new("selector-negative"),
+            &Selector::label(glasscheck_core::TextMatch::exact("missing text field")),
+            "ignored",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        missing_text,
+        AppKitDialogError::Resolve(RegionResolveError::NotFound(_))
+    ));
+    assert_eq!(field.stringValue().to_string(), "draft");
+
+    let missing_button = session
+        .click_dialog_button(
+            &SurfaceId::new("selector-negative"),
+            &Selector::label(glasscheck_core::TextMatch::exact("Not A Button")),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        missing_button,
+        AppKitDialogError::Resolve(RegionResolveError::NotFound(_))
+    ));
+    assert!(result.get().is_none());
+
+    session
+        .cancel_dialog(&SurfaceId::new("selector-negative"), PollOptions::default())
+        .expect("negative selector alert should still be cancellable");
+    harness
+        .wait_until(PollOptions::default(), || result.get().is_some())
+        .expect("selector negative fixture should clean up");
+}
+
+fn save_panel_path_selection_is_deterministic(harness: AppKitHarness) {
+    if !native_file_panel_contracts_enabled() {
+        println!(
+            "skipping live NSSavePanel contract; set GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS=1 to run"
+        );
+        return;
+    }
+    let session = harness.session();
+    let temp = temp_test_dir("save-panel");
+    let save_path = temp.join("exported.txt");
+    let panel = NSSavePanel::savePanel(harness.main_thread_marker());
+    panel.setTitle(Some(&NSString::from_str("Export Document")));
+    panel.setMessage(Some(&NSString::from_str("Choose a destination.")));
+    panel.setPrompt(Some(&NSString::from_str("Export")));
+    panel.setNameFieldStringValue(&NSString::from_str("draft.txt"));
+    hide_native_dialog_window(&panel);
+    session.attach_window("save-panel", &panel);
+
+    let scene = session
+        .snapshot_dialog_scene(&SurfaceId::new("save-panel"))
+        .expect("save panel scene should snapshot");
+    let root = scene
+        .node(scene.find(&Selector::id_eq("appkit.dialog")).unwrap())
+        .unwrap();
+    assert_eq!(
+        root.properties.get("appkit:dialog_kind"),
+        Some(&PropertyValue::string("save_panel"))
+    );
+    assert_eq!(
+        root.properties.get("appkit:prompt"),
+        Some(&PropertyValue::string("Export"))
+    );
+    assert_eq!(
+        root.properties.get("appkit:name_field"),
+        Some(&PropertyValue::string("draft.txt"))
+    );
+
+    session
+        .choose_save_panel_path(
+            &SurfaceId::new("save-panel"),
+            &save_path,
+            PollOptions::default(),
+        )
+        .expect("save panel should accept deterministic path");
+    assert_eq!(
+        panel
+            .URL()
+            .and_then(|url| url.path())
+            .map(|path| PathBuf::from(path.to_string())),
+        Some(save_path)
+    );
+}
+
+fn save_panel_rejects_wrong_dialog_kind(harness: AppKitHarness) {
+    let owner = harness.create_window(320.0, 180.0);
+    let session = harness.session();
+    session.attach_host("main", owner);
+    let result = Rc::new(Cell::new(None));
+    let result_for_block = result.clone();
+    let block = RcBlock::new(move |response: isize| {
+        result_for_block.set(Some(response));
+    });
+    let alert = NSAlert::new(harness.main_thread_marker());
+    alert.setMessageText(&NSString::from_str("Wrong Kind"));
+    alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+    prepare_alert_for_background_test(&alert);
+    session.with_surface(&SurfaceId::new("main"), |host| {
+        alert.beginSheetModalForWindow_completionHandler(host.window(), Some(&block));
+    });
+    harness.settle(2);
+    session
+        .wait_for_dialog(
+            "wrong-kind",
+            &AppKitDialogQuery::alert().title_contains("Wrong Kind"),
+            PollOptions::default(),
+        )
+        .expect("alert should be discovered");
+
+    let error = session
+        .choose_save_panel_path(
+            &SurfaceId::new("wrong-kind"),
+            &temp_test_dir("wrong-kind").join("file.txt"),
+            PollOptions::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        AppKitDialogError::KindMismatch {
+            expected: AppKitDialogKind::SavePanel,
+            actual: AppKitDialogKind::Alert
+        }
+    ));
+    session
+        .cancel_dialog(&SurfaceId::new("wrong-kind"), PollOptions::default())
+        .expect("wrong-kind alert should remain cancellable");
+    harness
+        .wait_until(PollOptions::default(), || result.get().is_some())
+        .expect("wrong-kind alert completion should run");
+}
+
+fn custom_panel_with_button_stays_panel_kind(harness: AppKitHarness) {
+    let mtm = harness.main_thread_marker();
+    let session = harness.session();
+    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+        NSPanel::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(240.0, 120.0)),
+        NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+        NSBackingStoreType::Buffered,
+        false,
+    );
+    unsafe {
+        panel.setReleasedWhenClosed(false);
+    }
+    panel.setTitle(&NSString::from_str("Custom Panel"));
+    hide_native_dialog_window(&panel);
+    let root = NSView::initWithFrame(
+        NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(240.0, 120.0)),
+    );
+    let label = NSTextField::labelWithString(
+        &NSString::from_str("Read Only Panel Label"),
+        harness.main_thread_marker(),
+    );
+    label.setFrame(NSRect::new(
+        NSPoint::new(16.0, 76.0),
+        NSSize::new(180.0, 20.0),
+    ));
+    root.addSubview(&label);
+    let field = NSTextField::textFieldWithString(
+        &NSString::from_str("draft"),
+        harness.main_thread_marker(),
+    );
+    field.setFrame(NSRect::new(
+        NSPoint::new(16.0, 48.0),
+        NSSize::new(160.0, 24.0),
+    ));
+    root.addSubview(&field);
+    let button = unsafe {
+        NSButton::buttonWithTitle_target_action(&NSString::from_str("Apply"), None, None, mtm)
+    };
+    button.setFrame(NSRect::new(
+        NSPoint::new(16.0, 16.0),
+        NSSize::new(96.0, 32.0),
+    ));
+    root.addSubview(&button);
+    panel.setContentView(Some(&root));
+
+    session.attach_window("custom-panel", &panel);
+
+    assert_eq!(
+        session
+            .dialog_kind(&SurfaceId::new("custom-panel"))
+            .expect("custom panel kind should be available"),
+        AppKitDialogKind::Panel
+    );
+    let scene = session
+        .snapshot_dialog_scene(&SurfaceId::new("custom-panel"))
+        .expect("custom panel should snapshot");
+    let root = scene
+        .node(scene.find(&Selector::id_eq("appkit.dialog")).unwrap())
+        .unwrap();
+    assert_eq!(
+        root.properties.get("appkit:dialog_kind"),
+        Some(&PropertyValue::string("panel"))
+    );
+    let content_root = scene
+        .node(
+            scene
+                .find(&Selector::id_eq("appkit.dialog.view.0"))
+                .expect("content root should be present"),
+        )
+        .unwrap();
+    assert_eq!(content_root.parent_id.as_deref(), Some("appkit.dialog"));
+    assert_eq!(content_root.child_index, 0);
+    let label_node = scene
+        .node(
+            scene
+                .find(&Selector::label(glasscheck_core::TextMatch::exact(
+                    "Read Only Panel Label",
+                )))
+                .expect("custom panel label should be present"),
+        )
+        .unwrap();
+    assert_eq!(
+        label_node.parent_id.as_deref(),
+        Some("appkit.dialog.view.0")
+    );
+    assert_eq!(label_node.child_index, 0);
+    let field_node = scene
+        .node(
+            scene
+                .find(&Selector::role_eq(Role::TextInput))
+                .expect("custom panel text field should be present"),
+        )
+        .unwrap();
+    assert_eq!(
+        field_node.parent_id.as_deref(),
+        Some("appkit.dialog.view.0")
+    );
+    assert_eq!(field_node.child_index, 1);
+    let button_node = scene
+        .node(
+            scene
+                .find(&Selector::label(glasscheck_core::TextMatch::exact("Apply")))
+                .expect("custom panel button should be present"),
+        )
+        .unwrap();
+    assert_eq!(
+        button_node.parent_id.as_deref(),
+        Some("appkit.dialog.view.0")
+    );
+    assert_eq!(button_node.child_index, 2);
+    assert!(
+        scene
+            .find(&Selector::label(glasscheck_core::TextMatch::exact("Apply")))
+            .is_ok(),
+        "custom panel button should remain visible in the dialog scene"
+    );
+    let label_error = session
+        .click_dialog_button(
+            &SurfaceId::new("custom-panel"),
+            &Selector::label(glasscheck_core::TextMatch::exact("Read Only Panel Label")),
+        )
+        .unwrap_err();
+    assert!(matches!(label_error, AppKitDialogError::InputUnavailable));
+    let text_field_error = session
+        .click_dialog_button(
+            &SurfaceId::new("custom-panel"),
+            &Selector::role_eq(Role::TextInput),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        text_field_error,
+        AppKitDialogError::InputUnavailable
+    ));
+}
+
+fn ordinary_window_is_not_discovered_as_dialog_panel(harness: AppKitHarness) {
+    let session = harness.session();
+    let owner = harness.create_window(240.0, 120.0);
+    owner.set_title("Panel Negative Owner");
+    session.attach_host("main", owner);
+
+    let ordinary = harness.create_window(240.0, 120.0);
+    ordinary.set_title("Ordinary Window Panel Query Negative");
+    ordinary.window().setAlphaValue(0.42);
+    harness.settle(2);
+
+    let error = session
+        .wait_for_dialog(
+            "ordinary-dialog",
+            &AppKitDialogQuery::kind(AppKitDialogKind::Panel).title_contains("Ordinary Window"),
+            short_poll_options(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, glasscheck_core::PollError::Timeout { .. }),
+        "ordinary NSWindow should not satisfy Panel dialog discovery, got {error:?}"
+    );
+    assert!(
+        !session.surface_is_open(&SurfaceId::new("ordinary-dialog")),
+        "ordinary NSWindow should not be attached as a dialog surface"
+    );
+    assert_eq!(
+        ordinary.window().alphaValue(),
+        0.42,
+        "dialog discovery must not apply dialog background transparency to ordinary NSWindow surfaces"
+    );
+
+    assert!(
+        session.discover_window(
+            "ordinary-window",
+            &SurfaceQuery::title_contains("Ordinary Window"),
+        ),
+        "fixture should remain discoverable through ordinary window discovery"
+    );
+    assert!(matches!(
+        session.dialog_kind(&SurfaceId::new("ordinary-window")),
+        Err(AppKitDialogError::NotDialog)
+    ));
+}
+
+fn open_panel_reports_missing_paths_and_cancels(harness: AppKitHarness) {
+    if !native_file_panel_contracts_enabled() {
+        println!(
+            "skipping live NSOpenPanel contract; set GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS=1 to run"
+        );
+        return;
+    }
+    let session = harness.session();
+    let panel = NSOpenPanel::openPanel(harness.main_thread_marker());
+    panel.setTitle(Some(&NSString::from_str("Open Fixture")));
+    panel.setMessage(Some(&NSString::from_str("Choose a fixture.")));
+    panel.setCanChooseFiles(true);
+    panel.setCanChooseDirectories(false);
+    hide_native_dialog_window(&panel);
+    session.attach_window("open-panel", &panel);
+    assert_eq!(
+        session.dialog_kind(&SurfaceId::new("open-panel")).unwrap(),
+        AppKitDialogKind::OpenPanel
+    );
+
+    let missing = temp_test_dir("open-panel-missing").join("missing.txt");
+    let error = session
+        .choose_open_panel_paths(
+            &SurfaceId::new("open-panel"),
+            &[missing.clone()],
+            PollOptions::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, AppKitDialogError::MissingRequestedPath(path) if path == missing));
+    session
+        .cancel_dialog(&SurfaceId::new("open-panel"), PollOptions::default())
+        .expect("open panel should cancel");
+}
+
+fn open_panel_live_file_selection_is_explicit(harness: AppKitHarness) {
+    if !native_file_panel_contracts_enabled() {
+        println!(
+            "skipping live NSOpenPanel selection contract; set GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS=1 to run"
+        );
+        return;
+    }
+    let session = harness.session();
+    let temp = temp_test_dir("open-panel-select");
+    let file = temp.join("fixture.txt");
+    fs::write(&file, "fixture").expect("fixture file should be writable");
+    let panel = NSOpenPanel::openPanel(harness.main_thread_marker());
+    panel.setTitle(Some(&NSString::from_str("Open Fixture")));
+    panel.setCanChooseFiles(true);
+    panel.setCanChooseDirectories(false);
+    hide_native_dialog_window(&panel);
+    session.attach_window("open-panel-select", &panel);
+
+    match session.choose_open_panel_paths(
+        &SurfaceId::new("open-panel-select"),
+        &[file.clone()],
+        PollOptions::default(),
+    ) {
+        Ok(_) => {
+            assert_eq!(
+                panel
+                    .URLs()
+                    .iter()
+                    .filter_map(|url| url.path())
+                    .map(|path| PathBuf::from(path.to_string()))
+                    .collect::<Vec<_>>(),
+                vec![file]
+            );
+        }
+        Err(AppKitDialogError::UnsupportedLiveSelection(_)) => {
+            session
+                .cancel_dialog(&SurfaceId::new("open-panel-select"), PollOptions::default())
+                .expect("unsupported live selection should still leave panel cancellable");
+        }
+        Err(error) => panic!("unexpected open panel selection error: {error}"),
+    }
 }
 
 fn transient_surface_hover_updates_active_always_mouse_moved_tracking_state(

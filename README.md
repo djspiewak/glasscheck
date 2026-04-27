@@ -44,6 +44,10 @@ On AppKit, main-thread capability is still explicit for native construction and 
 
 AppKit also exposes native context-menu testing through `context_click_node(...)`, `context_click_node_with_search(...)`, and `context_click_root_point(...)`. These APIs return an `AppKitContextMenu` semantic handle over the native `NSMenu`: tests can inspect menu items with `snapshot_scene()` and choose commands with `activate_item(...)` or `activate_item_at_path(...)`. Glasscheck keeps macOS secondary-click and Control-click equivalence inside the AppKit backend; callers should express the user intent as a context click.
 
+AppKit sessions also understand native dialogs and panels. Use `AppKitDialogQuery` with `wait_for_dialog(...)` to attach `NSAlert`, `NSOpenPanel`, `NSSavePanel`, or other `NSPanel` surfaces, then inspect them with `snapshot_dialog_scene(...)`. Dialog scenes keep the existing core roles (`Window`, `Button`, `TextInput`, `Label`, and list items) and expose AppKit-specific properties such as `appkit:dialog_kind`, `appkit:class`, `appkit:view_path`, `appkit:button_role`, `appkit:directory_url`, `appkit:name_field`, and `appkit:prompt`.
+
+Alerts can be accepted or cancelled through semantic button selectors, and accessory text fields can be edited with `set_dialog_text(...)`. File panels are driven through public AppKit APIs: save panels set the directory/name field before accepting, while open panels attempt semantic row selection and return `UnsupportedLiveSelection` when AppKit does not expose deterministic rows. The live file-panel native contracts are intentionally opt-in; see AppKit Verification below.
+
 ## Crates
 
 Use `glasscheck` unless you are building a new backend or integrating with an existing native test harness.
@@ -314,6 +318,18 @@ Only AppKit on macOS and GTK4 on Linux are supported native backends today.
 `glasscheck-appkit` is for in-process AppKit tests on macOS. It provides window hosting, pixel capture, scenes, hit-point-based interaction, native context-menu inspection, and text rendering. Standard `NSControl` clicks are activated through AppKit control APIs when available. Native context menus are exposed as retained `NSMenu` semantic handles rather than capturable popup window surfaces.
 
 `glasscheck-gtk` is the Linux GTK4 backend. It provides the same overall testing model. Higher-level semantic interactions such as `GtkWindowHost::click_node(...)` are best-effort and may use GTK widget/controller activation for registered widgets before falling back to native input synthesis. Direct pointer synthesis through `GtkInputDriver` uses native X11 dispatch on X11-backed windows; `key_press_queued` also uses XTest-based X11 injection so events flow through root-level and legacy controllers before the focused widget, while `key_press` follows GTK controller and text APIs directly. Outside that direct-input support surface, the native input driver reports unavailability instead of silently degrading.
+
+## AppKit Verification
+
+Use the normal AppKit native contract command for default local and CI-style verification:
+
+- `cargo test -p glasscheck-appkit --test appkit_contracts --features native-contract-tests`
+
+That default run keeps live `NSSavePanel` and `NSOpenPanel` interaction contracts skipped. Those panel contracts are separate because presenting system file panels can launch macOS file-panel services and may surface visible system UI, which conflicts with hidden/background-only test-window validation.
+
+Run the live file-panel contracts only when visible/system file-panel behavior is acceptable in the current session:
+
+- `GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS=1 cargo test -p glasscheck-appkit --test appkit_contracts --features native-contract-tests`
 
 ## GTK Verification
 
