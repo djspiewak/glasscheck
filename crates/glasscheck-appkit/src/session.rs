@@ -32,9 +32,16 @@ mod imp {
         }
 
         /// Registers a pre-built [`AppKitWindowHost`] under the given surface ID.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `id` converts from an empty string into a [`SurfaceId`].
+        ///
+        /// Panics if `id` is already registered in this session. Each attached
+        /// surface must use a distinct [`SurfaceId`].
         pub fn attach_host(&self, id: impl Into<SurfaceId>, host: AppKitWindowHost) {
             let id = id.into();
-            debug_assert!(
+            assert!(
                 !self.surfaces.borrow().contains_key(&id),
                 "surface id '{}' is already registered; use a distinct id or remove the existing surface first",
                 id.as_str()
@@ -43,10 +50,27 @@ mod imp {
         }
 
         /// Wraps a raw [`NSWindow`] into a host and registers it under the given surface ID.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `id` converts from an empty string into a [`SurfaceId`].
+        ///
+        /// Panics if `id` is already registered in this session. Each attached
+        /// surface must use a distinct [`SurfaceId`].
         pub fn attach_window(&self, id: impl Into<SurfaceId>, window: &NSWindow) {
             self.attach_host(id, self.harness.attach_window(window));
         }
 
+        /// Discovers a matching unregistered application window and attaches it.
+        ///
+        /// # Panics
+        ///
+        /// Panics if a matching window is found and `id` converts from an empty
+        /// string into a [`SurfaceId`].
+        ///
+        /// Panics if a matching window is found and `id` is already registered
+        /// in this session. Each attached surface must use a distinct
+        /// [`SurfaceId`].
         #[must_use]
         pub fn discover_window(&self, id: impl Into<SurfaceId>, query: &SurfaceQuery) -> bool {
             let registered_ids: std::collections::BTreeSet<usize> = {
@@ -68,6 +92,14 @@ mod imp {
         }
 
         /// Polls until a window matching `query` is found and attached; returns the poll attempt count.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `id` converts from an empty string into a [`SurfaceId`].
+        ///
+        /// Panics if a matching window is found and `id` is already registered
+        /// in this session. Each attached surface must use a distinct
+        /// [`SurfaceId`].
         pub fn wait_for_discovered_window(
             &self,
             id: impl Into<SurfaceId>,
@@ -80,6 +112,14 @@ mod imp {
         }
 
         /// Polls until a native AppKit dialog or panel matching `query` is found and attached.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `id` converts from an empty string into a [`SurfaceId`].
+        ///
+        /// Panics if a matching dialog or panel is found and `id` is already
+        /// registered in this session. Each attached surface must use a
+        /// distinct [`SurfaceId`].
         pub fn wait_for_dialog(
             &self,
             id: impl Into<SurfaceId>,
@@ -127,6 +167,17 @@ mod imp {
         /// Returns `PollError::Timeout` if the transient never appears within
         /// `options`. Returns `PollError::Precondition` for precondition failures: owner surface not
         /// registered or opener click failed.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `id` converts from an empty string into a [`SurfaceId`].
+        ///
+        /// Panics if `id` is equal to `spec.owner`. Transient surfaces must be
+        /// attached under a different [`SurfaceId`] from their owner surface.
+        ///
+        /// Panics if the transient is discovered and `id` is already registered
+        /// in this session. Each attached surface must use a distinct
+        /// [`SurfaceId`].
         pub fn open_transient_with_click(
             &self,
             id: impl Into<SurfaceId>,
@@ -134,7 +185,7 @@ mod imp {
             options: PollOptions,
         ) -> Result<usize, PollError> {
             let id = id.into();
-            debug_assert!(
+            assert!(
                 id != spec.owner,
                 "transient id must not equal the owner surface id"
             );

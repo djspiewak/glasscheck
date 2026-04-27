@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     anchor::RegionSpec, image::Image, Interactability, Point, QueryError, QueryMatch, Rect,
@@ -14,6 +15,7 @@ const HIT_RECT_X_PROPERTY: &str = "glasscheck:hit_rect_x";
 const HIT_RECT_Y_PROPERTY: &str = "glasscheck:hit_rect_y";
 const HIT_RECT_WIDTH_PROPERTY: &str = "glasscheck:hit_rect_width";
 const HIT_RECT_HEIGHT_PROPERTY: &str = "glasscheck:hit_rect_height";
+static NEXT_SCENE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A semantic role attached to a UI node under test.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -82,6 +84,7 @@ impl PropertyValue {
 /// Immutable handle to a node within a specific scene.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NodeHandle {
+    scene_id: u64,
     index: usize,
 }
 
@@ -723,13 +726,24 @@ fn remap_node_predicate_ids(predicate: &Selector, aliases: &RecipeAliasMap) -> S
 ///
 /// A scene is the main query surface for semantic assertions, waits, and
 /// scene diffs. Build one per assertion step when the UI can change over time.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Scene {
+    scene_id: u64,
     nodes: Vec<SemanticNode>,
     recipe_errors: Vec<NodeRecipeResolutionError>,
     id_index: BTreeMap<String, Vec<usize>>,
     selector_index: BTreeMap<String, Vec<usize>>,
     children_index: BTreeMap<String, Vec<usize>>,
+}
+
+impl PartialEq for Scene {
+    fn eq(&self, other: &Self) -> bool {
+        self.nodes == other.nodes
+            && self.recipe_errors == other.recipe_errors
+            && self.id_index == other.id_index
+            && self.selector_index == other.selector_index
+            && self.children_index == other.children_index
+    }
 }
 
 impl Default for Scene {
@@ -782,6 +796,7 @@ impl Scene {
         }
 
         Self {
+            scene_id: NEXT_SCENE_ID.fetch_add(1, Ordering::Relaxed),
             nodes,
             recipe_errors,
             id_index,
@@ -805,6 +820,9 @@ impl Scene {
     /// Returns the node referenced by `handle`.
     #[must_use]
     pub fn node(&self, handle: NodeHandle) -> Option<&SemanticNode> {
+        if handle.scene_id != self.scene_id {
+            return None;
+        }
         self.nodes.get(handle.index)
     }
 
@@ -818,7 +836,7 @@ impl Scene {
                     .get(id)
                     .into_iter()
                     .flat_map(|indices| indices.iter().copied())
-                    .map(|index| NodeHandle { index })
+                    .map(|index| self.handle(index))
                     .collect();
             }
             crate::Selector::SelectorEq(selector) => {
@@ -827,7 +845,7 @@ impl Scene {
                     .get(selector)
                     .into_iter()
                     .flat_map(|indices| indices.iter().copied())
-                    .map(|index| NodeHandle { index })
+                    .map(|index| self.handle(index))
                     .collect();
             }
             _ => {}
@@ -839,7 +857,7 @@ impl Scene {
                 let context = scene_context(self, index);
                 predicate
                     .matches(&context, node)
-                    .then_some(NodeHandle { index })
+                    .then_some(self.handle(index))
             })
             .collect()
     }
@@ -875,7 +893,7 @@ impl Scene {
             .get(parent_node.id.as_str())
             .into_iter()
             .flat_map(|indices| indices.iter().copied())
-            .map(|index| NodeHandle { index })
+            .map(|index| self.handle(index))
             .collect()
     }
 
@@ -887,7 +905,7 @@ impl Scene {
         self.id_index
             .get(parent_id)
             .and_then(|indices| (indices.len() == 1).then_some(indices[0]))
-            .map(|index| NodeHandle { index })
+            .map(|index| self.handle(index))
     }
 
     /// Resolves exactly one semantic match with rich metadata.
@@ -994,7 +1012,7 @@ impl Scene {
         });
 
         hits.into_iter()
-            .map(|(index, _)| NodeHandle { index })
+            .map(|(index, _)| self.handle(index))
             .collect()
     }
 
@@ -1012,6 +1030,13 @@ impl Scene {
             interactability,
             preferred_hit_point,
         })
+    }
+
+    fn handle(&self, index: usize) -> NodeHandle {
+        NodeHandle {
+            scene_id: self.scene_id,
+            index,
+        }
     }
 }
 
@@ -1200,8 +1225,8 @@ fn compare_explicit_paint_paths(
     left_index: usize,
     right_index: usize,
 ) -> Option<std::cmp::Ordering> {
-    let left = explicit_paint_path(scene.node(NodeHandle { index: left_index })?)?;
-    let right = explicit_paint_path(scene.node(NodeHandle { index: right_index })?)?;
+    let left = explicit_paint_path(scene.node(scene.handle(left_index))?)?;
+    let right = explicit_paint_path(scene.node(scene.handle(right_index))?)?;
 
     for (left_segment, right_segment) in left.iter().zip(right.iter()) {
         if left_segment != right_segment {
@@ -1229,7 +1254,7 @@ fn explicit_paint_path(node: &SemanticNode) -> Option<Vec<usize>> {
 
 fn paint_order_path(scene: &Scene, index: usize) -> Vec<(i32, usize, usize)> {
     let mut path = Vec::new();
-    let mut current = Some(NodeHandle { index });
+    let mut current = Some(scene.handle(index));
 
     while let Some(handle) = current {
         let Some(node) = scene.node(handle) else {
@@ -1244,9 +1269,7 @@ fn paint_order_path(scene: &Scene, index: usize) -> Vec<(i32, usize, usize)> {
 }
 
 fn is_ancestor(scene: &Scene, ancestor_index: usize, descendant_index: usize) -> bool {
-    let mut current = scene.parent_of(NodeHandle {
-        index: descendant_index,
-    });
+    let mut current = scene.parent_of(scene.handle(descendant_index));
     while let Some(parent) = current {
         if parent.index() == ancestor_index {
             return true;
@@ -1409,6 +1432,17 @@ mod tests {
             1
         );
         assert!(!scene.exists(&Selector::selector_eq("missing")));
+    }
+
+    #[test]
+    fn scene_handles_are_rejected_by_other_scenes() {
+        let first = Scene::new(vec![SemanticNode::new("first", Role::Button, rect())]);
+        let handle = first.find(&Selector::id_eq("first")).unwrap();
+        let second = Scene::new(vec![SemanticNode::new("second", Role::Button, rect())]);
+
+        assert_eq!(second.node(handle), None);
+        assert!(second.children_of(handle).is_empty());
+        assert_eq!(second.parent_of(handle), None);
     }
 
     #[test]

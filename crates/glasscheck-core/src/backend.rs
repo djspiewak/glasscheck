@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -55,13 +56,42 @@ impl SemanticSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SurfaceId(String);
 
+/// Error returned when constructing a [`SurfaceId`] from invalid input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SurfaceIdError {
+    /// Surface identifiers must contain at least one character.
+    Empty,
+}
+
+impl fmt::Display for SurfaceIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "surface id must not be empty"),
+        }
+    }
+}
+
+impl std::error::Error for SurfaceIdError {}
+
 impl SurfaceId {
     /// Creates a surface identifier from a stable string.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `id` is empty. Use [`SurfaceId::try_new`] when accepting
+    /// dynamic input that may be invalid.
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
+        Self::try_new(id).expect("SurfaceId must not be empty")
+    }
+
+    /// Creates a surface identifier from a stable string.
+    pub fn try_new(id: impl Into<String>) -> Result<Self, SurfaceIdError> {
         let id = id.into();
-        debug_assert!(!id.is_empty(), "SurfaceId must not be empty");
-        Self(id)
+        if id.is_empty() {
+            return Err(SurfaceIdError::Empty);
+        }
+        Ok(Self(id))
     }
 
     /// Borrows the raw identifier.
@@ -100,10 +130,15 @@ impl SurfaceQuery {
     }
 
     /// Builds a contains-title query.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `title` is empty. An empty substring would match every
+    /// title, so callers should omit the title constraint instead.
     #[must_use]
     pub fn title_contains(title: impl Into<String>) -> Self {
         let title = title.into();
-        debug_assert!(
+        assert!(
             !title.is_empty(),
             "SurfaceQuery::title_contains pattern must not be empty"
         );
@@ -131,6 +166,10 @@ pub struct TransientSurfaceSpec {
 
 impl TransientSurfaceSpec {
     /// Creates a transient-surface spec from an owner surface and opener selector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `owner` converts from an empty string into a [`SurfaceId`].
     #[must_use]
     pub fn new(owner: impl Into<SurfaceId>, opener: crate::Selector) -> Self {
         Self {
@@ -209,9 +248,19 @@ impl DialogQuery {
     }
 
     /// Adds a substring title constraint.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `title` is empty. An empty substring would match every
+    /// dialog title, so callers should omit the title constraint instead.
     #[must_use]
     pub fn title_contains(mut self, title: impl Into<String>) -> Self {
-        self.title = Some(DialogTitleMatch::Contains(title.into()));
+        let title = title.into();
+        assert!(
+            !title.is_empty(),
+            "DialogQuery::title_contains pattern must not be empty"
+        );
+        self.title = Some(DialogTitleMatch::Contains(title));
         self
     }
 
@@ -697,7 +746,8 @@ mod tests {
     use super::{normalize_provider_nodes, InputDriver, SurfaceQuery, TransientSurfaceSpec};
     use crate::{
         DialogKind, DialogQuery, InputSynthesisError, KeyModifiers, NodeProvenanceKind, Point,
-        PropertyValue, Rect, Role, Selector, SemanticNode, Size, SurfaceId, TextRange,
+        PropertyValue, Rect, Role, Selector, SemanticNode, Size, SurfaceId, SurfaceIdError,
+        TextRange,
     };
     use std::collections::BTreeSet;
 
@@ -862,6 +912,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "DialogQuery::title_contains pattern must not be empty")]
+    fn dialog_query_title_contains_rejects_empty_pattern() {
+        let _ = DialogQuery::default().title_contains("");
+    }
+
+    #[test]
     fn dialog_kind_strings_are_stable() {
         assert_eq!(DialogKind::Alert.as_str(), "alert");
         assert_eq!(DialogKind::OpenPanel.as_str(), "open_panel");
@@ -870,14 +926,18 @@ mod tests {
     }
 
     #[test]
-    #[cfg(debug_assertions)]
+    fn surface_id_try_new_reports_empty_string() {
+        assert_eq!(SurfaceId::try_new(""), Err(SurfaceIdError::Empty));
+        assert_eq!(SurfaceId::try_new("editor").unwrap().as_str(), "editor");
+    }
+
+    #[test]
     #[should_panic(expected = "SurfaceId must not be empty")]
-    fn surface_id_rejects_empty_string() {
+    fn surface_id_new_rejects_empty_string() {
         let _ = SurfaceId::new("");
     }
 
     #[test]
-    #[cfg(debug_assertions)]
     #[should_panic(expected = "SurfaceQuery::title_contains pattern must not be empty")]
     fn surface_query_title_contains_rejects_empty_pattern() {
         let _ = SurfaceQuery::title_contains("");

@@ -400,7 +400,11 @@ impl RegionSpec {
         Self::new(Anchor::Node(predicate), RelativeBounds::full())
     }
 
-    /// Creates a region covering the full bounds of a stable node handle.
+    /// Creates a region covering the full bounds of a node handle from a
+    /// specific [`Scene`](crate::Scene) snapshot.
+    ///
+    /// Handles are valid only for the same scene snapshot they came from; they
+    /// are not stable identifiers across separate snapshots.
     #[must_use]
     pub fn handle(handle: NodeHandle) -> Self {
         Self::new(Anchor::Handle(handle), RelativeBounds::full())
@@ -440,8 +444,8 @@ impl RegionSpec {
     #[must_use]
     pub fn above(self, gap: f64, height: f64) -> Self {
         self.offset_region(
-            RelativeBounds::new(0.0, 1.0, 1.0, 0.0),
-            AbsoluteBounds::new(0.0, gap, 0.0, height),
+            RelativeBounds::new(0.0, 0.0, 1.0, 0.0),
+            AbsoluteBounds::new(0.0, -(gap + height), 0.0, height),
         )
     }
 
@@ -449,8 +453,8 @@ impl RegionSpec {
     #[must_use]
     pub fn below(self, gap: f64, height: f64) -> Self {
         self.offset_region(
-            RelativeBounds::new(0.0, 0.0, 1.0, 0.0),
-            AbsoluteBounds::new(0.0, -(gap + height), 0.0, height),
+            RelativeBounds::new(0.0, 1.0, 1.0, 0.0),
+            AbsoluteBounds::new(0.0, gap, 0.0, height),
         )
     }
 
@@ -1043,6 +1047,38 @@ mod tests {
     }
 
     #[test]
+    fn region_resolution_supports_directional_offsets() {
+        let scene = root();
+        let root_bounds = Rect::new(Point::new(0.0, 0.0), Size::new(300.0, 200.0));
+        let anchor = RegionSpec::node(Selector::id_eq("editor"));
+
+        assert_eq!(
+            scene
+                .resolve_region(root_bounds, &anchor.clone().right_of(50.0, 120.0))
+                .unwrap(),
+            Rect::new(Point::new(160.0, 20.0), Size::new(120.0, 50.0))
+        );
+        assert_eq!(
+            scene
+                .resolve_region(root_bounds, &anchor.clone().left_of(8.0, 24.0))
+                .unwrap(),
+            Rect::new(Point::new(-22.0, 20.0), Size::new(24.0, 50.0))
+        );
+        assert_eq!(
+            scene
+                .resolve_region(root_bounds, &anchor.clone().above(6.0, 12.0))
+                .unwrap(),
+            Rect::new(Point::new(10.0, 2.0), Size::new(100.0, 12.0))
+        );
+        assert_eq!(
+            scene
+                .resolve_region(root_bounds, &anchor.below(6.0, 12.0))
+                .unwrap(),
+            Rect::new(Point::new(10.0, 76.0), Size::new(100.0, 12.0))
+        );
+    }
+
+    #[test]
     fn region_resolution_rejects_invalid_geometry() {
         let error = root()
             .resolve_region(
@@ -1082,6 +1118,30 @@ mod tests {
             rect,
             Rect::new(Point::new(25.0, 40.0), Size::new(80.0, 30.0))
         );
+    }
+
+    #[test]
+    fn handle_anchor_rejects_handles_from_other_scenes() {
+        let first = Scene::new(vec![crate::SemanticNode::new(
+            "first",
+            Role::Container,
+            Rect::new(Point::new(25.0, 40.0), Size::new(80.0, 30.0)),
+        )]);
+        let handle = first.find(&Selector::id_eq("first")).unwrap();
+        let second = Scene::new(vec![crate::SemanticNode::new(
+            "second",
+            Role::Container,
+            Rect::new(Point::new(0.0, 0.0), Size::new(10.0, 10.0)),
+        )]);
+
+        let error = second
+            .resolve_region(
+                Rect::new(Point::new(0.0, 0.0), Size::new(200.0, 200.0)),
+                &RegionSpec::handle(handle),
+            )
+            .unwrap_err();
+
+        assert_eq!(error, RegionResolveError::InvalidHandle(handle));
     }
 
     #[test]

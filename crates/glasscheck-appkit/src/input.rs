@@ -228,7 +228,7 @@ mod imp {
         /// Synthesizes a key press and release with the provided metadata.
         ///
         /// Dispatches directly into the window's responder chain via `sendEvent`,
-        /// bypassing local event monitors. Use [`key_press_raw_queued`] when the
+        /// bypassing local event monitors. Use [`Self::key_press_raw_queued`] when the
         /// event must flow through monitors first.
         pub fn key_press_raw(
             &self,
@@ -279,7 +279,7 @@ mod imp {
 
         /// Synthesizes a key press and release using backend-neutral modifiers.
         ///
-        /// Bypasses local event monitors; use [`key_press_queued`] when the event
+        /// Bypasses local event monitors; use [`Self::key_press_queued`] when the event
         /// must be observed by application-level monitors before the responder chain.
         pub fn key_press(
             &self,
@@ -297,7 +297,7 @@ mod imp {
         /// event monitors observe them before the first responder receives the event.
         /// The caller must ensure the desired first responder is set on the window
         /// (via `window.makeFirstResponder`) before invoking this method.
-        /// Use [`key_press_raw`] for direct responder-chain delivery without monitor
+        /// Use [`Self::key_press_raw`] for direct responder-chain delivery without monitor
         /// involvement.
         pub fn key_press_raw_queued(
             &self,
@@ -350,7 +350,7 @@ mod imp {
         /// Synthesizes a queued key press using backend-neutral modifiers.
         ///
         /// The event passes through local event monitors before reaching the first
-        /// responder. Use [`key_press`] for direct responder-chain delivery when
+        /// responder. Use [`Self::key_press`] for direct responder-chain delivery when
         /// monitor observation is not needed.
         pub fn key_press_queued(
             &self,
@@ -505,8 +505,15 @@ mod imp {
             Ok(())
         }
 
-        /// Sends an Objective-C action message to `target`.
-        pub fn send_action(&self, target: &AnyObject, action: Sel) {
+        /// Sends an arbitrary Objective-C action message to `target`.
+        ///
+        /// # Safety
+        ///
+        /// The caller must ensure `target` is a live object that can receive
+        /// `action` with the `performSelector:withObject:` calling convention.
+        /// Prefer higher-level semantic input helpers when the action can be
+        /// expressed through a node, text control, or menu item.
+        pub unsafe fn send_action(&self, target: &AnyObject, action: Sel) {
             unsafe {
                 let () = msg_send![target, performSelector: action, withObject: std::ptr::null::<AnyObject>()];
             }

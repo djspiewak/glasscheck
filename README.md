@@ -38,7 +38,7 @@ That shared post-mount surface is intentionally aligned across GTK and AppKit fo
 
 This lets one shared test body compile unchanged after platform-specific fixture setup.
 
-For multi-surface flows, the facade also exposes a target-specific `glasscheck::Session` alias plus `Harness::session()`. Sessions can attach named surfaces, open owned transient surfaces with `open_transient_with_click(...)`, wait for transient dismissal with `wait_for_surface_closed(...)`, delegate node interactions to a specific surface, and still fall back to passive title-based discovery through `SurfaceQuery` when that is the only signal available.
+For multi-surface flows, the facade also exposes a target-specific `glasscheck::Session` alias plus `Harness::session()`. Sessions can attach named surfaces, open owned transient surfaces with `open_transient_with_click(...)`, wait for transient dismissal with `wait_for_surface_closed(...)`, delegate node interactions to a specific surface, and still fall back to passive title-based discovery through `SurfaceQuery` when that is the only signal available. Surface IDs are non-empty by contract: use `SurfaceId::new(...)` for static test IDs and `SurfaceId::try_new(...)` when the ID comes from dynamic input.
 
 On AppKit, main-thread capability is still explicit for native construction and attachment, but it is carried by the harness/host internally so shared post-mount calls stay marker-free. Harness-managed AppKit windows are kept as background test windows, so capture and input can run without temporary windows surfacing on screen.
 
@@ -54,7 +54,8 @@ Use `glasscheck` unless you are building a new backend or integrating with an ex
 
 ```toml
 [dependencies]
-glasscheck = { path = "crates/glasscheck" }
+glasscheck = { path = "crates/glasscheck", features = ["appkit"] } # macOS
+# glasscheck = { path = "crates/glasscheck", features = ["gtk"] } # Linux
 ```
 
 Use `glasscheck-core` only when you already have your own scene and pixel capture integration and do not want the built-in native backends.

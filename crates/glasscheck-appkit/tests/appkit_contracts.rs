@@ -105,6 +105,12 @@ fn main() {
     run("session_discovers_window_by_title", || {
         session_discovers_window_by_title(harness)
     });
+    run("session_rejects_duplicate_attach_host_ids", || {
+        session_rejects_duplicate_attach_host_ids(harness)
+    });
+    run("session_rejects_transient_owner_id_reuse", || {
+        session_rejects_transient_owner_id_reuse(harness)
+    });
     run_disruptive_foreground_appkit("session_opens_owned_transient_window_and_evicts_it", || {
         session_opens_owned_transient_window_and_evicts_it(harness)
     });
@@ -483,6 +489,27 @@ fn run(name: &str, test: impl FnOnce()) {
             std::panic::resume_unwind(error);
         }
     }
+}
+
+fn assert_panics_with(expected: &str, test: impl FnOnce()) {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
+    std::panic::set_hook(previous_hook);
+    let Err(error) = result else {
+        panic!("expected panic containing {expected:?}");
+    };
+    let message = if let Some(message) = error.downcast_ref::<String>() {
+        message.as_str()
+    } else if let Some(message) = error.downcast_ref::<&'static str>() {
+        message
+    } else {
+        "<non-string panic>"
+    };
+    assert!(
+        message.contains(expected),
+        "expected panic containing {expected:?}, got {message:?}"
+    );
 }
 
 fn run_disruptive_modal_dialog(name: &str, test: impl FnOnce()) {
@@ -1978,6 +2005,26 @@ fn session_discovers_window_by_title(harness: AppKitHarness) {
     session
         .snapshot_scene(&SurfaceId::new("picker"))
         .expect("discovered surface should be attached and snapshotable");
+}
+
+fn session_rejects_duplicate_attach_host_ids(harness: AppKitHarness) {
+    let first = harness.create_window(120.0, 80.0);
+    let second = harness.create_window(120.0, 80.0);
+    let session = harness.session();
+    session.attach_host("main", first);
+
+    assert_panics_with("surface id 'main' is already registered", || {
+        session.attach_host("main", second);
+    });
+}
+
+fn session_rejects_transient_owner_id_reuse(harness: AppKitHarness) {
+    let session = harness.session();
+    let spec = TransientSurfaceSpec::new("main", Selector::id_eq("open-picker"));
+
+    assert_panics_with("transient id must not equal the owner surface id", || {
+        let _ = session.open_transient_with_click("main", &spec, PollOptions::default());
+    });
 }
 
 fn session_opens_owned_transient_window_and_evicts_it(harness: AppKitHarness) {
