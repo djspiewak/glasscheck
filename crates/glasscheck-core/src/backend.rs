@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::{
@@ -137,6 +137,213 @@ impl TransientSurfaceSpec {
             owner: owner.into(),
             opener,
         }
+    }
+}
+
+/// Native dialog or panel category exposed through session helpers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DialogKind {
+    /// A standard alert/message dialog.
+    Alert,
+    /// A standard open-file dialog or panel.
+    OpenPanel,
+    /// A standard save-file dialog or panel.
+    SavePanel,
+    /// A generic native panel/dialog surface.
+    Panel,
+}
+
+impl DialogKind {
+    /// Returns a stable string used in semantic properties and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Alert => "alert",
+            Self::OpenPanel => "open_panel",
+            Self::SavePanel => "save_panel",
+            Self::Panel => "panel",
+        }
+    }
+}
+
+/// Query used to discover native dialogs and panels.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DialogQuery {
+    kind: Option<DialogKind>,
+    title: Option<DialogTitleMatch>,
+}
+
+impl DialogQuery {
+    /// Matches a standard alert/message dialog.
+    #[must_use]
+    pub fn alert() -> Self {
+        Self::kind(DialogKind::Alert)
+    }
+
+    /// Matches a standard open-file dialog or panel.
+    #[must_use]
+    pub fn open_panel() -> Self {
+        Self::kind(DialogKind::OpenPanel)
+    }
+
+    /// Matches a standard save-file dialog or panel.
+    #[must_use]
+    pub fn save_panel() -> Self {
+        Self::kind(DialogKind::SavePanel)
+    }
+
+    /// Matches a dialog by kind.
+    #[must_use]
+    pub fn kind(kind: DialogKind) -> Self {
+        Self {
+            kind: Some(kind),
+            title: None,
+        }
+    }
+
+    /// Adds an exact title constraint.
+    #[must_use]
+    pub fn title_eq(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(DialogTitleMatch::Exact(title.into()));
+        self
+    }
+
+    /// Adds a substring title constraint.
+    #[must_use]
+    pub fn title_contains(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(DialogTitleMatch::Contains(title.into()));
+        self
+    }
+
+    /// Returns whether `kind` satisfies the query's kind constraint.
+    #[must_use]
+    pub fn matches_kind(&self, kind: DialogKind) -> bool {
+        self.kind.is_none_or(|expected| expected == kind)
+    }
+
+    /// Returns whether `title` satisfies the query's title constraint.
+    #[must_use]
+    pub fn matches_title(&self, title: &str) -> bool {
+        self.title
+            .as_ref()
+            .is_none_or(|expected| expected.matches(title))
+    }
+
+    /// Returns whether the given kind and title satisfy this query.
+    #[must_use]
+    pub fn matches_dialog(&self, kind: DialogKind, title: &str) -> bool {
+        self.matches_kind(kind) && self.matches_title(title)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DialogTitleMatch {
+    Exact(String),
+    Contains(String),
+}
+
+impl DialogTitleMatch {
+    fn matches(&self, title: &str) -> bool {
+        match self {
+            Self::Exact(expected) => title == expected,
+            Self::Contains(expected) => title.contains(expected),
+        }
+    }
+}
+
+/// Optional capabilities on a native dialog handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DialogCapability {
+    /// The backend can project a semantic scene for the dialog.
+    SceneSnapshot,
+    /// The backend can activate semantic buttons.
+    ButtonClick,
+    /// The backend can set semantic text fields.
+    TextEdit,
+    /// The backend can select a deterministic save path.
+    SavePathSelection,
+    /// The backend can select deterministic open paths.
+    OpenPathSelection,
+    /// The backend can cancel or dismiss the dialog.
+    Cancel,
+}
+
+/// Errors returned by native dialog helpers.
+#[derive(Debug)]
+pub enum DialogError {
+    /// The requested surface is absent or already closed.
+    MissingSurface,
+    /// The requested surface is an ordinary window, not a native dialog or panel.
+    NotDialog,
+    /// The attached surface was not the required dialog kind.
+    KindMismatch {
+        /// Expected dialog kind.
+        expected: DialogKind,
+        /// Actual dialog kind.
+        actual: DialogKind,
+    },
+    /// The backend does not support the requested dialog capability.
+    UnsupportedCapability(DialogCapability),
+    /// The live OS panel did not expose enough public structure to drive the request.
+    UnsupportedLiveSelection(&'static str),
+    /// A requested file-system path was invalid or missing.
+    MissingRequestedPath(PathBuf),
+    /// Native capture or input failed.
+    InputUnavailable,
+    /// The requested selector did not resolve.
+    Resolve(RegionResolveError),
+    /// Polling timed out.
+    Poll(PollError),
+    /// A completed panel did not report the expected selected path.
+    SelectionMismatch {
+        /// Expected selected paths.
+        expected: Vec<PathBuf>,
+        /// Actual selected paths.
+        actual: Vec<PathBuf>,
+    },
+}
+
+impl std::fmt::Display for DialogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingSurface => write!(f, "dialog surface is missing"),
+            Self::NotDialog => write!(f, "surface is not a native dialog or panel"),
+            Self::KindMismatch { expected, actual } => {
+                write!(f, "expected {:?}, found {:?}", expected, actual)
+            }
+            Self::UnsupportedCapability(capability) => {
+                write!(f, "dialog capability {:?} is unsupported", capability)
+            }
+            Self::UnsupportedLiveSelection(reason) => {
+                write!(f, "live panel selection is unsupported: {reason}")
+            }
+            Self::MissingRequestedPath(path) => {
+                write!(f, "requested path is unavailable: {}", path.display())
+            }
+            Self::InputUnavailable => write!(f, "dialog input is unavailable"),
+            Self::Resolve(error) => write!(f, "{error}"),
+            Self::Poll(error) => write!(f, "{error}"),
+            Self::SelectionMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "selection mismatch: expected {expected:?}, found {actual:?}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DialogError {}
+
+impl From<PollError> for DialogError {
+    fn from(value: PollError) -> Self {
+        Self::Poll(value)
+    }
+}
+
+impl From<RegionResolveError> for DialogError {
+    fn from(value: RegionResolveError) -> Self {
+        Self::Resolve(value)
     }
 }
 
@@ -489,8 +696,8 @@ pub fn crop_image_bottom_left(image: &Image, rect: Rect) -> Image {
 mod tests {
     use super::{normalize_provider_nodes, InputDriver, SurfaceQuery, TransientSurfaceSpec};
     use crate::{
-        InputSynthesisError, KeyModifiers, NodeProvenanceKind, Point, PropertyValue, Rect, Role,
-        Selector, SemanticNode, Size, SurfaceId, TextRange,
+        DialogKind, DialogQuery, InputSynthesisError, KeyModifiers, NodeProvenanceKind, Point,
+        PropertyValue, Rect, Role, Selector, SemanticNode, Size, SurfaceId, TextRange,
     };
     use std::collections::BTreeSet;
 
@@ -620,6 +827,46 @@ mod tests {
 
         assert_eq!(spec.owner, SurfaceId::new("editor"));
         assert_eq!(spec.opener, Selector::id_eq("open-table-picker"));
+    }
+
+    #[test]
+    fn dialog_query_matches_kind_and_title_constraints() {
+        assert!(DialogQuery::alert().matches_dialog(DialogKind::Alert, "Discard Changes"));
+        assert!(!DialogQuery::alert().matches_dialog(DialogKind::SavePanel, "Discard Changes"));
+        assert!(DialogQuery::open_panel().matches_kind(DialogKind::OpenPanel));
+        assert!(DialogQuery::save_panel()
+            .title_contains("Export")
+            .matches_dialog(DialogKind::SavePanel, "Export Document"));
+        assert!(!DialogQuery::save_panel()
+            .title_eq("Export")
+            .matches_dialog(DialogKind::SavePanel, "Export Document"));
+    }
+
+    #[test]
+    fn dialog_query_defaults_are_unconstrained() {
+        let query = DialogQuery::default();
+
+        assert!(query.matches_dialog(DialogKind::Alert, "Alert"));
+        assert!(query.matches_dialog(DialogKind::OpenPanel, "Open"));
+        assert!(query.matches_dialog(DialogKind::SavePanel, "Save"));
+        assert!(query.matches_dialog(DialogKind::Panel, ""));
+    }
+
+    #[test]
+    fn dialog_query_title_only_matches_across_kinds() {
+        let query = DialogQuery::default().title_contains("Export");
+
+        assert!(query.matches_dialog(DialogKind::SavePanel, "Export Document"));
+        assert!(query.matches_dialog(DialogKind::Panel, "Export Options"));
+        assert!(!query.matches_dialog(DialogKind::OpenPanel, "Import Document"));
+    }
+
+    #[test]
+    fn dialog_kind_strings_are_stable() {
+        assert_eq!(DialogKind::Alert.as_str(), "alert");
+        assert_eq!(DialogKind::OpenPanel.as_str(), "open_panel");
+        assert_eq!(DialogKind::SavePanel.as_str(), "save_panel");
+        assert_eq!(DialogKind::Panel.as_str(), "panel");
     }
 
     #[test]

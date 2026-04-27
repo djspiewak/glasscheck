@@ -4,8 +4,9 @@ mod imp {
     use std::time::Duration;
 
     use glasscheck_core::{
-        InputSynthesisError, NodeProvenanceKind, Point, PollError, PollOptions, PropertyValue,
-        Rect, RegionResolveError, Role, Scene, Selector, SemanticNode, SemanticSnapshot, Size,
+        DialogError, DialogKind, DialogQuery, InputSynthesisError, NodeProvenanceKind, Point,
+        PollOptions, PropertyValue, Rect, RegionResolveError, Role, Scene, Selector, SemanticNode,
+        SemanticSnapshot, Size,
     };
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
@@ -30,178 +31,31 @@ mod imp {
     const SELECTED_PATH_PROPERTY: &str = "appkit:selected_path";
 
     /// Native AppKit dialog or panel kind.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub enum AppKitDialogKind {
-        /// Standard `NSAlert` dialog or sheet.
-        Alert,
-        /// Standard `NSOpenPanel`.
-        OpenPanel,
-        /// Standard `NSSavePanel`.
-        SavePanel,
-        /// Other AppKit `NSPanel`-backed dialog.
-        Panel,
-    }
-
-    impl AppKitDialogKind {
-        #[must_use]
-        pub const fn as_str(self) -> &'static str {
-            match self {
-                Self::Alert => "alert",
-                Self::OpenPanel => "open_panel",
-                Self::SavePanel => "save_panel",
-                Self::Panel => "panel",
-            }
-        }
-    }
+    type AppKitDialogKind = DialogKind;
 
     /// Query used to discover native AppKit dialogs and panels.
-    #[derive(Clone, Debug, Default, PartialEq, Eq)]
-    pub struct AppKitDialogQuery {
-        kind: Option<AppKitDialogKind>,
-        title: Option<DialogTitleMatch>,
+    type AppKitDialogQuery = DialogQuery;
+
+    pub(crate) trait AppKitDialogQueryExt {
+        #[must_use]
+        fn matches_window(&self, window: &NSWindow) -> bool;
     }
 
-    impl AppKitDialogQuery {
-        /// Matches a standard AppKit alert.
-        #[must_use]
-        pub fn alert() -> Self {
-            Self::kind(AppKitDialogKind::Alert)
-        }
-
-        /// Matches a standard AppKit open panel.
-        #[must_use]
-        pub fn open_panel() -> Self {
-            Self::kind(AppKitDialogKind::OpenPanel)
-        }
-
-        /// Matches a standard AppKit save panel.
-        #[must_use]
-        pub fn save_panel() -> Self {
-            Self::kind(AppKitDialogKind::SavePanel)
-        }
-
-        /// Matches a dialog or panel by kind.
-        #[must_use]
-        pub fn kind(kind: AppKitDialogKind) -> Self {
-            Self {
-                kind: Some(kind),
-                title: None,
-            }
-        }
-
-        /// Adds an exact title constraint.
-        #[must_use]
-        pub fn title_eq(mut self, title: impl Into<String>) -> Self {
-            self.title = Some(DialogTitleMatch::Exact(title.into()));
-            self
-        }
-
-        /// Adds a substring title constraint.
-        #[must_use]
-        pub fn title_contains(mut self, title: impl Into<String>) -> Self {
-            self.title = Some(DialogTitleMatch::Contains(title.into()));
-            self
-        }
-
-        #[must_use]
-        pub(crate) fn matches_window(&self, window: &NSWindow) -> bool {
+    impl AppKitDialogQueryExt for AppKitDialogQuery {
+        fn matches_window(&self, window: &NSWindow) -> bool {
             let Some(kind) = classify_window(window) else {
                 return false;
             };
-            if self.kind.is_some_and(|expected| expected != kind) {
+            if !self.matches_kind(kind) {
                 return false;
             }
-            self.title.as_ref().is_none_or(|title| {
-                title.matches(&dialog_title(window, kind))
-                    || title.matches(&window.title().to_string())
-            })
-        }
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    enum DialogTitleMatch {
-        Exact(String),
-        Contains(String),
-    }
-
-    impl DialogTitleMatch {
-        fn matches(&self, title: &str) -> bool {
-            match self {
-                Self::Exact(expected) => title == expected,
-                Self::Contains(expected) => title.contains(expected),
-            }
+            self.matches_title(&dialog_title(window, kind))
+                || self.matches_title(&window.title().to_string())
         }
     }
 
     /// Errors returned by AppKit dialog helpers.
-    #[derive(Debug)]
-    pub enum AppKitDialogError {
-        /// The requested surface is absent or already closed.
-        MissingSurface,
-        /// The requested surface is an ordinary window, not a native dialog or panel.
-        NotDialog,
-        /// The attached surface was not the required dialog kind.
-        KindMismatch {
-            expected: AppKitDialogKind,
-            actual: AppKitDialogKind,
-        },
-        /// The live OS panel did not expose enough public structure to drive the request.
-        UnsupportedLiveSelection(&'static str),
-        /// A requested file-system path was invalid or missing.
-        MissingRequestedPath(PathBuf),
-        /// Native capture or input failed.
-        InputUnavailable,
-        /// The requested selector did not resolve.
-        Resolve(RegionResolveError),
-        /// Polling timed out.
-        Poll(PollError),
-        /// A completed panel did not report the expected selected path.
-        SelectionMismatch {
-            expected: Vec<PathBuf>,
-            actual: Vec<PathBuf>,
-        },
-    }
-
-    impl std::fmt::Display for AppKitDialogError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::MissingSurface => write!(f, "dialog surface is missing"),
-                Self::NotDialog => write!(f, "surface is not an AppKit dialog or panel"),
-                Self::KindMismatch { expected, actual } => {
-                    write!(f, "expected {:?}, found {:?}", expected, actual)
-                }
-                Self::UnsupportedLiveSelection(reason) => {
-                    write!(f, "live panel selection is unsupported: {reason}")
-                }
-                Self::MissingRequestedPath(path) => {
-                    write!(f, "requested path is unavailable: {}", path.display())
-                }
-                Self::InputUnavailable => write!(f, "dialog input is unavailable"),
-                Self::Resolve(error) => write!(f, "{error}"),
-                Self::Poll(error) => write!(f, "{error}"),
-                Self::SelectionMismatch { expected, actual } => {
-                    write!(
-                        f,
-                        "selection mismatch: expected {expected:?}, found {actual:?}"
-                    )
-                }
-            }
-        }
-    }
-
-    impl std::error::Error for AppKitDialogError {}
-
-    impl From<PollError> for AppKitDialogError {
-        fn from(value: PollError) -> Self {
-            Self::Poll(value)
-        }
-    }
-
-    impl From<RegionResolveError> for AppKitDialogError {
-        fn from(value: RegionResolveError) -> Self {
-            Self::Resolve(value)
-        }
-    }
+    type AppKitDialogError = DialogError;
 
     pub(crate) fn attach_dialog_window(
         harness: AppKitHarness,
@@ -1136,34 +990,25 @@ mod imp {
         use super::{
             next_child_index, open_panel_path_intent, save_panel_path_intent, selector_fragment,
             usable_selector_text, usable_visible_text, AppKitDialogError, AppKitDialogKind,
-            AppKitDialogQuery, DialogTitleMatch, OpenPanelPathIntent, SavePanelPathIntent,
+            AppKitDialogQuery, OpenPanelPathIntent, SavePanelPathIntent,
         };
 
         #[test]
         fn dialog_query_builders_capture_kind_and_title() {
-            assert_eq!(
-                AppKitDialogQuery::alert().kind,
-                Some(AppKitDialogKind::Alert)
-            );
-            assert_eq!(
-                AppKitDialogQuery::open_panel().kind,
-                Some(AppKitDialogKind::OpenPanel)
-            );
-            assert_eq!(
-                AppKitDialogQuery::save_panel().kind,
-                Some(AppKitDialogKind::SavePanel)
-            );
+            assert!(AppKitDialogQuery::alert().matches_kind(AppKitDialogKind::Alert));
+            assert!(AppKitDialogQuery::open_panel().matches_kind(AppKitDialogKind::OpenPanel));
+            assert!(AppKitDialogQuery::save_panel().matches_kind(AppKitDialogKind::SavePanel));
         }
 
         #[test]
         fn dialog_title_matches_cover_exact_contains_and_misses() {
-            let exact = DialogTitleMatch::Exact("Export Document".into());
-            assert!(exact.matches("Export Document"));
-            assert!(!exact.matches("Export"));
+            let exact = AppKitDialogQuery::default().title_eq("Export Document");
+            assert!(exact.matches_title("Export Document"));
+            assert!(!exact.matches_title("Export"));
 
-            let contains = DialogTitleMatch::Contains("Document".into());
-            assert!(contains.matches("Export Document"));
-            assert!(!contains.matches("Open Fixture"));
+            let contains = AppKitDialogQuery::default().title_contains("Document");
+            assert!(contains.matches_title("Export Document"));
+            assert!(!contains.matches_title("Open Fixture"));
         }
 
         #[test]
@@ -1306,99 +1151,11 @@ mod imp {
 }
 
 #[cfg(not(target_os = "macos"))]
-mod imp {
-    use std::path::PathBuf;
-
-    /// Native AppKit dialog or panel kind.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub enum AppKitDialogKind {
-        Alert,
-        OpenPanel,
-        SavePanel,
-        Panel,
-    }
-
-    impl AppKitDialogKind {
-        #[must_use]
-        pub const fn as_str(self) -> &'static str {
-            match self {
-                Self::Alert => "alert",
-                Self::OpenPanel => "open_panel",
-                Self::SavePanel => "save_panel",
-                Self::Panel => "panel",
-            }
-        }
-    }
-
-    /// Query used to discover native AppKit dialogs and panels.
-    #[derive(Clone, Debug, Default, PartialEq, Eq)]
-    pub struct AppKitDialogQuery;
-
-    impl AppKitDialogQuery {
-        #[must_use]
-        pub fn alert() -> Self {
-            Self
-        }
-
-        #[must_use]
-        pub fn open_panel() -> Self {
-            Self
-        }
-
-        #[must_use]
-        pub fn save_panel() -> Self {
-            Self
-        }
-
-        #[must_use]
-        pub fn kind(_: AppKitDialogKind) -> Self {
-            Self
-        }
-
-        #[must_use]
-        pub fn title_eq(self, _: impl Into<String>) -> Self {
-            self
-        }
-
-        #[must_use]
-        pub fn title_contains(self, _: impl Into<String>) -> Self {
-            self
-        }
-    }
-
-    /// Errors returned by AppKit dialog helpers.
-    #[derive(Debug)]
-    pub enum AppKitDialogError {
-        MissingSurface,
-        NotDialog,
-        KindMismatch {
-            expected: AppKitDialogKind,
-            actual: AppKitDialogKind,
-        },
-        UnsupportedLiveSelection(&'static str),
-        MissingRequestedPath(PathBuf),
-        InputUnavailable,
-        Resolve(glasscheck_core::RegionResolveError),
-        Poll(glasscheck_core::PollError),
-        SelectionMismatch {
-            expected: Vec<PathBuf>,
-            actual: Vec<PathBuf>,
-        },
-    }
-
-    impl std::fmt::Display for AppKitDialogError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "AppKit dialogs are unavailable on this target")
-        }
-    }
-
-    impl std::error::Error for AppKitDialogError {}
-}
+mod imp {}
 
 #[cfg(target_os = "macos")]
 pub(crate) use imp::{
     attach_dialog_window, cancel_dialog, choose_open_panel_paths, choose_save_panel_path,
     classify_window, click_dialog_button, set_dialog_text, snapshot_dialog_scene,
+    AppKitDialogQueryExt,
 };
-
-pub use imp::{AppKitDialogError, AppKitDialogKind, AppKitDialogQuery};

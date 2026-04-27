@@ -5,13 +5,15 @@ mod imp {
     use std::path::{Path, PathBuf};
 
     use glasscheck_core::{
-        PollError, PollOptions, Scene, Selector, SurfaceId, SurfaceQuery, TransientSurfaceSpec,
+        DialogError as AppKitDialogError, DialogKind as AppKitDialogKind,
+        DialogQuery as AppKitDialogQuery, PollError, PollOptions, Scene, Selector, SurfaceId,
+        SurfaceQuery, TransientSurfaceSpec,
     };
     use objc2::rc::Retained;
     use objc2_app_kit::{NSApplication, NSWindow};
     use objc2_foundation::{MainThreadMarker, NSPoint};
 
-    use crate::dialog::{self, AppKitDialogError, AppKitDialogKind, AppKitDialogQuery};
+    use crate::dialog::{self, AppKitDialogQueryExt};
     use crate::{AppKitContextMenu, AppKitHarness, AppKitWindowHost, HitPointSearch};
 
     /// Coordinator for multi-surface AppKit test flows.
@@ -309,8 +311,8 @@ mod imp {
                 .ok_or(AppKitDialogError::MissingSurface)?
         }
 
-        /// Chooses a deterministic save destination in a live `NSSavePanel`.
-        pub fn choose_save_panel_path(
+        /// Chooses a deterministic save destination in a live save dialog.
+        pub fn choose_save_dialog_path(
             &self,
             id: &SurfaceId,
             path: &Path,
@@ -322,8 +324,8 @@ mod imp {
             .ok_or(AppKitDialogError::MissingSurface)?
         }
 
-        /// Chooses deterministic paths in a live `NSOpenPanel` when the OS panel exposes them.
-        pub fn choose_open_panel_paths(
+        /// Chooses deterministic paths in a live open dialog when the OS panel exposes them.
+        pub fn choose_open_dialog_paths(
             &self,
             id: &SurfaceId,
             paths: &[PathBuf],

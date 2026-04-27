@@ -2,7 +2,7 @@
 
 use std::cell::Cell;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -184,35 +184,58 @@ fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::Win
 }
 
 fn appkit_dialog_api_is_reexported(harness: &glasscheck::Harness) {
-    let query = glasscheck::AppKitDialogQuery::save_panel()
+    let query = glasscheck::DialogQuery::save_panel()
         .title_eq("Export")
         .title_contains("Doc");
     let session = harness.session();
     let wait: fn(
         &glasscheck::Session,
-        &glasscheck::AppKitDialogQuery,
+        &glasscheck::DialogQuery,
     ) -> Result<usize, glasscheck::PollError> = wait_for_dialog_signature;
+    let save_path: fn(
+        &glasscheck::Session,
+        &glasscheck::SurfaceId,
+        &Path,
+    ) -> Result<usize, glasscheck::DialogError> = choose_save_dialog_path_signature;
+    let open_paths: fn(
+        &glasscheck::Session,
+        &glasscheck::SurfaceId,
+        &[PathBuf],
+    ) -> Result<usize, glasscheck::DialogError> = choose_open_dialog_paths_signature;
 
-    assert_eq!(
-        glasscheck::AppKitDialogKind::OpenPanel.as_str(),
-        "open_panel"
-    );
+    assert_eq!(glasscheck::DialogKind::OpenPanel.as_str(), "open_panel");
     assert!(matches!(
-        glasscheck::AppKitDialogError::MissingSurface,
-        glasscheck::AppKitDialogError::MissingSurface
+        glasscheck::DialogError::MissingSurface,
+        glasscheck::DialogError::MissingSurface
     ));
     assert!(matches!(
         session.dialog_kind(&glasscheck::SurfaceId::new("missing-dialog")),
-        Err(glasscheck::AppKitDialogError::MissingSurface)
+        Err(glasscheck::DialogError::MissingSurface)
     ));
-    let _ = (query, session, wait);
+    let _ = (query, session, wait, save_path, open_paths);
 }
 
 fn wait_for_dialog_signature(
     session: &glasscheck::Session,
-    query: &glasscheck::AppKitDialogQuery,
+    query: &glasscheck::DialogQuery,
 ) -> Result<usize, glasscheck::PollError> {
     session.wait_for_dialog("dialog", query, glasscheck::PollOptions::default())
+}
+
+fn choose_save_dialog_path_signature(
+    session: &glasscheck::Session,
+    id: &glasscheck::SurfaceId,
+    path: &Path,
+) -> Result<usize, glasscheck::DialogError> {
+    session.choose_save_dialog_path(id, path, glasscheck::PollOptions::default())
+}
+
+fn choose_open_dialog_paths_signature(
+    session: &glasscheck::Session,
+    id: &glasscheck::SurfaceId,
+    paths: &[PathBuf],
+) -> Result<usize, glasscheck::DialogError> {
+    session.choose_open_dialog_paths(id, paths, glasscheck::PollOptions::default())
 }
 
 fn status_expectation(content: &str) -> AnchoredTextExpectation {

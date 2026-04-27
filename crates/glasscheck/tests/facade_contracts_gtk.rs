@@ -33,6 +33,9 @@ fn main() {
         let fixture = mount_fixture(&harness);
         exercise_host_contracts(&harness, &fixture.host);
     });
+    run_case("gtk_dialog_api_is_reexported", || {
+        gtk_dialog_api_is_reexported(&harness)
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -168,7 +171,9 @@ fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::Win
 
     let input = host.input();
     assert_input_driver(&input);
-    input.move_mouse(Point::new(resolved.origin.x + 2.0, resolved.origin.y + 2.0));
+    input
+        .move_mouse(Point::new(resolved.origin.x + 2.0, resolved.origin.y + 2.0))
+        .expect("shared input driver should move the pointer");
     input
         .key_press_queued("a", glasscheck::KeyModifiers::default())
         .expect("queued key press should succeed through the shared facade");
@@ -189,6 +194,81 @@ fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::Win
 
     let scene = host.snapshot_scene();
     assert_eq!(node_label(&scene, "click-state"), Some("Clicked"));
+}
+
+#[cfg(target_os = "linux")]
+fn gtk_dialog_api_is_reexported(harness: &glasscheck::Harness) {
+    let query = glasscheck::DialogQuery::save_panel()
+        .title_eq("Export")
+        .title_contains("Doc");
+    let session = harness.session();
+    let wait: fn(
+        &glasscheck::Session,
+        &glasscheck::DialogQuery,
+    ) -> Result<usize, glasscheck::PollError> = wait_for_dialog_signature;
+    let save_path: fn(
+        &glasscheck::Session,
+        &glasscheck::SurfaceId,
+        &std::path::Path,
+    ) -> Result<usize, glasscheck::DialogError> = choose_save_dialog_path_signature;
+    let open_paths: fn(
+        &glasscheck::Session,
+        &glasscheck::SurfaceId,
+        &[PathBuf],
+    ) -> Result<usize, glasscheck::DialogError> = choose_open_dialog_paths_signature;
+    let context_click: fn(
+        &glasscheck::WindowHost,
+        &glasscheck::Selector,
+    )
+        -> Result<glasscheck::GtkContextMenu, glasscheck::GtkContextMenuError> =
+        context_click_node_signature;
+
+    assert_eq!(glasscheck::DialogKind::OpenPanel.as_str(), "open_panel");
+    assert!(matches!(
+        glasscheck::DialogError::UnsupportedCapability(glasscheck::DialogCapability::SceneSnapshot),
+        glasscheck::DialogError::UnsupportedCapability(_)
+    ));
+    assert!(matches!(
+        session.dialog_kind(&glasscheck::SurfaceId::new("missing-dialog")),
+        Err(glasscheck::DialogError::MissingSurface)
+    ));
+    let controller = glasscheck::GtkDialogController::new(glasscheck::DialogKind::Alert, "Alert");
+    assert_eq!(controller.kind(), glasscheck::DialogKind::Alert);
+    let _ = (query, session, wait, save_path, open_paths, context_click);
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_dialog_signature(
+    session: &glasscheck::Session,
+    query: &glasscheck::DialogQuery,
+) -> Result<usize, glasscheck::PollError> {
+    session.wait_for_dialog("dialog", query, glasscheck::PollOptions::default())
+}
+
+#[cfg(target_os = "linux")]
+fn choose_save_dialog_path_signature(
+    session: &glasscheck::Session,
+    id: &glasscheck::SurfaceId,
+    path: &std::path::Path,
+) -> Result<usize, glasscheck::DialogError> {
+    session.choose_save_dialog_path(id, path, glasscheck::PollOptions::default())
+}
+
+#[cfg(target_os = "linux")]
+fn choose_open_dialog_paths_signature(
+    session: &glasscheck::Session,
+    id: &glasscheck::SurfaceId,
+    paths: &[PathBuf],
+) -> Result<usize, glasscheck::DialogError> {
+    session.choose_open_dialog_paths(id, paths, glasscheck::PollOptions::default())
+}
+
+#[cfg(target_os = "linux")]
+fn context_click_node_signature(
+    host: &glasscheck::WindowHost,
+    selector: &glasscheck::Selector,
+) -> Result<glasscheck::GtkContextMenu, glasscheck::GtkContextMenuError> {
+    host.context_click_node(selector)
 }
 
 #[cfg(target_os = "linux")]

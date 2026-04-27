@@ -9,16 +9,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use block2::RcBlock;
 use glasscheck_appkit::{
-    AppKitDialogError, AppKitDialogKind, AppKitDialogQuery, AppKitHarness,
-    AppKitMenuCaptureOptions, AppKitMenuError, AppKitMenuTarget, AppKitSceneSource,
+    AppKitHarness, AppKitMenuCaptureOptions, AppKitMenuError, AppKitMenuTarget, AppKitSceneSource,
     AppKitSnapshotContext, HitPointSearch, HitPointStrategy, InstrumentedView,
 };
 use glasscheck_core::{
-    assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
-    NodeProvenanceKind, NodeRecipe, PixelMatch, PixelProbe, Point, PollOptions, PropertyValue,
-    QueryError, Rect, RegionResolveError, RelativeBounds, Role, Selector, SemanticNode,
-    SemanticProvider, SemanticSnapshot, Size, SurfaceId, SurfaceQuery, TextMatch, TextRange,
-    TransientSurfaceSpec,
+    assert_above, assert_vertical_alignment, compare_images, CompareConfig,
+    DialogError as AppKitDialogError, DialogKind as AppKitDialogKind,
+    DialogQuery as AppKitDialogQuery, LayoutTolerance, NodeProvenanceKind, NodeRecipe, PixelMatch,
+    PixelProbe, Point, PollOptions, PropertyValue, QueryError, Rect, RegionResolveError,
+    RelativeBounds, Role, Selector, SemanticNode, SemanticProvider, SemanticSnapshot, Size,
+    SurfaceId, SurfaceQuery, TextMatch, TextRange, TransientSurfaceSpec,
 };
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -2483,11 +2483,11 @@ fn dialog_methods_report_missing_surface(harness: AppKitHarness) {
         Err(AppKitDialogError::MissingSurface)
     ));
     assert!(matches!(
-        session.choose_save_panel_path(&missing, &save_path, short_poll_options()),
+        session.choose_save_dialog_path(&missing, &save_path, short_poll_options()),
         Err(AppKitDialogError::MissingSurface)
     ));
     assert!(matches!(
-        session.choose_open_panel_paths(&missing, &[open_path], short_poll_options()),
+        session.choose_open_dialog_paths(&missing, &[open_path], short_poll_options()),
         Err(AppKitDialogError::MissingSurface)
     ));
     assert!(matches!(
@@ -2616,7 +2616,7 @@ fn save_panel_path_selection_is_deterministic(harness: AppKitHarness) {
     );
 
     session
-        .choose_save_panel_path(
+        .choose_save_dialog_path(
             &SurfaceId::new("save-panel"),
             &save_path,
             PollOptions::default(),
@@ -2657,7 +2657,7 @@ fn save_panel_rejects_wrong_dialog_kind(harness: AppKitHarness) {
         .expect("alert should be discovered");
 
     let error = session
-        .choose_save_panel_path(
+        .choose_save_dialog_path(
             &SurfaceId::new("wrong-kind"),
             &temp_test_dir("wrong-kind").join("file.txt"),
             PollOptions::default(),
@@ -2911,7 +2911,7 @@ fn open_panel_reports_missing_paths_and_cancels(harness: AppKitHarness) {
 
     let missing = temp_test_dir("open-panel-missing").join("missing.txt");
     let error = session
-        .choose_open_panel_paths(
+        .choose_open_dialog_paths(
             &SurfaceId::new("open-panel"),
             &[missing.clone()],
             PollOptions::default(),
@@ -2941,7 +2941,7 @@ fn open_panel_live_file_selection_is_explicit(harness: AppKitHarness) {
     hide_native_dialog_window(&panel);
     session.attach_window("open-panel-select", &panel);
 
-    match session.choose_open_panel_paths(
+    match session.choose_open_dialog_paths(
         &SurfaceId::new("open-panel-select"),
         &[file.clone()],
         PollOptions::default(),

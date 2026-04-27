@@ -3,9 +3,11 @@
 //! Use this crate when tests can expose scene nodes, capture pixels, or both.
 //! Nodes may come from native widget/view registration, declarative recipes,
 //! coarse geometry, pixel probing, fuzzy image matching, or custom refinement.
-//! This crate targets native graphical UIs rather than browser-based UIs. Most
-//! users should depend on `glasscheck` instead so they get the supported native
-//! backend integration as well.
+//! The backend-neutral API also includes shared session identifiers, transient
+//! discovery queries, and native dialog query/error types used by the AppKit and
+//! GTK integrations. This crate targets native graphical UIs rather than
+//! browser-based UIs. Most users should depend on `glasscheck` instead so they
+//! get the supported native backend integration as well.
 
 mod anchor;
 mod assertions;
@@ -31,9 +33,10 @@ pub use assertions::{
 };
 pub use backend::{
     assert_anchored_text_renders, crop_image_bottom_left, normalize_provider_nodes,
-    registered_node_id, AnchoredTextAssertionError, AnchoredTextHarness, Harness, HitPointSearch,
-    HitPointStrategy, InputDriver, InputSynthesisError, InstrumentedNode, KeyModifiers,
-    SemanticSnapshot, SurfaceId, SurfaceQuery, TextRange, TransientSurfaceSpec,
+    registered_node_id, AnchoredTextAssertionError, AnchoredTextHarness, DialogCapability,
+    DialogError, DialogKind, DialogQuery, Harness, HitPointSearch, HitPointStrategy, InputDriver,
+    InputSynthesisError, InstrumentedNode, KeyModifiers, SemanticSnapshot, SurfaceId, SurfaceQuery,
+    TextRange, TransientSurfaceSpec,
 };
 pub use geometry::{Point, Rect, Size};
 pub use image::Image;

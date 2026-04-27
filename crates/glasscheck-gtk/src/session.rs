@@ -2,20 +2,23 @@
 mod imp {
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
 
     use glasscheck_core::{
-        PollError, PollOptions, Scene, Selector, SurfaceId, SurfaceQuery, TransientSurfaceSpec,
+        DialogCapability, DialogError, DialogKind, DialogQuery, PollError, PollOptions, Scene,
+        Selector, SurfaceId, SurfaceQuery, TransientSurfaceSpec,
     };
     use glib::object::Cast;
     use gtk4::prelude::*;
     use gtk4::{Popover, Widget, Window};
 
-    use crate::{GtkHarness, GtkWindowHost, HitPointSearch};
+    use crate::{dialog, GtkDialogController, GtkHarness, GtkWindowHost, HitPointSearch};
 
     /// Coordinator for multi-surface GTK test flows.
     pub struct GtkSession {
         harness: GtkHarness,
         surfaces: RefCell<BTreeMap<SurfaceId, GtkWindowHost>>,
+        dialog_controllers: RefCell<BTreeMap<SurfaceId, GtkDialogController>>,
     }
 
     impl GtkSession {
@@ -24,6 +27,7 @@ mod imp {
             Self {
                 harness,
                 surfaces: RefCell::new(BTreeMap::new()),
+                dialog_controllers: RefCell::new(BTreeMap::new()),
             }
         }
 
@@ -35,12 +39,33 @@ mod imp {
                 "surface id '{}' is already registered; use a distinct id or remove the existing surface first",
                 id.as_str()
             );
+            self.dialog_controllers.borrow_mut().remove(&id);
             self.surfaces.borrow_mut().insert(id, host);
         }
 
         /// Wraps a raw [`Window`] into a host and registers it under the given surface ID.
         pub fn attach_window(&self, id: impl Into<SurfaceId>, window: &Window) {
             self.attach_host(id, GtkWindowHost::from_window(window));
+        }
+
+        /// Registers async dialog metadata under the given surface ID.
+        ///
+        /// Controller-only dialogs support kind/title tracking but not live UI
+        /// operations such as scene snapshots, button clicks, text edits, path
+        /// selection, or cancellation.
+        pub fn attach_dialog_controller(
+            &self,
+            id: impl Into<SurfaceId>,
+            controller: GtkDialogController,
+        ) {
+            let id = id.into();
+            debug_assert!(
+                !self.surfaces.borrow().contains_key(&id)
+                    && !self.dialog_controllers.borrow().contains_key(&id),
+                "surface id '{}' is already registered; use a distinct id or remove the existing surface first",
+                id.as_str()
+            );
+            self.dialog_controllers.borrow_mut().insert(id, controller);
         }
 
         /// Wraps an arbitrary root widget (and optional parent window) into a host and registers it.
@@ -172,6 +197,7 @@ mod imp {
             let is_open = {
                 let surfaces = self.surfaces.borrow();
                 surfaces.get(id).is_some_and(gtk_host_is_open)
+                    || self.dialog_controllers.borrow().contains_key(id)
             };
             if !is_open {
                 let _ = self.remove_surface(id);
@@ -180,6 +206,9 @@ mod imp {
         }
 
         /// Waits for the named transient surface to dismiss and evicts it from the session.
+        ///
+        /// Controller-only dialog metadata has no GTK host to poll, so it is
+        /// treated as already closed and evicted immediately.
         ///
         /// A transient is considered closed when `gtk_host_is_open` returns false (i.e.,
         /// the GTK window is no longer visible or has been destroyed). This uses the same
@@ -194,6 +223,7 @@ mod imp {
             options: PollOptions,
         ) -> Result<usize, PollError> {
             if !{ self.surfaces.borrow().contains_key(id) } {
+                self.dialog_controllers.borrow_mut().remove(id);
                 return Ok(0);
             }
             self.harness
@@ -237,6 +267,165 @@ mod imp {
             self.with_surface(id, GtkWindowHost::snapshot_scene)
         }
 
+        /// Polls until a surface-backed GTK dialog matching `query` is found and attached.
+        ///
+        /// This discovers visible `MessageDialog`, `FileChooserDialog`, and
+        /// generic `Dialog` windows. Use `attach_dialog_controller` for async
+        /// dialog objects that expose metadata but no widget surface.
+        pub fn wait_for_dialog(
+            &self,
+            id: impl Into<SurfaceId>,
+            query: &DialogQuery,
+            options: PollOptions,
+        ) -> Result<usize, PollError> {
+            let id = id.into();
+            self.harness.wait_until(options, || {
+                let registered_ptrs: BTreeSet<usize> = {
+                    let surfaces = self.surfaces.borrow();
+                    surfaces
+                        .values()
+                        .map(|host| host.window().as_ptr() as usize)
+                        .collect()
+                };
+                let Some((window, kind)) = Window::list_toplevels()
+                    .into_iter()
+                    .filter_map(|widget| widget.downcast::<Window>().ok())
+                    .filter(|window| window.is_visible())
+                    .filter(|window| !registered_ptrs.contains(&(window.as_ptr() as usize)))
+                    .filter_map(|window| {
+                        let kind = dialog::classify_window(&window)?;
+                        let title = dialog::dialog_title(&window, kind);
+                        query.matches_dialog(kind, &title).then_some((window, kind))
+                    })
+                    .next()
+                else {
+                    return false;
+                };
+                match dialog::attach_dialog_window(&window) {
+                    Ok(host) => {
+                        self.attach_host(id.clone(), host);
+                        true
+                    }
+                    Err(_) => {
+                        let _ = kind;
+                        false
+                    }
+                }
+            })
+        }
+
+        /// Returns the native dialog kind for the named surface or controller.
+        pub fn dialog_kind(&self, id: &SurfaceId) -> Result<DialogKind, DialogError> {
+            if let Some(kind) = self
+                .dialog_controllers
+                .borrow()
+                .get(id)
+                .map(GtkDialogController::kind)
+            {
+                return Ok(kind);
+            }
+            if let Some(kind) = self.with_surface(id, |host| {
+                dialog::classify_window(host.window()).ok_or(DialogError::NotDialog)
+            }) {
+                return kind;
+            }
+            Err(DialogError::MissingSurface)
+        }
+
+        /// Snapshots the named surface-backed GTK dialog.
+        pub fn snapshot_dialog_scene(&self, id: &SurfaceId) -> Result<Scene, DialogError> {
+            if self.dialog_controllers.borrow().contains_key(id) {
+                return Err(DialogError::UnsupportedCapability(
+                    DialogCapability::SceneSnapshot,
+                ));
+            }
+            self.with_surface(id, dialog::snapshot_dialog_scene)
+                .ok_or(DialogError::MissingSurface)?
+        }
+
+        /// Synthesizes a click on a dialog button matching `predicate`.
+        pub fn click_dialog_button(
+            &self,
+            id: &SurfaceId,
+            predicate: &Selector,
+        ) -> Result<(), DialogError> {
+            if self.dialog_controllers.borrow().contains_key(id) {
+                return Err(DialogError::UnsupportedCapability(
+                    DialogCapability::ButtonClick,
+                ));
+            }
+            self.with_surface(id, |host| dialog::click_dialog_button(host, predicate))
+                .ok_or(DialogError::MissingSurface)?
+        }
+
+        /// Sets text on a GTK text field or text view within a dialog.
+        pub fn set_dialog_text(
+            &self,
+            id: &SurfaceId,
+            predicate: &Selector,
+            text: &str,
+        ) -> Result<(), DialogError> {
+            if self.dialog_controllers.borrow().contains_key(id) {
+                return Err(DialogError::UnsupportedCapability(
+                    DialogCapability::TextEdit,
+                ));
+            }
+            self.with_surface(id, |host| dialog::set_dialog_text(host, predicate, text))
+                .ok_or(DialogError::MissingSurface)?
+        }
+
+        /// Chooses a deterministic save destination in a GTK file chooser dialog.
+        pub fn choose_save_dialog_path(
+            &self,
+            id: &SurfaceId,
+            path: &Path,
+            options: PollOptions,
+        ) -> Result<usize, DialogError> {
+            if self.dialog_controllers.borrow().contains_key(id) {
+                return Err(DialogError::UnsupportedCapability(
+                    DialogCapability::SavePathSelection,
+                ));
+            }
+            self.with_surface(id, |host| {
+                dialog::choose_save_dialog_path(host, path, options)
+            })
+            .ok_or(DialogError::MissingSurface)?
+        }
+
+        /// Chooses deterministic open paths in a GTK file chooser dialog.
+        pub fn choose_open_dialog_paths(
+            &self,
+            id: &SurfaceId,
+            paths: &[PathBuf],
+            options: PollOptions,
+        ) -> Result<usize, DialogError> {
+            if self.dialog_controllers.borrow().contains_key(id) {
+                return Err(DialogError::UnsupportedCapability(
+                    DialogCapability::OpenPathSelection,
+                ));
+            }
+            self.with_surface(id, |host| {
+                dialog::choose_open_dialog_paths(host, paths, options)
+            })
+            .ok_or(DialogError::MissingSurface)?
+        }
+
+        /// Cancels the named surface-backed GTK dialog.
+        ///
+        /// Controller-only dialogs return
+        /// `DialogError::UnsupportedCapability(DialogCapability::Cancel)`.
+        pub fn cancel_dialog(
+            &self,
+            id: &SurfaceId,
+            options: PollOptions,
+        ) -> Result<usize, DialogError> {
+            if self.dialog_controllers.borrow().contains_key(id) {
+                return Err(DialogError::UnsupportedCapability(DialogCapability::Cancel));
+            }
+            self.with_surface(id, |host| dialog::cancel_dialog(host, options))
+                .ok_or(DialogError::MissingSurface)?
+        }
+
         /// Synthesizes a click on the node matching `predicate` in the named surface.
         ///
         /// Returns `None` if the surface is absent or has been closed (and evicts it as a side effect); `Some(Err(...))` if the node can't be located.
@@ -246,6 +435,15 @@ mod imp {
             predicate: &Selector,
         ) -> Option<Result<(), glasscheck_core::RegionResolveError>> {
             self.with_surface(id, |host| host.click_node(predicate))
+        }
+
+        /// Opens a visible popover-backed GTK context menu on the node matching `predicate`.
+        pub fn context_click_node(
+            &self,
+            id: &SurfaceId,
+            predicate: &Selector,
+        ) -> Option<Result<crate::GtkContextMenu, crate::GtkContextMenuError>> {
+            self.with_surface(id, |host| host.context_click_node(predicate))
         }
 
         /// Synthesizes a mouse-hover over the node matching `predicate` in the named surface.
@@ -274,6 +472,7 @@ mod imp {
 
         #[must_use]
         pub(crate) fn remove_surface(&self, id: &SurfaceId) -> Option<GtkWindowHost> {
+            self.dialog_controllers.borrow_mut().remove(id);
             self.surfaces.borrow_mut().remove(id)
         }
     }

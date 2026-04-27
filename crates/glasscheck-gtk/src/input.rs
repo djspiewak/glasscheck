@@ -73,6 +73,17 @@ mod imp {
             Ok(())
         }
 
+        /// Synthesizes a secondary click at `point` in root coordinates.
+        pub fn context_click(&self, point: Point) -> Result<(), InputSynthesisError> {
+            let context = self.x11_context()?;
+            let (root_x, root_y) = root_point_to_x11(&context, point)?;
+            xtest_motion(context.display, root_x, root_y)?;
+            xtest_button(context.display, 3, true)?;
+            xtest_button(context.display, 3, false)?;
+            sync_display(context.display)?;
+            Ok(())
+        }
+
         /// Synthesizes a mouse move at `point` in root coordinates.
         pub fn move_mouse(&self, point: Point) -> Result<(), InputSynthesisError> {
             let context = self.x11_context()?;

@@ -41,6 +41,11 @@ mod imp {
         }
 
         #[must_use]
+        pub(crate) fn host(&self) -> &'a GtkWindowHost {
+            self.host
+        }
+
+        #[must_use]
         pub fn root_bounds(&self) -> Rect {
             self.host.root_bounds()
         }
@@ -285,6 +290,48 @@ mod imp {
             }
             self.input().click(target.point).map_err(map_input_error)?;
             Ok(())
+        }
+
+        /// Opens a GTK context menu at the unique node matching `predicate`.
+        pub fn context_click_node(
+            &self,
+            predicate: &Selector,
+        ) -> Result<crate::GtkContextMenu, crate::GtkContextMenuError> {
+            self.context_click_node_with_search(predicate, &HitPointSearch::default())
+        }
+
+        /// Opens a GTK context menu at the unique node matching `predicate`.
+        pub fn context_click_node_with_search(
+            &self,
+            predicate: &Selector,
+            search: &HitPointSearch,
+        ) -> Result<crate::GtkContextMenu, crate::GtkContextMenuError> {
+            let target = self.resolve_click_target(predicate, search)?;
+            let baseline = crate::menu::visible_context_menu_ids(&self.window);
+            if let Some(registered_widget) = target.registered_widget.as_ref() {
+                if dispatch_semantic_context_click(
+                    &target.root_widget,
+                    registered_widget,
+                    target.point,
+                ) {
+                    crate::menu::flush_main_context(4);
+                    if let Some(menu) =
+                        crate::menu::discover_context_menu_excluding(&self.window, &baseline)
+                    {
+                        return Ok(menu);
+                    }
+                    return Err(crate::GtkContextMenuError::NoContextMenu);
+                }
+            }
+            crate::menu::context_click_root_point_excluding(&self.window, target.point, &baseline)
+        }
+
+        /// Opens a GTK context menu at a root-coordinate point.
+        pub fn context_click_root_point(
+            &self,
+            point: Point,
+        ) -> Result<crate::GtkContextMenu, crate::GtkContextMenuError> {
+            crate::menu::context_click_root_point(&self.window, point)
         }
 
         /// Moves the pointer to the semantic hit point of the unique node.
@@ -790,6 +837,56 @@ mod imp {
             };
             let button = controller.button();
             if button != 0 && button != 1 {
+                continue;
+            }
+            controller.emit_by_name::<()>("pressed", &[&1i32, &local_x, &local_y]);
+            controller.emit_by_name::<()>("released", &[&1i32, &local_x, &local_y]);
+            fired = true;
+        }
+        fired
+    }
+
+    fn dispatch_semantic_context_click(
+        root_widget: &Widget,
+        registered_widget: &Widget,
+        point: Point,
+    ) -> bool {
+        let (x, y) = root_top_left_point(root_widget, point);
+        let Some(picked) = root_widget.pick(x, y, gtk4::PickFlags::DEFAULT) else {
+            return false;
+        };
+        if !is_descendant_of_widget(&picked, registered_widget) {
+            return false;
+        }
+        let mut current = Some(picked.clone());
+        while let Some(candidate) = current {
+            if dispatch_context_click_to_widget_gestures(root_widget, &candidate, x, y) {
+                return true;
+            }
+            if candidate == *registered_widget {
+                break;
+            }
+            current = candidate.parent();
+        }
+        false
+    }
+
+    fn dispatch_context_click_to_widget_gestures(
+        root_widget: &Widget,
+        widget: &Widget,
+        x: f64,
+        y: f64,
+    ) -> bool {
+        let Some((local_x, local_y)) = root_widget.translate_coordinates(widget, x, y) else {
+            return false;
+        };
+        let mut fired = false;
+        for object in widget.observe_controllers().snapshot() {
+            let Ok(controller) = object.downcast::<gtk4::GestureClick>() else {
+                continue;
+            };
+            let button = controller.button();
+            if button != 0 && button != 3 {
                 continue;
             }
             controller.emit_by_name::<()>("pressed", &[&1i32, &local_x, &local_y]);

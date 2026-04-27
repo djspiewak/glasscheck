@@ -1,16 +1,20 @@
 #![cfg(target_os = "linux")]
 
 use std::cell::Cell;
+use std::fs;
+use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use glasscheck_core::{
-    InputSynthesisError, KeyModifiers, NodeRecipe, PixelMatch, PixelProbe, Point, PollOptions,
-    PropertyValue, Rect, RegionResolveError, RegionSpec, Role, Selector, SemanticNode,
-    SemanticProvider, Size, SurfaceId, TextRange, TransientSurfaceSpec,
+    DialogCapability, DialogError, DialogKind, DialogQuery, InputSynthesisError, KeyModifiers,
+    NodeRecipe, PixelMatch, PixelProbe, Point, PollOptions, PropertyValue, Rect,
+    RegionResolveError, RegionSpec, Role, Selector, SemanticNode, SemanticProvider, Size,
+    SurfaceId, TextRange, TransientSurfaceSpec,
 };
 use glasscheck_gtk::{
-    GtkHarness, GtkWindowHost, HitPointSearch, HitPointStrategy, InstrumentedWidget,
+    GtkDialogController, GtkHarness, GtkWindowHost, HitPointSearch, HitPointStrategy,
+    InstrumentedWidget,
 };
 use gtk4::prelude::*;
 
@@ -109,6 +113,43 @@ fn main() {
     run("session_opens_popover_transient_and_evicts_it", || {
         session_opens_popover_transient_and_evicts_it(harness)
     });
+    run(
+        "context_click_node_opens_popover_menu_and_activates_item",
+        || context_click_node_opens_popover_menu_and_activates_item(harness),
+    );
+    run(
+        "context_click_node_without_menu_does_not_fall_back_after_semantic_gesture",
+        || context_click_node_without_menu_does_not_fall_back_after_semantic_gesture(harness),
+    );
+    run(
+        "context_click_node_ignores_same_window_stale_popover",
+        || context_click_node_ignores_same_window_stale_popover(harness),
+    );
+    run("dialog_methods_report_missing_surface", || {
+        dialog_methods_report_missing_surface(harness)
+    });
+    run("cancel_dialog_reports_vetoed_close_as_poll_error", || {
+        cancel_dialog_reports_vetoed_close_as_poll_error(harness)
+    });
+    run("wait_for_dialog_discovers_matching_window", || {
+        wait_for_dialog_discovers_matching_window(harness)
+    });
+    run("wait_for_dialog_classifies_alerts", || {
+        wait_for_dialog_classifies_alerts(harness)
+    });
+    run("file_chooser_dialogs_classify_and_select_paths", || {
+        file_chooser_dialogs_classify_and_select_paths(harness)
+    });
+    run("custom_dialog_snapshots_and_drives_widgets", || {
+        custom_dialog_snapshots_and_drives_widgets(harness)
+    });
+    run("dialog_response_buttons_expose_button_roles", || {
+        dialog_response_buttons_expose_button_roles(harness)
+    });
+    run(
+        "async_dialog_controller_reports_capability_boundary",
+        || async_dialog_controller_reports_capability_boundary(harness),
+    );
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -801,10 +842,769 @@ fn session_opens_popover_transient_and_evicts_it(harness: GtkHarness) {
     assert!(main_scene.find(&Selector::id_eq("inserted-table")).is_ok());
 }
 
+fn context_click_node_opens_popover_menu_and_activates_item(harness: GtkHarness) {
+    let activated = Rc::new(Cell::new(false));
+    let stale_host = harness.create_window(220.0, 140.0);
+    let stale_root = fixed_root(220, 140);
+    let stale_target = gtk4::Button::with_label("Stale Editor");
+    stale_target.set_size_request(120, 32);
+    stale_root.put(&stale_target, 16.0, 16.0);
+    let stale_popover = gtk4::Popover::new();
+    stale_popover.set_parent(&stale_target);
+    stale_popover.set_child(Some(&gtk4::Button::with_label("Stale Command")));
+    stale_host.set_root(&stale_root);
+    stale_popover.popup();
+
+    let host = harness.create_window(320.0, 220.0);
+    let root = fixed_root(320, 220);
+    let target = gtk4::Button::with_label("Editor");
+    target.set_size_request(160, 40);
+    root.put(&target, 24.0, 24.0);
+
+    let popover = gtk4::Popover::new();
+    popover.set_parent(&target);
+    let menu_box = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    let insert = gtk4::Button::with_label("Insert Table");
+    let disabled = gtk4::Button::with_label("Disabled Command");
+    let hidden = gtk4::Button::with_label("Hidden Command");
+    disabled.set_sensitive(false);
+    hidden.set_visible(false);
+    menu_box.append(&insert);
+    menu_box.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
+    menu_box.append(&disabled);
+    menu_box.append(&hidden);
+    popover.set_child(Some(&menu_box));
+
+    let activated_clone = activated.clone();
+    let popover_for_insert = popover.clone();
+    insert.connect_clicked(move |_| {
+        activated_clone.set(true);
+        popover_for_insert.popdown();
+    });
+    let hidden_activated = Rc::new(Cell::new(false));
+    let hidden_seen = hidden_activated.clone();
+    hidden.connect_clicked(move |_| hidden_seen.set(true));
+    let popover_for_gesture = popover.clone();
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(3);
+    gesture.connect_pressed(move |_, _, _, _| popover_for_gesture.popup());
+    target.add_controller(gesture);
+
+    host.set_root(&root);
+    host.register_node(&target, node("editor", Role::Button, "Editor"));
+    harness.settle(4);
+
+    let session = harness.session();
+    session.attach_host("main", host);
+    let menu = session
+        .context_click_node(&SurfaceId::new("main"), &Selector::id_eq("editor"))
+        .expect("main surface should be attached")
+        .expect("context click should open the GTK popover menu");
+    let scene = menu.snapshot_scene();
+    assert!(scene
+        .find(&Selector::selector_eq("context-menu.title:Stale Command"))
+        .is_err());
+    assert!(scene
+        .find(&Selector::selector_eq("context-menu.title:Insert Table"))
+        .is_ok());
+    assert!(scene
+        .find(&Selector::selector_eq("context-menu.separator[1]"))
+        .is_ok());
+
+    assert!(matches!(
+        menu.activate_item(&Selector::selector_eq(
+            "context-menu.title:Disabled Command"
+        )),
+        Err(glasscheck_gtk::GtkContextMenuError::DisabledMenuItem)
+    ));
+    assert!(matches!(
+        menu.activate_item(&Selector::selector_eq("context-menu.title:Hidden Command")),
+        Err(glasscheck_gtk::GtkContextMenuError::HiddenMenuItem)
+    ));
+    assert!(!hidden_activated.get());
+
+    menu.activate_item(&Selector::selector_eq("context-menu.title:Insert Table"))
+        .expect("enabled GTK context menu item should activate");
+    assert!(activated.get());
+    menu.dismiss();
+    popover.unparent();
+    stale_popover.unparent();
+}
+
+fn context_click_node_without_menu_does_not_fall_back_after_semantic_gesture(harness: GtkHarness) {
+    let host = harness.create_window(220.0, 140.0);
+    let root = fixed_root(220, 140);
+    let target = gtk4::DrawingArea::new();
+    target.set_size_request(120, 48);
+    root.put(&target, 24.0, 24.0);
+
+    let releases = Rc::new(Cell::new(0usize));
+    let seen_releases = releases.clone();
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(3);
+    gesture.connect_released(move |_, _, _, _| {
+        seen_releases.set(seen_releases.get() + 1);
+    });
+    target.add_controller(gesture);
+
+    host.set_root(&root);
+    host.register_node(
+        &target,
+        node("gesture-no-menu", Role::Button, "Gesture No Menu"),
+    );
+    harness.settle(4);
+
+    let error = host
+        .context_click_node(&Selector::id_eq("gesture-no-menu"))
+        .expect_err("context-click gesture without a popover should report no menu");
+    harness.settle(4);
+
+    assert!(matches!(
+        error,
+        glasscheck_gtk::GtkContextMenuError::NoContextMenu
+    ));
+    assert_eq!(releases.get(), 1);
+}
+
+fn context_click_node_ignores_same_window_stale_popover(harness: GtkHarness) {
+    let host = harness.create_window(360.0, 180.0);
+    let root = fixed_root(360, 180);
+    let stale_target = gtk4::Button::with_label("Stale Editor");
+    stale_target.set_size_request(120, 32);
+    root.put(&stale_target, 16.0, 16.0);
+    let stale_popover = gtk4::Popover::new();
+    stale_popover.set_parent(&stale_target);
+    stale_popover.set_child(Some(&gtk4::Button::with_label("Stale Command")));
+
+    let target = gtk4::Button::with_label("Editor");
+    target.set_size_request(120, 32);
+    root.put(&target, 180.0, 16.0);
+    let target_popover = gtk4::Popover::new();
+    target_popover.set_parent(&target);
+    target_popover.set_child(Some(&gtk4::Button::with_label("Target Command")));
+    let popover_for_gesture = target_popover.clone();
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(3);
+    gesture.connect_pressed(move |_, _, _, _| popover_for_gesture.popup());
+    target.add_controller(gesture);
+
+    host.set_root(&root);
+    host.register_node(&target, node("editor", Role::Button, "Editor"));
+    harness.settle(4);
+    stale_popover.popup();
+    harness.settle(4);
+
+    let session = harness.session();
+    session.attach_host("main", host);
+    let menu = session
+        .context_click_node(&SurfaceId::new("main"), &Selector::id_eq("editor"))
+        .expect("main surface should be attached")
+        .expect("context click should open the target GTK popover menu");
+    let scene = menu.snapshot_scene();
+    assert!(scene
+        .find(&Selector::selector_eq("context-menu.title:Stale Command"))
+        .is_err());
+    assert!(scene
+        .find(&Selector::selector_eq("context-menu.title:Target Command"))
+        .is_ok());
+
+    menu.dismiss();
+    target_popover.unparent();
+    stale_popover.unparent();
+}
+
+fn dialog_methods_report_missing_surface(harness: GtkHarness) {
+    let session = harness.session();
+    let missing = SurfaceId::new("missing-dialog");
+
+    assert!(matches!(
+        session.dialog_kind(&missing),
+        Err(DialogError::MissingSurface)
+    ));
+    assert!(matches!(
+        session.snapshot_dialog_scene(&missing),
+        Err(DialogError::MissingSurface)
+    ));
+    assert!(matches!(
+        session.click_dialog_button(&missing, &Selector::role_eq(Role::Button)),
+        Err(DialogError::MissingSurface)
+    ));
+    assert!(matches!(
+        session.set_dialog_text(&missing, &Selector::role_eq(Role::TextInput), "ignored"),
+        Err(DialogError::MissingSurface)
+    ));
+    let save_path = std::env::temp_dir().join("glasscheck-missing-save.txt");
+    assert!(matches!(
+        session.choose_save_dialog_path(&missing, &save_path, PollOptions::default()),
+        Err(DialogError::MissingSurface)
+    ));
+    let open_paths = vec![std::env::temp_dir().join("glasscheck-missing-open.txt")];
+    assert!(matches!(
+        session.choose_open_dialog_paths(&missing, &open_paths, PollOptions::default()),
+        Err(DialogError::MissingSurface)
+    ));
+    assert!(matches!(
+        session.cancel_dialog(&missing, PollOptions::default()),
+        Err(DialogError::MissingSurface)
+    ));
+}
+
+fn cancel_dialog_reports_vetoed_close_as_poll_error(harness: GtkHarness) {
+    let dialog = gtk4::Dialog::builder()
+        .title("Vetoed GTK Dialog")
+        .default_width(160)
+        .default_height(80)
+        .build();
+    let veto_close = Rc::new(Cell::new(true));
+    let veto_count = Rc::new(Cell::new(0usize));
+    let veto_close_for_signal = veto_close.clone();
+    let veto_count_for_signal = veto_count.clone();
+    dialog.connect_close_request(move |_| {
+        if veto_close_for_signal.get() {
+            veto_count_for_signal.set(veto_count_for_signal.get() + 1);
+            gtk4::glib::Propagation::Stop
+        } else {
+            gtk4::glib::Propagation::Proceed
+        }
+    });
+    dialog.present();
+    harness.settle(4);
+
+    let session = harness.session();
+    session.attach_window("vetoed-dialog", dialog.upcast_ref::<gtk4::Window>());
+    assert!(matches!(
+        session.cancel_dialog(
+            &SurfaceId::new("vetoed-dialog"),
+            PollOptions {
+                timeout: Duration::from_millis(40),
+                interval: Duration::from_millis(5),
+            },
+        ),
+        Err(DialogError::Poll(_))
+    ));
+    assert!(session.surface_is_open(&SurfaceId::new("vetoed-dialog")));
+    assert_eq!(veto_count.get(), 1);
+
+    veto_close.set(false);
+    dialog.close();
+    harness.settle(4);
+}
+
+fn wait_for_dialog_discovers_matching_window(harness: GtkHarness) {
+    let hidden = gtk4::Dialog::builder()
+        .title("Target GTK Dialog")
+        .default_width(160)
+        .default_height(80)
+        .build();
+    let ignored = gtk4::Dialog::builder()
+        .title("Ignored GTK Dialog")
+        .default_width(160)
+        .default_height(80)
+        .build();
+    let target = gtk4::Dialog::builder()
+        .title("Target GTK Dialog")
+        .default_width(160)
+        .default_height(80)
+        .build();
+    ignored.present();
+    target.present();
+    harness.settle(4);
+
+    let session = harness.session();
+    session
+        .wait_for_dialog(
+            "target-dialog",
+            &DialogQuery::kind(DialogKind::Panel).title_contains("Target"),
+            PollOptions::default(),
+        )
+        .expect("session should discover only the matching dialog");
+    assert_eq!(
+        session
+            .dialog_kind(&SurfaceId::new("target-dialog"))
+            .unwrap(),
+        DialogKind::Panel
+    );
+    let scene = session
+        .snapshot_dialog_scene(&SurfaceId::new("target-dialog"))
+        .expect("discovered GTK dialog should snapshot");
+    assert_eq!(
+        scene
+            .node(scene.find(&Selector::id_eq("gtk.dialog")).unwrap())
+            .unwrap()
+            .label
+            .as_deref(),
+        Some("Target GTK Dialog")
+    );
+
+    session
+        .cancel_dialog(&SurfaceId::new("target-dialog"), PollOptions::default())
+        .expect("target dialog should close");
+    session
+        .wait_for_surface_closed(&SurfaceId::new("target-dialog"), PollOptions::default())
+        .expect("target dialog should be evicted after close");
+    assert!(!session.surface_is_open(&SurfaceId::new("target-dialog")));
+    hidden.close();
+    ignored.close();
+    harness.settle(2);
+}
+
+fn wait_for_dialog_classifies_alerts(harness: GtkHarness) {
+    let ordinary = gtk4::Window::builder()
+        .title("Target GTK Alert")
+        .default_width(160)
+        .default_height(80)
+        .build();
+    let alert = gtk4::MessageDialog::builder()
+        .title("Target GTK Alert")
+        .text("Discard changes?")
+        .modal(true)
+        .build();
+    let text_only_alert = gtk4::MessageDialog::builder()
+        .text("Unsaved changes")
+        .modal(true)
+        .build();
+    ordinary.present();
+    alert.present();
+    text_only_alert.present();
+    harness.settle(4);
+
+    let session = harness.session();
+    session
+        .wait_for_dialog(
+            "text-only-alert",
+            &DialogQuery::alert().title_eq("Unsaved changes"),
+            PollOptions::default(),
+        )
+        .expect("message text should be usable for alert discovery when title is absent");
+    assert_eq!(
+        session
+            .dialog_kind(&SurfaceId::new("text-only-alert"))
+            .unwrap(),
+        DialogKind::Alert
+    );
+    session
+        .cancel_dialog(&SurfaceId::new("text-only-alert"), PollOptions::default())
+        .expect("text-only alert should close");
+
+    session
+        .wait_for_dialog(
+            "target-alert",
+            &DialogQuery::alert().title_eq("Target GTK Alert"),
+            PollOptions::default(),
+        )
+        .expect("session should discover the alert and ignore ordinary windows");
+    assert_eq!(
+        session
+            .dialog_kind(&SurfaceId::new("target-alert"))
+            .unwrap(),
+        DialogKind::Alert
+    );
+
+    session
+        .cancel_dialog(&SurfaceId::new("target-alert"), PollOptions::default())
+        .expect("target alert should close");
+    ordinary.close();
+    harness.settle(2);
+}
+
+fn file_chooser_dialogs_classify_and_select_paths(harness: GtkHarness) {
+    let session = harness.session();
+    let temp = temp_test_dir("gtk-file-chooser");
+    let open_path = temp.join("input.txt");
+    fs::write(&open_path, "fixture").expect("open fixture should be writable");
+    let save_path = temp.join("output.txt");
+
+    let save_dialog = gtk4::FileChooserDialog::new(
+        Some("Save Fixture"),
+        None::<&gtk4::Window>,
+        gtk4::FileChooserAction::Save,
+        &[],
+    );
+    save_dialog.present();
+    harness.settle(4);
+    session
+        .wait_for_dialog(
+            "save-dialog",
+            &DialogQuery::save_panel().title_eq("Save Fixture"),
+            PollOptions::default(),
+        )
+        .expect("session should discover save file chooser dialogs");
+    assert_eq!(
+        session.dialog_kind(&SurfaceId::new("save-dialog")).unwrap(),
+        DialogKind::SavePanel
+    );
+    session
+        .choose_save_dialog_path(
+            &SurfaceId::new("save-dialog"),
+            &save_path,
+            PollOptions::default(),
+        )
+        .expect("save file chooser should accept deterministic path");
+    harness.settle(4);
+    assert_eq!(
+        save_dialog.current_folder().and_then(|file| file.path()),
+        Some(temp.clone())
+    );
+    assert_eq!(
+        save_dialog.current_name().map(|name| name.to_string()),
+        Some(String::from("output.txt"))
+    );
+    session
+        .cancel_dialog(&SurfaceId::new("save-dialog"), PollOptions::default())
+        .expect("save dialog should close");
+    session
+        .wait_for_surface_closed(&SurfaceId::new("save-dialog"), PollOptions::default())
+        .expect("save dialog should be evicted");
+
+    let open_dialog = gtk4::FileChooserDialog::new(
+        Some("Open Fixture"),
+        None::<&gtk4::Window>,
+        gtk4::FileChooserAction::Open,
+        &[],
+    );
+    open_dialog.present();
+    harness.settle(4);
+    session
+        .wait_for_dialog(
+            "open-dialog",
+            &DialogQuery::open_panel().title_eq("Open Fixture"),
+            PollOptions::default(),
+        )
+        .expect("session should discover open file chooser dialogs");
+    assert_eq!(
+        session.dialog_kind(&SurfaceId::new("open-dialog")).unwrap(),
+        DialogKind::OpenPanel
+    );
+    session
+        .choose_open_dialog_paths(
+            &SurfaceId::new("open-dialog"),
+            std::slice::from_ref(&open_path),
+            PollOptions::default(),
+        )
+        .expect("open file chooser should accept an existing path");
+    assert_eq!(
+        open_dialog.file().and_then(|file| file.path()),
+        Some(open_path.clone())
+    );
+
+    let missing = temp.join("missing.txt");
+    assert!(matches!(
+        session.choose_open_dialog_paths(
+            &SurfaceId::new("open-dialog"),
+            &[missing.clone()],
+            PollOptions::default(),
+        ),
+        Err(DialogError::MissingRequestedPath(path)) if path == missing
+    ));
+    let second = temp.join("second.txt");
+    fs::write(&second, "second").expect("second fixture should be writable");
+    assert!(matches!(
+        session.choose_open_dialog_paths(
+            &SurfaceId::new("open-dialog"),
+            &[open_path.clone(), second],
+            PollOptions::default(),
+        ),
+        Err(DialogError::UnsupportedLiveSelection(_))
+    ));
+    assert!(matches!(
+        session.choose_save_dialog_path(
+            &SurfaceId::new("open-dialog"),
+            &save_path,
+            PollOptions::default(),
+        ),
+        Err(DialogError::KindMismatch {
+            expected: DialogKind::SavePanel,
+            actual: DialogKind::OpenPanel
+        })
+    ));
+    session
+        .cancel_dialog(&SurfaceId::new("open-dialog"), PollOptions::default())
+        .expect("open dialog should close");
+    session
+        .wait_for_surface_closed(&SurfaceId::new("open-dialog"), PollOptions::default())
+        .expect("open dialog should be evicted");
+}
+
+fn custom_dialog_snapshots_and_drives_widgets(harness: GtkHarness) {
+    let dialog = gtk4::Dialog::builder()
+        .title("GTK Custom Dialog")
+        .default_width(240)
+        .default_height(120)
+        .build();
+    let root = fixed_root(240, 120);
+    let label = gtk4::Label::new(Some("Read Only Dialog Label"));
+    let entry = gtk4::Entry::new();
+    entry.set_text("draft");
+    let disabled_entry = gtk4::Entry::new();
+    disabled_entry.set_text("locked");
+    disabled_entry.set_sensitive(false);
+    let hidden_entry = gtk4::Entry::new();
+    hidden_entry.set_text("concealed");
+    hidden_entry.set_visible(false);
+    let button = gtk4::Button::with_label("Apply");
+    let disabled_button = gtk4::Button::with_label("Disabled Apply");
+    disabled_button.set_sensitive(false);
+    let hidden_button = gtk4::Button::with_label("Hidden Apply");
+    hidden_button.set_visible(false);
+    let activations = Rc::new(Cell::new(0usize));
+    let seen = activations.clone();
+    button.connect_clicked(move |_| seen.set(seen.get() + 1));
+    let disabled_activations = Rc::new(Cell::new(0usize));
+    let disabled_seen = disabled_activations.clone();
+    disabled_button.connect_clicked(move |_| disabled_seen.set(disabled_seen.get() + 1));
+    let hidden_activations = Rc::new(Cell::new(0usize));
+    let hidden_seen = hidden_activations.clone();
+    hidden_button.connect_clicked(move |_| hidden_seen.set(hidden_seen.get() + 1));
+    root.put(&label, 16.0, 16.0);
+    root.put(&entry, 16.0, 44.0);
+    root.put(&disabled_entry, 16.0, 78.0);
+    root.put(&hidden_entry, 16.0, 112.0);
+    root.put(&button, 16.0, 146.0);
+    root.put(&disabled_button, 16.0, 180.0);
+    root.put(&hidden_button, 16.0, 214.0);
+    dialog.set_child(Some(&root));
+    dialog.present();
+    harness.settle(4);
+
+    let session = harness.session();
+    session.attach_window("custom-dialog", dialog.upcast_ref::<gtk4::Window>());
+    assert_eq!(
+        session
+            .dialog_kind(&SurfaceId::new("custom-dialog"))
+            .unwrap(),
+        DialogKind::Panel
+    );
+
+    let scene = session
+        .snapshot_dialog_scene(&SurfaceId::new("custom-dialog"))
+        .expect("custom GTK dialog should snapshot");
+    let root_node = scene
+        .node(scene.find(&Selector::id_eq("gtk.dialog")).unwrap())
+        .unwrap();
+    assert_eq!(
+        root_node.properties.get("gtk:dialog_kind"),
+        Some(&PropertyValue::string("panel"))
+    );
+    assert!(scene
+        .find(&Selector::selector_eq(
+            "gtk.dialog.label.read.only.dialog.label"
+        ))
+        .is_ok());
+    assert_eq!(
+        scene
+            .resolve(&Selector::property_eq(
+                "gtk:name_field",
+                PropertyValue::string("draft"),
+            ))
+            .unwrap()
+            .node
+            .value
+            .as_deref(),
+        Some("draft")
+    );
+
+    session
+        .set_dialog_text(
+            &SurfaceId::new("custom-dialog"),
+            &Selector::property_eq("gtk:name_field", PropertyValue::string("draft")),
+            "ready",
+        )
+        .expect("dialog text field should be editable");
+    assert_eq!(entry.text().as_str(), "ready");
+
+    assert!(matches!(
+        session.set_dialog_text(
+            &SurfaceId::new("custom-dialog"),
+            &Selector::property_eq("gtk:name_field", PropertyValue::string("locked")),
+            "mutated",
+        ),
+        Err(DialogError::InputUnavailable)
+    ));
+    assert_eq!(disabled_entry.text().as_str(), "locked");
+
+    assert!(matches!(
+        session.set_dialog_text(
+            &SurfaceId::new("custom-dialog"),
+            &Selector::property_eq("gtk:name_field", PropertyValue::string("concealed")),
+            "mutated",
+        ),
+        Err(DialogError::InputUnavailable)
+    ));
+    assert_eq!(hidden_entry.text().as_str(), "concealed");
+
+    assert!(matches!(
+        session.click_dialog_button(
+            &SurfaceId::new("custom-dialog"),
+            &Selector::and(vec![
+                Selector::role_eq(Role::Button),
+                Selector::selector_eq("gtk.dialog.label.disabled.apply"),
+            ]),
+        ),
+        Err(DialogError::InputUnavailable)
+    ));
+    assert_eq!(disabled_activations.get(), 0);
+
+    assert!(matches!(
+        session.click_dialog_button(
+            &SurfaceId::new("custom-dialog"),
+            &Selector::and(vec![
+                Selector::role_eq(Role::Button),
+                Selector::selector_eq("gtk.dialog.label.hidden.apply"),
+            ]),
+        ),
+        Err(DialogError::InputUnavailable)
+    ));
+    assert_eq!(hidden_activations.get(), 0);
+
+    session
+        .click_dialog_button(
+            &SurfaceId::new("custom-dialog"),
+            &Selector::and(vec![
+                Selector::role_eq(Role::Button),
+                Selector::selector_eq("gtk.dialog.label.apply"),
+            ]),
+        )
+        .expect("dialog button should activate");
+    assert_eq!(activations.get(), 1);
+
+    session
+        .cancel_dialog(&SurfaceId::new("custom-dialog"), PollOptions::default())
+        .expect("custom GTK dialog should cancel");
+    session
+        .wait_for_surface_closed(&SurfaceId::new("custom-dialog"), PollOptions::default())
+        .expect("custom GTK dialog should be evicted after close");
+    assert!(!session.surface_is_open(&SurfaceId::new("custom-dialog")));
+}
+
+fn dialog_response_buttons_expose_button_roles(harness: GtkHarness) {
+    let dialog = gtk4::Dialog::builder()
+        .title("GTK Response Roles")
+        .default_width(240)
+        .default_height(120)
+        .build();
+    dialog.add_button("Cancel", gtk4::ResponseType::Cancel);
+    dialog.add_button("OK", gtk4::ResponseType::Ok);
+    dialog.present();
+    harness.settle(4);
+
+    let session = harness.session();
+    session.attach_window("response-dialog", dialog.upcast_ref::<gtk4::Window>());
+    let scene = session
+        .snapshot_dialog_scene(&SurfaceId::new("response-dialog"))
+        .expect("response dialog should snapshot");
+    let confirm = scene
+        .resolve(&Selector::property_eq(
+            "gtk:button_role",
+            PropertyValue::string("confirm"),
+        ))
+        .expect("confirm response button should be classified");
+    assert_eq!(confirm.node.label.as_deref(), Some("OK"));
+    let cancel = scene
+        .resolve(&Selector::property_eq(
+            "gtk:button_role",
+            PropertyValue::string("cancel"),
+        ))
+        .expect("cancel response button should be classified");
+    assert_eq!(cancel.node.label.as_deref(), Some("Cancel"));
+
+    session
+        .cancel_dialog(&SurfaceId::new("response-dialog"), PollOptions::default())
+        .expect("response dialog should close");
+    session
+        .wait_for_surface_closed(&SurfaceId::new("response-dialog"), PollOptions::default())
+        .expect("response dialog should be evicted after close");
+}
+
+fn async_dialog_controller_reports_capability_boundary(harness: GtkHarness) {
+    let session = harness.session();
+    session.attach_dialog_controller(
+        "async-alert",
+        GtkDialogController::new(DialogKind::Alert, "Async Alert"),
+    );
+
+    assert_eq!(
+        session.dialog_kind(&SurfaceId::new("async-alert")).unwrap(),
+        DialogKind::Alert
+    );
+    assert!(matches!(
+        session.snapshot_dialog_scene(&SurfaceId::new("async-alert")),
+        Err(DialogError::UnsupportedCapability(
+            DialogCapability::SceneSnapshot
+        ))
+    ));
+    assert!(matches!(
+        session.click_dialog_button(
+            &SurfaceId::new("async-alert"),
+            &Selector::role_eq(Role::Button)
+        ),
+        Err(DialogError::UnsupportedCapability(
+            DialogCapability::ButtonClick
+        ))
+    ));
+    assert!(matches!(
+        session.set_dialog_text(
+            &SurfaceId::new("async-alert"),
+            &Selector::role_eq(Role::TextInput),
+            "ignored",
+        ),
+        Err(DialogError::UnsupportedCapability(
+            DialogCapability::TextEdit
+        ))
+    ));
+    let save_path = std::env::temp_dir().join("glasscheck-async-save.txt");
+    assert!(matches!(
+        session.choose_save_dialog_path(
+            &SurfaceId::new("async-alert"),
+            &save_path,
+            PollOptions::default(),
+        ),
+        Err(DialogError::UnsupportedCapability(
+            DialogCapability::SavePathSelection
+        ))
+    ));
+    let open_paths = vec![std::env::temp_dir().join("glasscheck-async-open.txt")];
+    assert!(matches!(
+        session.choose_open_dialog_paths(
+            &SurfaceId::new("async-alert"),
+            &open_paths,
+            PollOptions::default(),
+        ),
+        Err(DialogError::UnsupportedCapability(
+            DialogCapability::OpenPathSelection
+        ))
+    ));
+    assert!(matches!(
+        session.cancel_dialog(&SurfaceId::new("async-alert"), PollOptions::default()),
+        Err(DialogError::UnsupportedCapability(DialogCapability::Cancel))
+    ));
+    assert!(session.surface_is_open(&SurfaceId::new("async-alert")));
+    assert_eq!(
+        session
+            .wait_for_surface_closed(&SurfaceId::new("async-alert"), PollOptions::default())
+            .expect("controller-only dialog metadata should evict immediately"),
+        0
+    );
+    assert!(!session.surface_is_open(&SurfaceId::new("async-alert")));
+    assert!(matches!(
+        session.dialog_kind(&SurfaceId::new("async-alert")),
+        Err(DialogError::MissingSurface)
+    ));
+}
+
 fn fixed_root(width: i32, height: i32) -> gtk4::Fixed {
     let root = gtk4::Fixed::new();
     root.set_size_request(width, height);
     root
+}
+
+fn temp_test_dir(label: &str) -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("glasscheck-{label}-{stamp}"));
+    fs::create_dir_all(&path).expect("temp test directory should be creatable");
+    path
 }
 
 fn install_css(widget: &impl IsA<gtk4::Widget>, css: &str) {
