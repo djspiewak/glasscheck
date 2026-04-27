@@ -15,13 +15,21 @@ glasscheck-core = { path = "../glasscheck-core" }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication",
+    "NSActionCell",
     "NSBezierPath",
     "NSButton",
+    "NSButtonCell",
+    "NSCell",
     "NSColor",
     "NSControl",
     "NSFont",
     "NSFontManager",
     "NSGradient",
+    "NSGraphicsContext",
+    "NSImageRep",
+    "NSMenu",
+    "NSMenuItem",
+    "NSMenuItemCell",
     "NSRunningApplication",
     "NSView",
     "NSWindow",
@@ -33,7 +41,6 @@ objc2-app-kit = { version = "0.3", features = [
     "NSSplitView",
     "NSScreen",
     "NSBitmapImageRep",
-    "NSGraphicsContext",
     "NSUserInterfaceItemIdentification",
 ] }
 block2 = "0.6"

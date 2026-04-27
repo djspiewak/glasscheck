@@ -8,6 +8,7 @@ mod imp {
     use objc2_app_kit::{NSView, NSWindow};
     use objc2_foundation::{MainThreadMarker, NSDate, NSRunLoop};
 
+    use crate::menu::AppKitMenuBar;
     use crate::session::AppKitSession;
     use crate::window::AppKitWindowHost;
 
@@ -108,6 +109,12 @@ mod imp {
         #[must_use]
         pub fn session(&self) -> AppKitSession {
             AppKitSession::new(*self)
+        }
+
+        /// Returns a driver for inspecting, rendering, and activating the AppKit main menu.
+        #[must_use]
+        pub fn menu_bar(&self) -> AppKitMenuBar {
+            AppKitMenuBar::new(self.mtm)
         }
 
         /// Runs the AppKit run loop for the given duration.

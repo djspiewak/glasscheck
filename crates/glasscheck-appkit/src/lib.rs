@@ -7,10 +7,15 @@
 //! instrumentation. Prefer `AppKitHarness` as the entry point: it owns the
 //! AppKit main-thread capability for window creation and attachment, while
 //! post-mount host operations such as `text_renderer()` remain marker-free.
+//!
+//! `AppKitHarness::menu_bar()` exposes `NSApplication.mainMenu` for semantic
+//! assertions, offscreen menu capture, and AppKit menu-item activation without
+//! showing a native menu popup on the default capture path.
 
 mod capture;
 mod harness;
 mod input;
+mod menu;
 mod screen;
 mod session;
 mod text;
@@ -20,6 +25,10 @@ pub use capture::capture_view_image;
 pub use glasscheck_core::{HitPointSearch, HitPointStrategy, InstrumentedNode};
 pub use harness::AppKitHarness;
 pub use input::AppKitInputDriver;
+pub use menu::{
+    AppKitMenuBar, AppKitMenuCapture, AppKitMenuCaptureOptions, AppKitMenuError, AppKitMenuTarget,
+    AppKitOpenedMenu,
+};
 pub use session::AppKitSession;
 pub use text::{AppKitAnchoredTextError, AppKitTextError, AppKitTextHarness};
 pub use window::{AppKitSceneSource, AppKitSnapshotContext, AppKitWindowHost, InstrumentedView};

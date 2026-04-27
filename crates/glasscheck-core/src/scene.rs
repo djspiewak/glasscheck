@@ -20,6 +20,12 @@ const HIT_RECT_HEIGHT_PROPERTY: &str = "glasscheck:hit_rect_height";
 pub enum Role {
     /// A top-level window.
     Window,
+    /// A native or application-level menu bar.
+    MenuBar,
+    /// A menu or submenu container.
+    Menu,
+    /// A selectable item within a menu.
+    MenuItem,
     /// A generic container.
     Container,
     /// A clickable button-like control.

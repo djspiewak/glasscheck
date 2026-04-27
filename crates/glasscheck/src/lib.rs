@@ -5,7 +5,8 @@
 //! both portable assertions and platform-specific window hosting, capture, and
 //! input helpers for graphical native UIs rather than browser-based UIs. This
 //! is the intended dependency for most users. Supported native backends are
-//! AppKit on macOS and GTK4 on Linux.
+//! AppKit on macOS and GTK4 on Linux. When the AppKit backend is enabled on
+//! macOS, this crate also re-exports the AppKit main-menu testing APIs.
 
 pub use glasscheck_core::*;
 

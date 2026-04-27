@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use block2::RcBlock;
 use glasscheck_appkit::{
-    AppKitHarness, AppKitSceneSource, AppKitSnapshotContext, HitPointSearch, HitPointStrategy,
-    InstrumentedView,
+    AppKitHarness, AppKitMenuCaptureOptions, AppKitMenuError, AppKitMenuTarget, AppKitSceneSource,
+    AppKitSnapshotContext, HitPointSearch, HitPointStrategy, InstrumentedView,
 };
 use glasscheck_core::{
     assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
@@ -17,14 +17,17 @@ use glasscheck_core::{
     TransientSurfaceSpec,
 };
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{
-    NSBezierPath, NSButton, NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSFont,
-    NSTextInputClient, NSTextView, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
-    NSWindowOrderingMode,
+    NSApplication, NSApplicationDelegate, NSBezierPath, NSButton, NSColor,
+    NSControlStateValueMixed, NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags,
+    NSFont, NSMenu, NSMenuItem, NSTextInputClient, NSTextView, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowOrderingMode,
 };
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
+};
 
 fn main() {
     let mtm = MainThreadMarker::new().expect("AppKit tests must run on the main thread");
@@ -378,6 +381,25 @@ fn main() {
     run("key_press_queued_carries_modifier_flags", || {
         key_press_queued_carries_modifier_flags(harness)
     });
+    run("main_menu_snapshot_reports_native_hierarchy", || {
+        main_menu_snapshot_reports_native_hierarchy(harness)
+    });
+    run("main_menu_open_targets_cover_success_and_errors", || {
+        main_menu_open_targets_cover_success_and_errors(harness)
+    });
+    run("opened_menu_capture_renders_offscreen_pixels", || {
+        opened_menu_capture_renders_offscreen_pixels(harness)
+    });
+    run("opened_menu_capture_rects_use_image_coordinates", || {
+        opened_menu_capture_rects_use_image_coordinates(harness)
+    });
+    run("opened_menu_highlighted_capture_changes_pixels", || {
+        opened_menu_highlighted_capture_changes_pixels(harness)
+    });
+    run(
+        "opened_menu_activation_invokes_action_and_rejects_invalid_items",
+        || opened_menu_activation_invokes_action_and_rejects_invalid_items(harness),
+    );
 }
 
 fn run(name: &str, test: impl FnOnce()) {
@@ -395,6 +417,470 @@ fn run(name: &str, test: impl FnOnce()) {
             std::panic::resume_unwind(error);
         }
     }
+}
+
+fn main_menu_snapshot_reports_native_hierarchy(harness: AppKitHarness) {
+    let fixture = MenuFixture::install(harness.main_thread_marker());
+    let scene = harness
+        .menu_bar()
+        .snapshot()
+        .expect("menu bar snapshot should read NSApplication.mainMenu");
+
+    let bar = scene
+        .resolve(&Selector::selector_eq("menu.bar"))
+        .expect("menu bar root should be queryable");
+    assert_eq!(bar.node.role, Role::MenuBar);
+    assert!(bar.node.visible);
+    assert_eq!(bar.node.visible_rect, Some(bar.node.rect));
+    assert!(bar.node.hit_testable);
+
+    let file = scene
+        .resolve(&Selector::selector_eq("menu.title.file"))
+        .expect("File menu should be queryable");
+    assert_eq!(file.node.role, Role::Menu);
+    assert_eq!(file.node.label.as_deref(), Some("File"));
+    assert_eq!(
+        file.node.state.get("enabled"),
+        Some(&PropertyValue::Bool(true))
+    );
+    assert_eq!(
+        file.node.state.get("hidden"),
+        Some(&PropertyValue::Bool(false))
+    );
+    assert!(file.node.visible);
+    assert_eq!(file.node.visible_rect, Some(file.node.rect));
+    assert!(file.node.hit_testable);
+
+    let leaf_top = scene
+        .resolve(&Selector::selector_eq("menu.title.leaf-top"))
+        .expect("top-level item without submenu should be queryable");
+    assert!(leaf_top.node.visible);
+    assert_eq!(leaf_top.node.visible_rect, Some(leaf_top.node.rect));
+    assert!(leaf_top.node.hit_testable);
+
+    let disabled_top = scene
+        .resolve(&Selector::selector_eq("menu.title.disabled-top"))
+        .expect("disabled top-level menu should be queryable");
+    assert_eq!(
+        disabled_top.node.state.get("enabled"),
+        Some(&PropertyValue::Bool(false))
+    );
+    assert!(disabled_top.node.visible);
+    assert_eq!(disabled_top.node.visible_rect, Some(disabled_top.node.rect));
+    assert!(!disabled_top.node.hit_testable);
+
+    let hidden_top = scene
+        .resolve(&Selector::selector_eq("menu.title.hidden-top"))
+        .expect("hidden top-level menu should be queryable");
+    assert_eq!(
+        hidden_top.node.state.get("hidden"),
+        Some(&PropertyValue::Bool(true))
+    );
+    assert!(!hidden_top.node.visible);
+    assert_eq!(hidden_top.node.visible_rect, None);
+    assert!(!hidden_top.node.hit_testable);
+
+    let new_item = scene
+        .resolve(&Selector::selector_eq("menu.item.path.file.new"))
+        .expect("New menu item should be queryable");
+    assert_eq!(new_item.node.role, Role::MenuItem);
+    assert_eq!(
+        new_item.node.properties.get("key_equivalent"),
+        Some(&PropertyValue::string("n"))
+    );
+    assert_eq!(
+        new_item.node.properties.get("key_modifiers"),
+        Some(&PropertyValue::string("cmd"))
+    );
+    assert!(!new_item.node.visible);
+    assert_eq!(new_item.node.visible_rect, None);
+    assert!(!new_item.node.hit_testable);
+
+    let disabled = scene
+        .resolve(&Selector::selector_eq("menu.item.path.file.open"))
+        .expect("disabled menu item should be queryable");
+    assert_eq!(
+        disabled.node.state.get("enabled"),
+        Some(&PropertyValue::Bool(false))
+    );
+    assert!(!disabled.node.hit_testable);
+
+    let hidden = scene
+        .resolve(&Selector::selector_eq("menu.item.path.file.secret"))
+        .expect("hidden menu item should be queryable");
+    assert_eq!(
+        hidden.node.state.get("hidden"),
+        Some(&PropertyValue::Bool(true))
+    );
+    assert!(!hidden.node.visible);
+
+    let checked = scene
+        .resolve(&Selector::selector_eq("menu.item.path.file.autosave"))
+        .expect("checked menu item should be queryable");
+    assert_eq!(
+        checked.node.state.get("checked"),
+        Some(&PropertyValue::Bool(true))
+    );
+
+    let mixed = scene
+        .resolve(&Selector::selector_eq("menu.item.path.file.mixed-state"))
+        .expect("mixed menu item should be queryable");
+    assert_eq!(
+        mixed.node.state.get("mixed"),
+        Some(&PropertyValue::Bool(true))
+    );
+
+    let submenu = scene
+        .resolve(&Selector::selector_eq("menu.item.path.file.export"))
+        .expect("submenu item should be queryable");
+    assert_eq!(
+        submenu.node.properties.get("has_submenu"),
+        Some(&PropertyValue::Bool(true))
+    );
+    assert!(!submenu.node.visible);
+    assert_eq!(submenu.node.visible_rect, None);
+    assert!(!submenu.node.hit_testable);
+
+    let export_container = scene
+        .resolve(&Selector::selector_eq("menu.title.export"))
+        .expect("submenu container should remain semantically queryable");
+    assert_eq!(export_container.node.role, Role::Menu);
+    assert!(!export_container.node.visible);
+    assert_eq!(export_container.node.visible_rect, None);
+    assert!(!export_container.node.hit_testable);
+
+    assert_eq!(fixture.activations.get(), 0);
+}
+
+fn main_menu_open_targets_cover_success_and_errors(harness: AppKitHarness) {
+    let fixture = MenuFixture::install(harness.main_thread_marker());
+    let menu_bar = harness.menu_bar();
+
+    assert!(menu_bar
+        .open(AppKitMenuTarget::Title("File".into()))
+        .expect("File menu should open by title")
+        .snapshot()
+        .expect("opened File menu should snapshot")
+        .exists(&Selector::selector_eq("menu.item.path.file.new")));
+    assert!(menu_bar
+        .open(AppKitMenuTarget::Index(0))
+        .expect("File menu should open by index")
+        .snapshot()
+        .expect("opened File menu should snapshot")
+        .exists(&Selector::selector_eq("menu.item.path.file.new")));
+    assert!(menu_bar
+        .open(AppKitMenuTarget::Selector(Selector::selector_eq(
+            "menu.title.file"
+        )))
+        .expect("File menu should open by selector")
+        .snapshot()
+        .expect("opened File menu should snapshot")
+        .exists(&Selector::selector_eq("menu.item.path.file.new")));
+    assert!(menu_bar
+        .open(AppKitMenuTarget::Title("Edit".into()))
+        .expect("Edit menu should open by title")
+        .snapshot()
+        .expect("opened Edit menu should snapshot")
+        .exists(&Selector::selector_eq("menu.title.edit")));
+    assert!(menu_bar
+        .open(AppKitMenuTarget::Index(1))
+        .expect("Edit menu should open by index")
+        .snapshot()
+        .expect("opened Edit menu should snapshot")
+        .exists(&Selector::selector_eq("menu.title.edit")));
+    assert!(menu_bar
+        .open(AppKitMenuTarget::Selector(Selector::selector_eq(
+            "menu.title.edit"
+        )))
+        .expect("Edit menu should open by selector")
+        .snapshot()
+        .expect("opened Edit menu should snapshot")
+        .exists(&Selector::selector_eq("menu.title.edit")));
+
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Title("Missing".into())),
+        Err(AppKitMenuError::MenuNotFound(AppKitMenuTarget::Title(title))) if title == "Missing"
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Index(99)),
+        Err(AppKitMenuError::MenuNotFound(AppKitMenuTarget::Index(99)))
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Selector(Selector::selector_eq(
+            "menu.item.path.file.new"
+        ))),
+        Err(AppKitMenuError::InvalidMenuTarget(
+            AppKitMenuTarget::Selector(_)
+        ))
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Selector(Selector::selector_eq(
+            "menu.title.missing"
+        ))),
+        Err(AppKitMenuError::MenuNotFound(AppKitMenuTarget::Selector(_)))
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Selector(Selector::role_eq(Role::Menu))),
+        Err(AppKitMenuError::AmbiguousMenuTarget { count, .. }) if count > 1
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Title("Leaf Top".into())),
+        Err(AppKitMenuError::MissingSubmenu(title)) if title == "Leaf Top"
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Index(2)),
+        Err(AppKitMenuError::MissingSubmenu(title)) if title == "Leaf Top"
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Selector(Selector::selector_eq(
+            "menu.title.leaf-top"
+        ))),
+        Err(AppKitMenuError::MissingSubmenu(title)) if title == "Leaf Top"
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Title("Disabled Top".into())),
+        Err(AppKitMenuError::ItemDisabled(title)) if title == "Disabled Top"
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Index(3)),
+        Err(AppKitMenuError::ItemDisabled(title)) if title == "Disabled Top"
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Selector(Selector::selector_eq(
+            "menu.title.disabled-top"
+        ))),
+        Err(AppKitMenuError::ItemDisabled(title)) if title == "Disabled Top"
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Title("Hidden Top".into())),
+        Err(AppKitMenuError::ItemHidden(title)) if title == "Hidden Top"
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Index(4)),
+        Err(AppKitMenuError::ItemHidden(title)) if title == "Hidden Top"
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Selector(Selector::selector_eq(
+            "menu.title.hidden-top"
+        ))),
+        Err(AppKitMenuError::ItemHidden(title)) if title == "Hidden Top"
+    ));
+
+    drop(fixture);
+    let _cleared = ClearedMenuFixture::install(harness.main_thread_marker());
+    assert!(matches!(
+        menu_bar.snapshot(),
+        Err(AppKitMenuError::MissingMainMenu)
+    ));
+    assert!(matches!(
+        menu_bar.open(AppKitMenuTarget::Title("File".into())),
+        Err(AppKitMenuError::MissingMainMenu)
+    ));
+}
+
+fn opened_menu_capture_renders_offscreen_pixels(harness: AppKitHarness) {
+    let _fixture = MenuFixture::install(harness.main_thread_marker());
+    let opened = harness
+        .menu_bar()
+        .open(AppKitMenuTarget::Title("File".into()))
+        .expect("File menu should open");
+
+    let capture = opened
+        .capture(&AppKitMenuCaptureOptions::default())
+        .expect("default capture should render offscreen");
+
+    assert!(capture.image.width >= 160);
+    assert!(capture.image.height >= 80);
+    assert!(
+        capture
+            .image
+            .data
+            .chunks_exact(4)
+            .any(|pixel| pixel[3] > 0 && (pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)),
+        "offscreen capture should contain visible menu pixels"
+    );
+    assert!(capture
+        .scene
+        .exists(&Selector::selector_eq("menu.item.path.file.new")));
+    let pdf = capture
+        .scene
+        .resolve(&Selector::selector_eq("menu.item.path.file.export.pdf"))
+        .expect("submenu descendant should remain semantically queryable");
+    assert!(!pdf.node.visible);
+    assert_eq!(pdf.node.visible_rect, None);
+    assert!(!pdf.node.hit_testable);
+    let export_submenu = capture
+        .scene
+        .resolve(&Selector::selector_eq("menu.title.export"))
+        .expect("submenu container should remain semantically queryable");
+    assert_eq!(export_submenu.node.role, Role::Menu);
+    assert!(!export_submenu.node.visible);
+    assert_eq!(export_submenu.node.visible_rect, None);
+    assert!(!export_submenu.node.hit_testable);
+}
+
+fn opened_menu_capture_rects_use_image_coordinates(harness: AppKitHarness) {
+    let _fixture = MenuFixture::install(harness.main_thread_marker());
+    let opened = harness
+        .menu_bar()
+        .open(AppKitMenuTarget::Title("File".into()))
+        .expect("File menu should open");
+
+    let capture = opened
+        .capture(&AppKitMenuCaptureOptions::default())
+        .expect("default capture should render offscreen");
+    let new_item = capture
+        .scene
+        .resolve(&Selector::selector_eq("menu.item.path.file.new"))
+        .expect("New item should remain queryable");
+    let open_item = capture
+        .scene
+        .resolve(&Selector::selector_eq("menu.item.path.file.open"))
+        .expect("Open item should remain queryable");
+
+    assert!(
+        new_item.node.rect.origin.y < open_item.node.rect.origin.y,
+        "image-space menu rows should increase downward: New={:?}, Open={:?}",
+        new_item.node.rect,
+        open_item.node.rect
+    );
+    assert_eq!(new_item.node.visible_rect, Some(new_item.node.rect));
+    assert_eq!(open_item.node.visible_rect, Some(open_item.node.rect));
+    assert!(new_item.node.visible);
+    assert!(new_item.node.hit_testable);
+    assert!(new_item.node.rect.origin.y >= 0.0);
+    assert!(open_item.node.rect.origin.y >= 0.0);
+    assert!(
+        new_item.node.rect.origin.y + new_item.node.rect.size.height <= capture.image.height as f64
+    );
+    assert!(
+        open_item.node.rect.origin.y + open_item.node.rect.size.height
+            <= capture.image.height as f64
+    );
+}
+
+fn opened_menu_highlighted_capture_changes_pixels(harness: AppKitHarness) {
+    let _fixture = MenuFixture::install(harness.main_thread_marker());
+    let opened = harness
+        .menu_bar()
+        .open(AppKitMenuTarget::Title("File".into()))
+        .expect("File menu should open");
+
+    let plain = opened
+        .capture(&AppKitMenuCaptureOptions::default())
+        .expect("plain capture should render offscreen");
+    let highlighted = opened
+        .capture(&AppKitMenuCaptureOptions {
+            highlighted_item: Some(Selector::selector_eq("menu.item.path.file.new")),
+            allow_visible_fallback: false,
+        })
+        .expect("highlighted capture should render offscreen");
+
+    assert_ne!(plain.image, highlighted.image);
+    let node = highlighted
+        .scene
+        .resolve(&Selector::selector_eq("menu.item.path.file.new"))
+        .expect("highlighted item should remain queryable");
+    assert_eq!(
+        node.node.state.get("highlighted"),
+        Some(&PropertyValue::Bool(true))
+    );
+    let highlighted_rect = node
+        .node
+        .visible_rect
+        .expect("highlighted item should have an image-space visible rect");
+    let plain_average = plain.image.average_rgba(highlighted_rect);
+    let highlighted_average = highlighted.image.average_rgba(highlighted_rect);
+    let average_delta = plain_average
+        .iter()
+        .zip(highlighted_average.iter())
+        .map(|(plain, highlighted)| (plain - highlighted).abs())
+        .sum::<f64>();
+    assert!(
+        average_delta > 10.0,
+        "highlighted visible rect should sample changed pixels: plain={plain_average:?}, highlighted={highlighted_average:?}"
+    );
+
+    let submenu_child = Selector::selector_eq("menu.item.path.file.export.pdf");
+    assert!(matches!(
+        opened.capture(&AppKitMenuCaptureOptions {
+            highlighted_item: Some(submenu_child.clone()),
+            allow_visible_fallback: false,
+        }),
+        Err(AppKitMenuError::HighlightTargetNotRendered(selector)) if selector == submenu_child
+    ));
+
+    let hidden_item = Selector::selector_eq("menu.item.path.file.secret");
+    assert!(matches!(
+        opened.capture(&AppKitMenuCaptureOptions {
+            highlighted_item: Some(hidden_item.clone()),
+            allow_visible_fallback: false,
+        }),
+        Err(AppKitMenuError::HighlightTargetNotRendered(selector)) if selector == hidden_item
+    ));
+}
+
+fn opened_menu_activation_invokes_action_and_rejects_invalid_items(harness: AppKitHarness) {
+    let fixture = MenuFixture::install(harness.main_thread_marker());
+    let delegate_fixture = MenuDelegateFixture::install(harness.main_thread_marker());
+    harness.settle(2);
+
+    let opened = harness
+        .menu_bar()
+        .open(AppKitMenuTarget::Title("File".into()))
+        .expect("File menu should open");
+
+    opened
+        .activate(&Selector::selector_eq("menu.item.path.file.new"))
+        .expect("enabled visible item should activate");
+    assert_eq!(fixture.activations.get(), 1);
+
+    opened
+        .activate(&Selector::selector_eq(
+            "menu.item.path.file.responder-action",
+        ))
+        .expect("targetless responder-chain item should activate");
+    assert_eq!(delegate_fixture.activations.get(), 1);
+    assert_eq!(fixture.activations.get(), 1);
+
+    assert!(matches!(
+        opened.activate(&Selector::selector_eq("menu.item.path.file.open")),
+        Err(AppKitMenuError::ItemDisabled(title)) if title == "Open..."
+    ));
+    assert!(matches!(
+        opened.activate(&Selector::selector_eq("menu.item.path.file.secret")),
+        Err(AppKitMenuError::ItemHidden(title)) if title == "Secret"
+    ));
+    assert!(matches!(
+        opened.activate(&Selector::selector_eq("menu.item.path.file.separator-4")),
+        Err(AppKitMenuError::SeparatorActivation(_))
+    ));
+    assert!(matches!(
+        opened.activate(&Selector::selector_eq("menu.item.path.file.export")),
+        Err(AppKitMenuError::NonActionableItem(title)) if title == "Export"
+    ));
+    let submenu_child = Selector::selector_eq("menu.item.path.file.export.pdf");
+    assert!(matches!(
+        opened.activate(&submenu_child),
+        Err(AppKitMenuError::ActivationTargetNotRendered(selector)) if selector == submenu_child
+    ));
+    assert!(matches!(
+        opened.activate(&Selector::label(glasscheck_core::TextMatch::exact(
+            "Duplicate"
+        ))),
+        Err(AppKitMenuError::AmbiguousItemTarget { count: 2, .. })
+    ));
+    assert!(matches!(
+        opened.activate(&Selector::selector_eq(
+            "menu.item.path.file.missing-target"
+        )),
+        Err(AppKitMenuError::ActionTargetNotFound(title)) if title == "Missing Target"
+    ));
+    assert!(matches!(
+        opened.activate(&Selector::selector_eq("menu.item.path.file.missing")),
+        Err(AppKitMenuError::ItemNotFound(_))
+    ));
+    assert_eq!(fixture.activations.get(), 1);
 }
 
 fn attach_to_existing_window_builds_scene_snapshot(harness: AppKitHarness) {
@@ -4378,6 +4864,312 @@ impl ButtonActionTarget {
         let this = Self::alloc(mtm).set_ivars(ButtonActionIvars::default());
         unsafe { msg_send![super(this), init] }
     }
+}
+
+struct MenuActionIvars {
+    activations: Rc<Cell<usize>>,
+}
+
+define_class!(
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = MenuActionIvars]
+    struct MenuActionTarget;
+
+    impl MenuActionTarget {
+        #[unsafe(method(performMenuAction:))]
+        fn perform_menu_action(&self, _sender: Option<&AnyObject>) {
+            self.ivars()
+                .activations
+                .set(self.ivars().activations.get() + 1);
+        }
+    }
+);
+
+impl MenuActionTarget {
+    fn new(mtm: MainThreadMarker, activations: Rc<Cell<usize>>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(MenuActionIvars { activations });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+struct MenuActionDelegateIvars {
+    activations: Rc<Cell<usize>>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = MenuActionDelegateIvars]
+    struct MenuActionDelegate;
+
+    unsafe impl NSObjectProtocol for MenuActionDelegate {}
+
+    unsafe impl NSApplicationDelegate for MenuActionDelegate {}
+
+    impl MenuActionDelegate {
+        #[unsafe(method(performMenuAction:))]
+        fn perform_menu_action(&self, _sender: Option<&AnyObject>) {
+            self.ivars()
+                .activations
+                .set(self.ivars().activations.get() + 1);
+        }
+    }
+);
+
+impl MenuActionDelegate {
+    fn new(mtm: MainThreadMarker, activations: Rc<Cell<usize>>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(MenuActionDelegateIvars { activations });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+struct MenuDelegateFixture {
+    mtm: MainThreadMarker,
+    previous_delegate: Option<Retained<ProtocolObject<dyn NSApplicationDelegate>>>,
+    activations: Rc<Cell<usize>>,
+    #[allow(dead_code)]
+    delegate: Retained<MenuActionDelegate>,
+}
+
+impl MenuDelegateFixture {
+    fn install(mtm: MainThreadMarker) -> Self {
+        let app = NSApplication::sharedApplication(mtm);
+        let previous_delegate = app.delegate();
+        let activations = Rc::new(Cell::new(0));
+        let delegate = MenuActionDelegate::new(mtm, activations.clone());
+        app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+
+        Self {
+            mtm,
+            previous_delegate,
+            activations,
+            delegate,
+        }
+    }
+}
+
+impl Drop for MenuDelegateFixture {
+    fn drop(&mut self) {
+        let app = NSApplication::sharedApplication(self.mtm);
+        app.setDelegate(self.previous_delegate.as_deref());
+    }
+}
+
+struct MenuFixture {
+    mtm: MainThreadMarker,
+    previous_main_menu: Option<Retained<NSMenu>>,
+    activations: Rc<Cell<usize>>,
+    #[allow(dead_code)]
+    target: Retained<MenuActionTarget>,
+    #[allow(dead_code)]
+    main_menu: Retained<NSMenu>,
+}
+
+struct ClearedMenuFixture {
+    mtm: MainThreadMarker,
+    previous_main_menu: Option<Retained<NSMenu>>,
+}
+
+impl ClearedMenuFixture {
+    fn install(mtm: MainThreadMarker) -> Self {
+        let app = NSApplication::sharedApplication(mtm);
+        let previous_main_menu = app.mainMenu();
+        app.setMainMenu(None);
+        Self {
+            mtm,
+            previous_main_menu,
+        }
+    }
+}
+
+impl Drop for ClearedMenuFixture {
+    fn drop(&mut self) {
+        let app = NSApplication::sharedApplication(self.mtm);
+        app.setMainMenu(self.previous_main_menu.as_deref());
+    }
+}
+
+impl MenuFixture {
+    fn install(mtm: MainThreadMarker) -> Self {
+        let app = NSApplication::sharedApplication(mtm);
+        let previous_main_menu = app.mainMenu();
+        let activations = Rc::new(Cell::new(0));
+        let target = MenuActionTarget::new(mtm, activations.clone());
+        let main_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Main"));
+        main_menu.setAutoenablesItems(false);
+
+        let file_item = make_menu_item(mtm, "File", None, "", None);
+        let file_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("File"));
+        file_menu.setAutoenablesItems(false);
+        main_menu.addItem(&file_item);
+        main_menu.setSubmenu_forItem(Some(&file_menu), &file_item);
+
+        let new_item = make_menu_item(
+            mtm,
+            "New",
+            Some(target.as_ref()),
+            "n",
+            Some(sel!(performMenuAction:)),
+        );
+        file_menu.addItem(&new_item);
+
+        let responder_item = make_menu_item(
+            mtm,
+            "Responder Action",
+            None,
+            "",
+            Some(sel!(performMenuAction:)),
+        );
+        file_menu.addItem(&responder_item);
+
+        let open_item = make_menu_item(
+            mtm,
+            "Open...",
+            Some(target.as_ref()),
+            "o",
+            Some(sel!(performMenuAction:)),
+        );
+        open_item.setEnabled(false);
+        file_menu.addItem(&open_item);
+
+        let missing_target_item = make_menu_item(
+            mtm,
+            "Missing Target",
+            None,
+            "",
+            Some(sel!(missingMenuAction:)),
+        );
+        file_menu.addItem(&missing_target_item);
+
+        file_menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+        let autosave_item = make_menu_item(
+            mtm,
+            "Autosave",
+            Some(target.as_ref()),
+            "",
+            Some(sel!(performMenuAction:)),
+        );
+        autosave_item.setState(NSControlStateValueOn);
+        file_menu.addItem(&autosave_item);
+
+        let mixed_item = make_menu_item(
+            mtm,
+            "Mixed State",
+            Some(target.as_ref()),
+            "",
+            Some(sel!(performMenuAction:)),
+        );
+        mixed_item.setState(NSControlStateValueMixed);
+        file_menu.addItem(&mixed_item);
+
+        let secret_item = make_menu_item(
+            mtm,
+            "Secret",
+            Some(target.as_ref()),
+            "",
+            Some(sel!(performMenuAction:)),
+        );
+        secret_item.setHidden(true);
+        file_menu.addItem(&secret_item);
+
+        let export_item = make_menu_item(mtm, "Export", None, "", None);
+        let export_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Export"));
+        export_menu.setAutoenablesItems(false);
+        let pdf_item = make_menu_item(
+            mtm,
+            "PDF",
+            Some(target.as_ref()),
+            "",
+            Some(sel!(performMenuAction:)),
+        );
+        export_menu.addItem(&pdf_item);
+        file_menu.addItem(&export_item);
+        file_menu.setSubmenu_forItem(Some(&export_menu), &export_item);
+
+        let duplicate_a = make_menu_item(
+            mtm,
+            "Duplicate",
+            Some(target.as_ref()),
+            "",
+            Some(sel!(performMenuAction:)),
+        );
+        let duplicate_b = make_menu_item(
+            mtm,
+            "Duplicate",
+            Some(target.as_ref()),
+            "",
+            Some(sel!(performMenuAction:)),
+        );
+        file_menu.addItem(&duplicate_a);
+        file_menu.addItem(&duplicate_b);
+
+        let edit_item = make_menu_item(mtm, "Edit", None, "", None);
+        let edit_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Edit"));
+        main_menu.addItem(&edit_item);
+        main_menu.setSubmenu_forItem(Some(&edit_menu), &edit_item);
+
+        let leaf_item = make_menu_item(mtm, "Leaf Top", None, "", None);
+        main_menu.addItem(&leaf_item);
+
+        let disabled_item = make_menu_item(mtm, "Disabled Top", None, "", None);
+        let disabled_menu =
+            NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Disabled Top"));
+        disabled_item.setEnabled(false);
+        main_menu.addItem(&disabled_item);
+        main_menu.setSubmenu_forItem(Some(&disabled_menu), &disabled_item);
+
+        let hidden_item = make_menu_item(mtm, "Hidden Top", None, "", None);
+        let hidden_menu =
+            NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Hidden Top"));
+        hidden_item.setHidden(true);
+        main_menu.addItem(&hidden_item);
+        main_menu.setSubmenu_forItem(Some(&hidden_menu), &hidden_item);
+
+        app.setMainMenu(Some(&main_menu));
+
+        Self {
+            mtm,
+            previous_main_menu,
+            activations,
+            target,
+            main_menu,
+        }
+    }
+}
+
+impl Drop for MenuFixture {
+    fn drop(&mut self) {
+        let app = NSApplication::sharedApplication(self.mtm);
+        app.setMainMenu(self.previous_main_menu.as_deref());
+    }
+}
+
+fn make_menu_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    target: Option<&MenuActionTarget>,
+    key_equivalent: &str,
+    action: Option<objc2::runtime::Sel>,
+) -> Retained<NSMenuItem> {
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str(title),
+            action,
+            &NSString::from_str(key_equivalent),
+        )
+    };
+    if let Some(target) = target {
+        unsafe {
+            item.setTarget(Some(target));
+        }
+    }
+    if !key_equivalent.is_empty() {
+        item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+    }
+    item
 }
 
 struct InsertedTableScene {

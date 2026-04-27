@@ -60,6 +60,10 @@ glasscheck-core = { path = "crates/glasscheck-core" }
 
 For AppKit-specific setup, prefer `AppKitHarness::create_window`, `attach_window`, and `attach_root_view` over calling `AppKitWindowHost::from_*` directly. That keeps the harness as the public carrier for `MainThreadMarker` and preserves the backend's hidden-window test policy.
 
+AppKit also exposes `AppKitHarness::menu_bar()` for tests that need the process main menu. `menu_bar().snapshot()` reads `NSApplication.mainMenu` into `Role::MenuBar`, `Role::Menu`, `Role::MenuItem`, and `Role::Divider` scene nodes. Top-level menus can be opened by title, index, or selector; an opened menu can be snapshotted, captured, or activated by selector.
+
+Menu capture uses AppKit menu cells drawn into an offscreen bitmap. The default path does not open a native menu popup, does not make a menu visible on screen, and does not require screen-recording permission. `AppKitMenuCaptureOptions::allow_visible_fallback` defaults to `false`; keep it that way unless a test explicitly accepts a visible native fallback for an environment where offscreen rendering is unavailable.
+
 On Linux/GTK, `GtkHarness::new()` returns `Result<_, glib::BoolError>`. GTK initialization depends on the process environment, so callers must handle setup failure explicitly instead of relying on a panic from inside the harness.
 
 ## Pick An API
