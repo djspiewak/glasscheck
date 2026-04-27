@@ -88,52 +88,52 @@ fn main() {
             )
         },
     );
-    run("click_text_position_moves_real_nstextview_caret", || {
+    run_live_foreground_appkit("click_text_position_moves_real_nstextview_caret", || {
         click_text_position_moves_real_nstextview_caret(harness)
     });
-    run(
+    run_live_foreground_appkit(
         "click_text_position_synthesizes_text_view_mouse_down",
         || click_text_position_synthesizes_text_view_mouse_down(harness),
     );
-    run(
+    run_live_foreground_appkit(
         "click_text_position_completes_before_follow_up_input",
         || click_text_position_completes_before_follow_up_input(harness),
     );
     run("session_discovers_window_by_title", || {
         session_discovers_window_by_title(harness)
     });
-    run("session_opens_owned_transient_window_and_evicts_it", || {
+    run_live_foreground_appkit("session_opens_owned_transient_window_and_evicts_it", || {
         session_opens_owned_transient_window_and_evicts_it(harness)
     });
-    run("session_waits_for_alert_and_clicks_button", || {
+    run_live_modal_dialog("session_waits_for_alert_and_clicks_button", || {
         session_waits_for_alert_and_clicks_button(harness)
     });
-    run("three_button_alert_click_uses_appkit_order", || {
+    run_live_modal_dialog("three_button_alert_click_uses_appkit_order", || {
         three_button_alert_click_uses_appkit_order(harness)
     });
-    run("three_button_alert_cancel_uses_appkit_order", || {
+    run_live_modal_dialog("three_button_alert_cancel_uses_appkit_order", || {
         three_button_alert_cancel_uses_appkit_order(harness)
     });
-    run(
+    run_live_modal_dialog(
         "alert_accessory_text_field_can_be_inspected_and_set",
         || alert_accessory_text_field_can_be_inspected_and_set(harness),
     );
-    run("dialog_text_rejects_labels_and_buttons", || {
+    run_live_modal_dialog("dialog_text_rejects_labels_and_buttons", || {
         dialog_text_rejects_labels_and_buttons(harness)
     });
-    run("dialog_query_miss_times_out_cleanly", || {
+    run_live_modal_dialog("dialog_query_miss_times_out_cleanly", || {
         dialog_query_miss_times_out_cleanly(harness)
     });
     run("dialog_methods_report_missing_surface", || {
         dialog_methods_report_missing_surface(harness)
     });
-    run("alert_dialog_actions_report_missing_selectors", || {
+    run_live_modal_dialog("alert_dialog_actions_report_missing_selectors", || {
         alert_dialog_actions_report_missing_selectors(harness)
     });
     run("save_panel_path_selection_is_deterministic", || {
         save_panel_path_selection_is_deterministic(harness)
     });
-    run("save_panel_rejects_wrong_dialog_kind", || {
+    run_live_modal_dialog("save_panel_rejects_wrong_dialog_kind", || {
         save_panel_rejects_wrong_dialog_kind(harness)
     });
     run("custom_panel_with_button_stays_panel_kind", || {
@@ -148,33 +148,33 @@ fn main() {
     run("open_panel_live_file_selection_is_explicit", || {
         open_panel_live_file_selection_is_explicit(harness)
     });
-    run(
+    run_live_foreground_appkit(
         "transient_surface_hover_updates_active_always_mouse_moved_tracking_state",
         || transient_surface_hover_updates_active_always_mouse_moved_tracking_state(harness),
     );
-    run(
+    run_live_foreground_appkit(
         "transient_surface_hover_delivers_single_mouse_moved_callback_per_step",
         || transient_surface_hover_delivers_single_mouse_moved_callback_per_step(harness),
     );
-    run(
+    run_live_foreground_appkit(
         "click_targets_attached_child_window_even_when_parent_window_is_present",
         || click_targets_attached_child_window_even_when_parent_window_is_present(harness),
     );
-    run(
+    run_live_foreground_appkit(
         "semantic_click_targets_attached_child_window_even_when_parent_window_is_present",
         || semantic_click_targets_attached_child_window_even_when_parent_window_is_present(harness),
     );
-    run(
+    run_live_foreground_appkit(
         "provider_only_semantic_click_targets_attached_child_window_even_when_parent_window_is_present",
         || {
             provider_only_semantic_click_targets_attached_child_window_even_when_parent_window_is_present(harness)
         },
     );
-    run(
+    run_live_foreground_appkit(
         "provider_only_semantic_click_uses_standalone_path_after_attached_child_detach",
         || provider_only_semantic_click_uses_standalone_path_after_attached_child_detach(harness),
     );
-    run(
+    run_live_foreground_appkit(
         "click_text_position_moves_attached_child_nstextview_caret",
         || click_text_position_moves_attached_child_nstextview_caret(harness),
     );
@@ -356,7 +356,7 @@ fn main() {
         "attached_window_prunes_stale_registered_views_after_content_swap",
         || attached_window_prunes_stale_registered_views_after_content_swap(harness),
     );
-    run(
+    run_live_foreground_appkit(
         "move_mouse_targets_attached_window_even_when_another_window_is_key",
         || move_mouse_targets_attached_window_even_when_another_window_is_key(harness),
     );
@@ -364,11 +364,11 @@ fn main() {
         "synthesized_input_keeps_background_test_windows_hidden",
         || synthesized_input_keeps_background_test_windows_hidden(harness),
     );
-    run(
+    run_live_foreground_appkit(
         "key_press_targets_attached_window_even_when_another_window_is_key",
         || key_press_targets_attached_window_even_when_another_window_is_key(harness),
     );
-    run(
+    run_live_foreground_appkit(
         "making_peer_window_key_does_not_surface_background_test_windows",
         || making_peer_window_key_does_not_surface_background_test_windows(harness),
     );
@@ -479,6 +479,22 @@ fn run(name: &str, test: impl FnOnce()) {
             }
             std::panic::resume_unwind(error);
         }
+    }
+}
+
+fn run_live_modal_dialog(name: &str, test: impl FnOnce()) {
+    if live_modal_dialog_contracts_enabled() {
+        run(name, test);
+    } else {
+        println!("test {name} ... skipped; set GLASSCHECK_RUN_NATIVE_MODAL_DIALOG_TESTS=1 to run");
+    }
+}
+
+fn run_live_foreground_appkit(name: &str, test: impl FnOnce()) {
+    if live_foreground_appkit_contracts_enabled() {
+        run(name, test);
+    } else {
+        println!("test {name} ... skipped; set GLASSCHECK_RUN_NATIVE_FOREGROUND_TESTS=1 to run");
     }
 }
 
@@ -970,6 +986,14 @@ fn prepare_alert_for_background_test(alert: &NSAlert) {
 
 fn native_file_panel_contracts_enabled() -> bool {
     std::env::var_os("GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS").is_some()
+}
+
+fn live_modal_dialog_contracts_enabled() -> bool {
+    std::env::var_os("GLASSCHECK_RUN_NATIVE_MODAL_DIALOG_TESTS").is_some()
+}
+
+fn live_foreground_appkit_contracts_enabled() -> bool {
+    std::env::var_os("GLASSCHECK_RUN_NATIVE_FOREGROUND_TESTS").is_some()
 }
 
 fn short_poll_options() -> PollOptions {
@@ -2502,8 +2526,24 @@ fn save_panel_path_selection_is_deterministic(harness: AppKitHarness) {
         Some(&PropertyValue::string("Export"))
     );
     assert_eq!(
+        root.property_provenance.get("appkit:prompt"),
+        Some(&NodeProvenanceKind::Native)
+    );
+    assert_eq!(
+        root.properties.get("appkit:message"),
+        Some(&PropertyValue::string("Choose a destination."))
+    );
+    assert_eq!(
+        root.property_provenance.get("appkit:message"),
+        Some(&NodeProvenanceKind::Native)
+    );
+    assert_eq!(
         root.properties.get("appkit:name_field"),
         Some(&PropertyValue::string("draft.txt"))
+    );
+    assert_eq!(
+        root.property_provenance.get("appkit:name_field"),
+        Some(&NodeProvenanceKind::Native)
     );
 
     session
@@ -2606,8 +2646,14 @@ fn custom_panel_with_button_stays_panel_kind(harness: AppKitHarness) {
         NSSize::new(160.0, 24.0),
     ));
     root.addSubview(&field);
+    let target = ButtonActionTarget::new(mtm);
     let button = unsafe {
-        NSButton::buttonWithTitle_target_action(&NSString::from_str("Apply"), None, None, mtm)
+        NSButton::buttonWithTitle_target_action(
+            &NSString::from_str("Apply"),
+            Some(&*target),
+            Some(sel!(buttonPressed:)),
+            mtm,
+        )
     };
     button.setFrame(NSRect::new(
         NSPoint::new(16.0, 16.0),
@@ -2681,6 +2727,22 @@ fn custom_panel_with_button_stays_panel_kind(harness: AppKitHarness) {
         Some("appkit.dialog.view.0")
     );
     assert_eq!(button_node.child_index, 2);
+    assert_eq!(
+        button_node.properties.get("appkit:button_role"),
+        Some(&PropertyValue::string("other"))
+    );
+    assert_eq!(
+        button_node.property_provenance.get("appkit:button_role"),
+        Some(&NodeProvenanceKind::Native)
+    );
+    assert_eq!(
+        button_node.state.get("enabled"),
+        Some(&PropertyValue::Bool(true))
+    );
+    assert_eq!(
+        button_node.state_provenance.get("enabled"),
+        Some(&NodeProvenanceKind::Native)
+    );
     assert!(
         scene
             .find(&Selector::label(glasscheck_core::TextMatch::exact("Apply")))
@@ -2704,6 +2766,13 @@ fn custom_panel_with_button_stays_panel_kind(harness: AppKitHarness) {
         text_field_error,
         AppKitDialogError::InputUnavailable
     ));
+    session
+        .click_dialog_button(
+            &SurfaceId::new("custom-panel"),
+            &Selector::label(glasscheck_core::TextMatch::exact("Apply")),
+        )
+        .expect("directly attached custom panel button should click from dialog scene");
+    assert_eq!(target.ivars().actions.get(), 1);
 }
 
 fn ordinary_window_is_not_discovered_as_dialog_panel(harness: AppKitHarness) {

@@ -13,9 +13,12 @@
 //! showing a native menu popup on the default capture path.
 //! `AppKitSession` also exposes AppKit-only dialog helpers for `NSAlert`,
 //! `NSOpenPanel`, and `NSSavePanel` surfaces using semantic scenes plus public
-//! AppKit operations. Live file-panel contract tests are opt-in with
-//! `GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS=1` because presenting system file
-//! panels can launch macOS services and visible UI.
+//! AppKit operations. Live foreground-window, modal-dialog, and file-panel
+//! contract tests are opt-in with `GLASSCHECK_RUN_NATIVE_FOREGROUND_TESTS=1`,
+//! `GLASSCHECK_RUN_NATIVE_MODAL_DIALOG_TESTS=1`, and
+//! `GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS=1` because foregrounding or
+//! presenting modal AppKit UI can interrupt focus, beep, launch macOS services,
+//! or surface visible UI.
 
 mod capture;
 mod dialog;

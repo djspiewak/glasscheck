@@ -379,7 +379,16 @@ mod imp {
         if node.role != Role::Button {
             return Err(AppKitDialogError::InputUnavailable);
         }
-        if node.properties.contains_key(VIEW_PATH_PROPERTY) {
+        if let Some(PropertyValue::String(path)) = node.properties.get(VIEW_PATH_PROPERTY) {
+            let Some(view) = view_at_path(host.window(), path) else {
+                return Err(AppKitDialogError::InputUnavailable);
+            };
+            if let Ok(button) = view.clone().downcast::<NSButton>() {
+                unsafe {
+                    button.performClick(None);
+                }
+                return Ok(());
+            }
             return host.click_node(predicate).map_err(AppKitDialogError::from);
         }
         if classify_window(host.window()).ok_or(AppKitDialogError::NotDialog)?
@@ -478,7 +487,8 @@ mod imp {
             return;
         };
         if let Some(directory) = panel.directoryURL().and_then(|url| url.path()) {
-            node.properties.insert(
+            insert_native_property(
+                node,
                 DIRECTORY_URL_PROPERTY.into(),
                 PropertyValue::string(directory.to_string()),
             );
@@ -487,16 +497,19 @@ mod imp {
             kind,
             AppKitDialogKind::SavePanel | AppKitDialogKind::OpenPanel
         ) {
-            node.properties.insert(
+            insert_native_property(
+                node,
                 PROMPT_PROPERTY.into(),
                 PropertyValue::string(panel.prompt().to_string()),
             );
-            node.properties.insert(
+            insert_native_property(
+                node,
                 MESSAGE_PROPERTY.into(),
                 PropertyValue::string(panel.message().to_string()),
             );
             if kind == AppKitDialogKind::SavePanel {
-                node.properties.insert(
+                insert_native_property(
+                    node,
                     NAME_FIELD_PROPERTY.into(),
                     PropertyValue::string(panel.nameFieldStringValue().to_string()),
                 );
@@ -604,10 +617,16 @@ mod imp {
             node.selectors.insert("appkit.dialog.button".into());
             node.selectors
                 .insert(format!("appkit.dialog.button.{role}"));
-            node.properties
-                .insert(BUTTON_ROLE_PROPERTY.into(), PropertyValue::string(role));
-            node.state
-                .insert("enabled".into(), PropertyValue::Bool(button.isEnabled()));
+            insert_native_property(
+                node,
+                BUTTON_ROLE_PROPERTY.into(),
+                PropertyValue::string(role),
+            );
+            insert_native_state(
+                node,
+                "enabled".into(),
+                PropertyValue::Bool(button.isEnabled()),
+            );
             node.role = Role::Button;
             return;
         }
@@ -654,9 +673,24 @@ mod imp {
                         .insert(format!("appkit.dialog.text.{}", selector_fragment(&value)));
                 }
             }
-            node.state
-                .insert("enabled".into(), PropertyValue::Bool(control.isEnabled()));
+            insert_native_state(
+                node,
+                "enabled".into(),
+                PropertyValue::Bool(control.isEnabled()),
+            );
         }
+    }
+
+    fn insert_native_property(node: &mut SemanticNode, key: String, value: PropertyValue) {
+        node.properties.insert(key.clone(), value);
+        node.property_provenance
+            .insert(key, NodeProvenanceKind::Native);
+    }
+
+    fn insert_native_state(node: &mut SemanticNode, key: String, value: PropertyValue) {
+        node.state.insert(key.clone(), value);
+        node.state_provenance
+            .insert(key, NodeProvenanceKind::Native);
     }
 
     fn view_role(view: &NSView) -> Role {

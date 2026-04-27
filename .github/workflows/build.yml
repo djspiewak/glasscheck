@@ -50,6 +50,10 @@ jobs:
 
       - name: Run AppKit contracts test
         if: ${{ matrix.run_native_smoke }}
+        env:
+          GLASSCHECK_RUN_NATIVE_FILE_PANEL_TESTS: "1"
+          GLASSCHECK_RUN_NATIVE_FOREGROUND_TESTS: "1"
+          GLASSCHECK_RUN_NATIVE_MODAL_DIALOG_TESTS: "1"
         run: cargo test -p glasscheck-appkit --features native-contract-tests --test appkit_contracts
 
       - name: Run GTK smoke test

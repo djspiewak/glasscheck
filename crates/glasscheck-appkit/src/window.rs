@@ -535,7 +535,7 @@ mod imp {
                     .map_err(|error| AppKitContextMenuError::Resolve(map_input_error(error)))?,
             }
             .ok_or(AppKitContextMenuError::NoContextMenu)?;
-            Ok(AppKitContextMenu::new(menu))
+            Ok(AppKitContextMenu::new(self.mtm, menu))
         }
 
         /// Opens the native AppKit context menu at a root-coordinate point.
@@ -552,7 +552,7 @@ mod imp {
                 .context_click(Point::new(point.x, point.y))
                 .map_err(|error| AppKitContextMenuError::Resolve(map_input_error(error)))?
                 .ok_or(AppKitContextMenuError::NoContextMenu)?;
-            Ok(AppKitContextMenu::new(menu))
+            Ok(AppKitContextMenu::new(self.mtm, menu))
         }
 
         /// Moves the pointer to the semantic hit point of the unique node.

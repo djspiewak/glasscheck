@@ -67,6 +67,7 @@ mod imp {
     /// [`activate_item_at_path`]: AppKitContextMenu::activate_item_at_path
     #[derive(Debug)]
     pub struct AppKitContextMenu {
+        mtm: MainThreadMarker,
         menu: Retained<NSMenu>,
     }
 
@@ -268,9 +269,9 @@ mod imp {
     }
 
     impl AppKitContextMenu {
-        pub(crate) fn new(menu: Retained<NSMenu>) -> Self {
+        pub(crate) fn new(mtm: MainThreadMarker, menu: Retained<NSMenu>) -> Self {
             menu.update();
-            Self { menu }
+            Self { mtm, menu }
         }
 
         /// Returns the retained native menu.
@@ -318,6 +319,15 @@ mod imp {
             }
             if !item.isEnabled() {
                 return Err(AppKitContextMenuError::DisabledMenuItem);
+            }
+            let action = item
+                .action()
+                .ok_or(AppKitContextMenuError::InvalidMenuItem)?;
+            let app = NSApplication::sharedApplication(self.mtm);
+            let sender = Some(item.as_ref());
+            let target = item.target();
+            if unsafe { app.targetForAction_to_from(action, target.as_deref(), sender) }.is_none() {
+                return Err(AppKitContextMenuError::InvalidMenuItem);
             }
             menu.performActionForItemAtIndex(index as isize);
             Ok(())
@@ -514,7 +524,7 @@ mod imp {
                     continue;
                 }
                 let separator = item.isSeparatorItem();
-                let id = menu_item_id(top_level_index, &[], index);
+                let id = menu_item_id(top_level_index, &[index]);
                 let row_height = if separator {
                     SEPARATOR_ROW_HEIGHT
                 } else {
@@ -672,6 +682,7 @@ mod imp {
                     &submenu,
                     &id,
                     &[title],
+                    &[],
                     None,
                     None,
                     &mut nodes,
@@ -734,6 +745,7 @@ mod imp {
             menu,
             &id,
             &[title.to_string()],
+            &[],
             Some(&row_rects),
             highlighted_id,
             &mut nodes,
@@ -753,6 +765,7 @@ mod imp {
         menu: &NSMenu,
         parent_id: &str,
         path: &[String],
+        index_path: &[usize],
         row_rects: Option<&BTreeMap<String, Rect>>,
         highlighted_id: Option<&str>,
         nodes: &mut Vec<SemanticNode>,
@@ -764,7 +777,8 @@ mod imp {
             let Some(item) = menu.itemAtIndex(index as isize) else {
                 continue;
             };
-            let id = menu_item_id(top_level_index, path, index);
+            let item_index_path = index_path_with_item(index_path, index);
+            let id = menu_item_id(top_level_index, &item_index_path);
             let title = menu_item_title(&item, index);
             let separator = item.isSeparatorItem();
             let hidden = item.isHiddenOrHasHiddenAncestor();
@@ -850,6 +864,7 @@ mod imp {
                     &submenu,
                     &submenu_id,
                     &submenu_path,
+                    &item_index_path,
                     None,
                     highlighted_id,
                     nodes,
@@ -1045,15 +1060,25 @@ mod imp {
         format!("menu:{index}")
     }
 
-    fn menu_item_id(top_level_index: usize, path: &[String], index: usize) -> String {
+    fn menu_item_id(top_level_index: usize, index_path: &[usize]) -> String {
         let mut id = top_menu_id(top_level_index);
-        for segment in path.iter().skip(1) {
-            id.push_str("/submenu:");
-            id.push_str(&slug(segment));
+        if !index_path.is_empty() {
+            id.push_str("/item:");
+            id.push_str(
+                &index_path
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            );
         }
-        id.push_str("/item:");
-        id.push_str(&index.to_string());
         id
+    }
+
+    fn index_path_with_item(path: &[usize], index: usize) -> Vec<usize> {
+        let mut path = path.to_vec();
+        path.push(index);
+        path
     }
 
     fn menu_item_path_selector(path: &[String], title: &str) -> String {
@@ -1116,7 +1141,8 @@ mod imp {
         )
         .with_selector(CONTEXT_MENU_ROOT_ID)
         .with_label(menu.title().to_string())
-        .with_property("glasscheck:menu_native_surface", PropertyValue::Bool(true))];
+        .with_property("glasscheck:menu_native_surface", PropertyValue::Bool(true))
+        .with_provenance(NodeProvenanceKind::Native)];
         append_context_menu_items(menu, CONTEXT_MENU_ROOT_ID, 0, &mut Vec::new(), &mut nodes);
         nodes
     }
@@ -1206,6 +1232,7 @@ mod imp {
                     );
             }
 
+            node = node.with_provenance(NodeProvenanceKind::Native);
             let has_submenu = item.hasSubmenu();
             nodes.push(node);
             if has_submenu {
@@ -1323,9 +1350,39 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::cell::Cell;
+        use std::rc::Rc;
+
         use glasscheck_core::{QueryError, TextMatch};
-        use objc2::sel;
-        use objc2_foundation::{MainThreadMarker, NSString};
+        use objc2::{define_class, msg_send, sel, DefinedClass};
+        use objc2_foundation::{MainThreadMarker, NSObject, NSString};
+
+        struct ContextActivationIvars {
+            activations: Rc<Cell<usize>>,
+        }
+
+        define_class!(
+            #[unsafe(super(NSObject))]
+            #[thread_kind = MainThreadOnly]
+            #[ivars = ContextActivationIvars]
+            struct ContextActivationTarget;
+
+            impl ContextActivationTarget {
+                #[unsafe(method(performContextAction:))]
+                fn perform_context_action(&self, _sender: Option<&AnyObject>) {
+                    self.ivars()
+                        .activations
+                        .set(self.ivars().activations.get() + 1);
+                }
+            }
+        );
+
+        impl ContextActivationTarget {
+            fn new(mtm: MainThreadMarker, activations: Rc<Cell<usize>>) -> Retained<Self> {
+                let this = Self::alloc(mtm).set_ivars(ContextActivationIvars { activations });
+                unsafe { msg_send![super(this), init] }
+            }
+        }
 
         #[test]
         fn slug_normalizes_menu_titles_for_selectors() {
@@ -1337,13 +1394,56 @@ mod imp {
         #[test]
         fn ids_and_path_selectors_are_stable() {
             let path = vec!["File".to_string(), "Export".to_string()];
+            let index_path = vec![7, 4];
 
             assert_eq!(top_menu_id(2), "menu:2");
-            assert_eq!(menu_item_id(2, &path, 4), "menu:2/submenu:export/item:4");
+            assert_eq!(menu_item_id(2, &index_path), "menu:2/item:7/4");
+            assert_ne!(menu_item_id(2, &[1, 0]), menu_item_id(2, &[2, 0]));
             assert_eq!(
                 menu_item_path_selector(&path, "PDF Document"),
                 "menu.item.path.file.export.pdf-document"
             );
+        }
+
+        #[test]
+        fn opened_menu_descendant_ids_use_structural_index_paths() {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("File"));
+            for _ in 0..2 {
+                let parent = unsafe {
+                    menu.addItemWithTitle_action_keyEquivalent(
+                        &NSString::from_str("Same Branch"),
+                        None,
+                        &NSString::from_str(""),
+                    )
+                };
+                let submenu =
+                    NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Same Branch"));
+                unsafe {
+                    submenu.addItemWithTitle_action_keyEquivalent(
+                        &NSString::from_str("Same Leaf"),
+                        Some(sel!(sameLeaf:)),
+                        &NSString::from_str(""),
+                    );
+                }
+                parent.setSubmenu(Some(&submenu));
+            }
+
+            let snapshot = build_opened_menu_snapshot(0, "File", &menu, None, None);
+            let mut ids = snapshot
+                .scene
+                .all()
+                .iter()
+                .filter(|node| {
+                    node.role == Role::MenuItem && node.label.as_deref() == Some("Same Leaf")
+                })
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+
+            assert_eq!(ids, vec!["menu:0/item:0/0", "menu:0/item:1/0"]);
         }
 
         #[test]
@@ -1459,6 +1559,12 @@ mod imp {
                 .unwrap();
             assert_eq!(root.role, Role::Menu);
             assert_eq!(root.label.as_deref(), Some("Root"));
+            assert_eq!(root.provenance, NodeProvenanceKind::Native);
+            assert_eq!(
+                root.property_provenance
+                    .get("glasscheck:menu_native_surface"),
+                Some(&NodeProvenanceKind::Native)
+            );
 
             let open = scene
                 .node(
@@ -1468,10 +1574,20 @@ mod imp {
                 )
                 .unwrap();
             assert_eq!(open.role, Role::MenuItem);
+            assert_eq!(open.provenance, NodeProvenanceKind::Native);
             assert_eq!(open.state.get("checked"), Some(&PropertyValue::Bool(true)));
+            assert_eq!(
+                open.state_provenance.get("checked"),
+                Some(&NodeProvenanceKind::Native)
+            );
             assert_eq!(
                 open.properties.get("glasscheck:key_equivalent_modifiers"),
                 Some(&PropertyValue::String("command".into()))
+            );
+            assert_eq!(
+                open.property_provenance
+                    .get("glasscheck:key_equivalent_modifiers"),
+                Some(&NodeProvenanceKind::Native)
             );
 
             let separator = scene
@@ -1493,6 +1609,10 @@ mod imp {
             assert_eq!(
                 disabled.state.get("enabled"),
                 Some(&PropertyValue::Bool(false))
+            );
+            assert_eq!(
+                disabled.state_provenance.get("enabled"),
+                Some(&NodeProvenanceKind::Native)
             );
             assert!(!disabled.hit_testable);
 
@@ -1526,7 +1646,7 @@ mod imp {
                 );
             }
 
-            let context_menu = AppKitContextMenu::new(menu);
+            let context_menu = AppKitContextMenu::new(mtm, menu);
             let error = context_menu
                 .activate_item(&Selector::label(TextMatch::exact("Duplicate")))
                 .unwrap_err();
@@ -1586,7 +1706,7 @@ mod imp {
             submenu_parent.setSubmenu(Some(&submenu));
             menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-            let context_menu = AppKitContextMenu::new(menu);
+            let context_menu = AppKitContextMenu::new(mtm, menu);
             let error = context_menu.activate_item_at_path(&[1]).unwrap_err();
             assert!(matches!(error, AppKitContextMenuError::HiddenMenuItem));
 
@@ -1595,6 +1715,64 @@ mod imp {
 
             let error = context_menu.activate_item_at_path(&[3]).unwrap_err();
             assert!(matches!(error, AppKitContextMenuError::InvalidMenuItem));
+        }
+
+        #[test]
+        fn context_menu_activation_rejects_enabled_leaf_items_without_action_or_target() {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Root"));
+            menu.setAutoenablesItems(false);
+            let activations = Rc::new(Cell::new(0));
+            let target = ContextActivationTarget::new(mtm, activations.clone());
+
+            let no_action = unsafe {
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("No Action"),
+                    None,
+                    &NSString::from_str(""),
+                )
+            };
+            unsafe {
+                no_action.setTarget(Some(target.as_ref()));
+            }
+
+            let missing_target_action = unsafe {
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("Missing Target Action"),
+                    Some(sel!(missingContextAction:)),
+                    &NSString::from_str(""),
+                )
+            };
+            unsafe {
+                missing_target_action.setTarget(Some(target.as_ref()));
+            }
+
+            let actionable = unsafe {
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("Actionable"),
+                    Some(sel!(performContextAction:)),
+                    &NSString::from_str(""),
+                )
+            };
+            unsafe {
+                actionable.setTarget(Some(target.as_ref()));
+            }
+
+            let context_menu = AppKitContextMenu::new(mtm, menu);
+            let error = context_menu.activate_item_at_path(&[0]).unwrap_err();
+            assert!(matches!(error, AppKitContextMenuError::InvalidMenuItem));
+            assert_eq!(activations.get(), 0);
+
+            let error = context_menu.activate_item_at_path(&[1]).unwrap_err();
+            assert!(matches!(error, AppKitContextMenuError::InvalidMenuItem));
+            assert_eq!(activations.get(), 0);
+
+            context_menu
+                .activate_item_at_path(&[2])
+                .expect("resolved target/action should activate");
+            assert_eq!(activations.get(), 1);
         }
     }
 }
