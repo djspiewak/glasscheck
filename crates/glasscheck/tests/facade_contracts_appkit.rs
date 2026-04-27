@@ -129,6 +129,9 @@ fn make_text_view(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSTextView> 
 }
 
 fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::WindowHost) {
+    let _ = std::mem::size_of::<glasscheck::AppKitContextMenu>();
+    let _ = std::mem::size_of::<glasscheck::AppKitContextMenuError>();
+
     let scene = host.snapshot_scene();
     assert_eq!(node_label(&scene, "click-state"), Some("Idle"));
     assert_eq!(node_label(&scene, "run-button"), Some("Run"));
@@ -152,7 +155,9 @@ fn exercise_host_contracts(harness: &glasscheck::Harness, host: &glasscheck::Win
 
     let input = host.input();
     assert_input_driver(&input);
-    input.move_mouse(Point::new(resolved.origin.x + 2.0, resolved.origin.y + 2.0));
+    input
+        .move_mouse(Point::new(resolved.origin.x + 2.0, resolved.origin.y + 2.0))
+        .expect("mouse move should succeed through the shared facade");
     input
         .key_press_queued("a", glasscheck::KeyModifiers::default())
         .expect("queued key press should succeed through the shared facade");

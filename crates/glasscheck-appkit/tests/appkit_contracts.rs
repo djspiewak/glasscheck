@@ -13,7 +13,7 @@ use glasscheck_core::{
     assert_above, assert_vertical_alignment, compare_images, CompareConfig, LayoutTolerance,
     NodeProvenanceKind, NodeRecipe, PixelMatch, PixelProbe, Point, PollOptions, PropertyValue,
     QueryError, Rect, RegionResolveError, RelativeBounds, Role, Selector, SemanticNode,
-    SemanticProvider, SemanticSnapshot, Size, SurfaceId, SurfaceQuery, TextRange,
+    SemanticProvider, SemanticSnapshot, Size, SurfaceId, SurfaceQuery, TextMatch, TextRange,
     TransientSurfaceSpec,
 };
 use objc2::rc::Retained;
@@ -22,7 +22,7 @@ use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly
 use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSBezierPath, NSButton, NSColor,
     NSControlStateValueMixed, NSControlStateValueOn, NSEvent, NSEventMask, NSEventModifierFlags,
-    NSFont, NSMenu, NSMenuItem, NSTextInputClient, NSTextView, NSTrackingArea,
+    NSEventType, NSFont, NSMenu, NSMenuItem, NSTextInputClient, NSTextView, NSTrackingArea,
     NSTrackingAreaOptions, NSView, NSWindow, NSWindowOrderingMode,
 };
 use objc2_foundation::{
@@ -281,6 +281,20 @@ fn main() {
         "semantic_click_stress_does_not_duplicate_mouse_downs",
         || semantic_click_stress_does_not_duplicate_mouse_downs(harness),
     );
+    run(
+        "context_click_node_opens_native_menu_scene_and_activates_item",
+        || context_click_node_opens_native_menu_scene_and_activates_item(harness),
+    );
+    run(
+        "context_click_node_retries_registered_owner_when_descendant_has_no_menu",
+        || context_click_node_retries_registered_owner_when_descendant_has_no_menu(harness),
+    );
+    run("context_click_node_uses_control_primary_fallback", || {
+        context_click_node_uses_control_primary_fallback(harness)
+    });
+    run("session_context_click_node_uses_named_surface", || {
+        session_context_click_node_uses_named_surface(harness)
+    });
     run(
         "semantic_click_rejects_registered_node_when_hit_test_returns_ancestor",
         || semantic_click_rejects_registered_node_when_hit_test_returns_ancestor(harness),
@@ -4051,6 +4065,232 @@ fn semantic_click_stress_does_not_duplicate_mouse_downs(harness: AppKitHarness) 
     assert_eq!(target.ivars().actions.get(), 25);
 }
 
+fn context_click_node_opens_native_menu_scene_and_activates_item(harness: AppKitHarness) {
+    let mtm = harness.main_thread_marker();
+    let host = harness.create_window(260.0, 180.0);
+    let root = make_view(mtm, NSSize::new(260.0, 180.0));
+    let inserted = Rc::new(Cell::new(false));
+    let (menu, menu_target) = make_context_menu(mtm, inserted.clone());
+    let editor = ContextMenuTrackingView::new(
+        mtm,
+        NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(160.0, 90.0)),
+        menu,
+        false,
+    );
+    root.addSubview(&editor);
+    host.set_content_view(&root);
+    host.register_view(
+        &editor,
+        InstrumentedView {
+            id: Some("editor".into()),
+            role: Some(Role::TextInput),
+            label: Some("Editor".into()),
+            selectors: vec!["editor.surface".into()],
+        },
+    );
+    host.set_scene_source(Box::new(InsertedTableScene {
+        inserted: inserted.clone(),
+    }));
+    harness.settle(2);
+
+    let context_menu = host
+        .context_click_node(&Selector::selector_eq("editor.surface"))
+        .expect("context-click should expose a native NSMenu");
+    let scene = context_menu.snapshot_scene();
+
+    let root_node = scene
+        .node(scene.find(&Selector::selector_eq("context-menu")).unwrap())
+        .unwrap();
+    assert_eq!(root_node.role, Role::Menu);
+    assert_eq!(root_node.label.as_deref(), Some("Editor Menu"));
+
+    let insert = scene
+        .node(
+            scene
+                .find(&Selector::label(TextMatch::exact("Insert Table")))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(insert.role, Role::MenuItem);
+    assert_eq!(
+        insert.state.get("enabled"),
+        Some(&PropertyValue::Bool(true))
+    );
+    assert_eq!(
+        insert.state.get("checked"),
+        Some(&PropertyValue::Bool(true))
+    );
+    assert_eq!(
+        insert.properties.get("glasscheck:key_equivalent"),
+        Some(&PropertyValue::String("t".into()))
+    );
+    assert_eq!(
+        insert.properties.get("glasscheck:key_equivalent_modifiers"),
+        Some(&PropertyValue::String("command".into()))
+    );
+
+    let separator = scene
+        .node(
+            scene
+                .find(&Selector::selector_eq("context-menu.separator[1]"))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(separator.role, Role::Divider);
+
+    let disabled_error = context_menu
+        .activate_item(&Selector::label(TextMatch::exact("Disabled Command")))
+        .unwrap_err();
+    assert!(matches!(
+        disabled_error,
+        glasscheck_appkit::AppKitContextMenuError::DisabledMenuItem
+    ));
+    assert!(!inserted.get());
+
+    context_menu
+        .activate_item(&Selector::label(TextMatch::exact("Insert Table")))
+        .expect("enabled menu item should activate");
+    harness.settle(2);
+
+    assert!(inserted.get());
+    assert_eq!(menu_target.ivars().actions.get(), 1);
+    assert_eq!(editor.ivars().right_click_events.get(), 1);
+    assert_eq!(editor.ivars().control_click_events.get(), 0);
+    assert_eq!(editor.ivars().will_open_events.get(), 1);
+    assert!(host
+        .snapshot_scene()
+        .find(&Selector::id_eq("inserted-table"))
+        .is_ok());
+}
+
+fn context_click_node_retries_registered_owner_when_descendant_has_no_menu(harness: AppKitHarness) {
+    let mtm = harness.main_thread_marker();
+    let host = harness.create_window(260.0, 180.0);
+    let root = make_view(mtm, NSSize::new(260.0, 180.0));
+    let (menu, _menu_target) = make_context_menu(mtm, Rc::new(Cell::new(false)));
+    let editor = ContextMenuTrackingView::new(
+        mtm,
+        NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(160.0, 90.0)),
+        menu,
+        false,
+    );
+    let child = ContextMenuRejectingChildView::new(
+        mtm,
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(160.0, 90.0)),
+    );
+    editor.addSubview(&child);
+    root.addSubview(&editor);
+    host.set_content_view(&root);
+    host.register_view(
+        &editor,
+        InstrumentedView {
+            id: Some("owner-editor".into()),
+            role: Some(Role::TextInput),
+            label: Some("Owner Editor".into()),
+            selectors: Vec::new(),
+        },
+    );
+    harness.settle(2);
+
+    let context_menu = host
+        .context_click_node(&Selector::id_eq("owner-editor"))
+        .expect("context click should retry the registered owner after a child returns no menu");
+
+    assert!(context_menu
+        .snapshot_scene()
+        .find(&Selector::label(TextMatch::exact("Insert Table")))
+        .is_ok());
+    assert_eq!(child.ivars().menu_for_events.get(), 2);
+    assert_eq!(editor.ivars().right_click_events.get(), 1);
+    assert_eq!(editor.ivars().control_click_events.get(), 0);
+    assert_eq!(editor.ivars().will_open_events.get(), 1);
+}
+
+fn context_click_node_uses_control_primary_fallback(harness: AppKitHarness) {
+    let mtm = harness.main_thread_marker();
+    let host = harness.create_window(220.0, 140.0);
+    let root = make_view(mtm, NSSize::new(220.0, 140.0));
+    let (menu, _menu_target) = make_context_menu(mtm, Rc::new(Cell::new(false)));
+    let editor = ContextMenuTrackingView::new(
+        mtm,
+        NSRect::new(NSPoint::new(16.0, 16.0), NSSize::new(150.0, 80.0)),
+        menu,
+        true,
+    );
+    root.addSubview(&editor);
+    host.set_content_view(&root);
+    host.register_view(
+        &editor,
+        InstrumentedView {
+            id: Some("control-editor".into()),
+            role: Some(Role::TextInput),
+            label: Some("Editor".into()),
+            selectors: Vec::new(),
+        },
+    );
+    harness.settle(2);
+
+    let context_menu = host
+        .context_click_node(&Selector::id_eq("control-editor"))
+        .expect("context click should fall back to Control-primary semantics");
+
+    assert!(context_menu
+        .snapshot_scene()
+        .find(&Selector::label(TextMatch::exact("Insert Table")))
+        .is_ok());
+    assert_eq!(editor.ivars().right_click_events.get(), 1);
+    assert_eq!(editor.ivars().control_click_events.get(), 1);
+    assert_eq!(editor.ivars().will_open_events.get(), 1);
+}
+
+fn session_context_click_node_uses_named_surface(harness: AppKitHarness) {
+    let mtm = harness.main_thread_marker();
+    let host = harness.create_window(220.0, 140.0);
+    let root = make_view(mtm, NSSize::new(220.0, 140.0));
+    let (menu, _menu_target) = make_context_menu(mtm, Rc::new(Cell::new(false)));
+    let editor = ContextMenuTrackingView::new(
+        mtm,
+        NSRect::new(NSPoint::new(16.0, 16.0), NSSize::new(150.0, 80.0)),
+        menu,
+        false,
+    );
+    root.addSubview(&editor);
+    host.set_content_view(&root);
+    host.register_view(
+        &editor,
+        InstrumentedView {
+            id: Some("session-editor".into()),
+            role: Some(Role::TextInput),
+            label: Some("Editor".into()),
+            selectors: Vec::new(),
+        },
+    );
+    harness.settle(2);
+
+    let point_menu = host
+        .context_click_root_point(Point::new(24.0, 24.0))
+        .expect("root-point context click should open the menu");
+    assert!(point_menu
+        .snapshot_scene()
+        .find(&Selector::label(TextMatch::exact("Insert Table")))
+        .is_ok());
+
+    let session = harness.session();
+    session.attach_host("editor-surface", host);
+    let menu = session
+        .context_click_node(
+            &SurfaceId::new("editor-surface"),
+            &Selector::id_eq("session-editor"),
+        )
+        .expect("surface should be registered")
+        .expect("session context click should open the menu");
+
+    assert!(menu
+        .snapshot_scene()
+        .find(&Selector::label(TextMatch::exact("Insert Table")))
+        .is_ok());
+}
+
 fn make_view(mtm: MainThreadMarker, size: NSSize) -> Retained<NSView> {
     NSView::initWithFrame(
         NSView::alloc(mtm),
@@ -4866,6 +5106,106 @@ impl ButtonActionTarget {
     }
 }
 
+struct ContextMenuViewIvars {
+    menu: Retained<NSMenu>,
+    require_control: bool,
+    right_click_events: Cell<usize>,
+    control_click_events: Cell<usize>,
+    will_open_events: Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ContextMenuViewIvars]
+    struct ContextMenuTrackingView;
+
+    impl ContextMenuTrackingView {
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(menuForEvent:))]
+        fn menu_for_event(&self, event: &NSEvent) -> *mut NSMenu {
+            if event.r#type() == NSEventType::RightMouseDown {
+                self.ivars()
+                    .right_click_events
+                    .set(self.ivars().right_click_events.get() + 1);
+            }
+            let control_click = event.modifierFlags().contains(NSEventModifierFlags::Control);
+            if control_click {
+                self.ivars()
+                    .control_click_events
+                    .set(self.ivars().control_click_events.get() + 1);
+            }
+            if self.ivars().require_control && !control_click {
+                return std::ptr::null_mut();
+            }
+            &*self.ivars().menu as *const NSMenu as *mut NSMenu
+        }
+
+        #[unsafe(method(willOpenMenu:withEvent:))]
+        fn will_open_menu(&self, _menu: &NSMenu, _event: &NSEvent) {
+            self.ivars()
+                .will_open_events
+                .set(self.ivars().will_open_events.get() + 1);
+        }
+    }
+);
+
+impl ContextMenuTrackingView {
+    fn new(
+        mtm: MainThreadMarker,
+        frame: NSRect,
+        menu: Retained<NSMenu>,
+        require_control: bool,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ContextMenuViewIvars {
+            menu,
+            require_control,
+            right_click_events: Cell::new(0),
+            control_click_events: Cell::new(0),
+            will_open_events: Cell::new(0),
+        });
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
+#[derive(Default)]
+struct ContextMenuRejectingChildIvars {
+    menu_for_events: Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ContextMenuRejectingChildIvars]
+    struct ContextMenuRejectingChildView;
+
+    impl ContextMenuRejectingChildView {
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(menuForEvent:))]
+        fn menu_for_event(&self, _event: &NSEvent) -> *mut NSMenu {
+            self.ivars()
+                .menu_for_events
+                .set(self.ivars().menu_for_events.get() + 1);
+            std::ptr::null_mut()
+        }
+    }
+);
+
+impl ContextMenuRejectingChildView {
+    fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ContextMenuRejectingChildIvars::default());
+        unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+}
+
 struct MenuActionIvars {
     activations: Rc<Cell<usize>>,
 }
@@ -5170,6 +5510,69 @@ fn make_menu_item(
         item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
     }
     item
+}
+
+struct ContextMenuActionIvars {
+    inserted: Rc<Cell<bool>>,
+    actions: Cell<usize>,
+}
+
+define_class!(
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = ContextMenuActionIvars]
+    struct ContextMenuActionTarget;
+
+    impl ContextMenuActionTarget {
+        #[unsafe(method(insertTable:))]
+        fn insert_table(&self, _sender: Option<&AnyObject>) {
+            self.ivars().inserted.set(true);
+            self.ivars().actions.set(self.ivars().actions.get() + 1);
+        }
+    }
+);
+
+impl ContextMenuActionTarget {
+    fn new(mtm: MainThreadMarker, inserted: Rc<Cell<bool>>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ContextMenuActionIvars {
+            inserted,
+            actions: Cell::new(0),
+        });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+fn make_context_menu(
+    mtm: MainThreadMarker,
+    inserted: Rc<Cell<bool>>,
+) -> (Retained<NSMenu>, Retained<ContextMenuActionTarget>) {
+    let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Editor Menu"));
+    menu.setAutoenablesItems(false);
+    let target = ContextMenuActionTarget::new(mtm, inserted);
+    let insert = unsafe {
+        menu.addItemWithTitle_action_keyEquivalent(
+            &NSString::from_str("Insert Table"),
+            Some(sel!(insertTable:)),
+            &NSString::from_str("t"),
+        )
+    };
+    unsafe { insert.setTarget(Some(target.as_ref())) };
+    insert.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+    insert.setState(NSControlStateValueOn);
+
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+    let disabled = unsafe {
+        menu.addItemWithTitle_action_keyEquivalent(
+            &NSString::from_str("Disabled Command"),
+            Some(sel!(insertTable:)),
+            &NSString::from_str(""),
+        )
+    };
+    unsafe { disabled.setTarget(Some(target.as_ref())) };
+    disabled.setEnabled(false);
+
+    (menu, target)
 }
 
 struct InsertedTableScene {

@@ -4,7 +4,7 @@ mod imp {
     use objc2::runtime::{AnyObject, Sel};
     use objc2::{msg_send, ClassType};
     use objc2_app_kit::{
-        NSApplication, NSControl, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
+        NSApplication, NSControl, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSMenu,
         NSTextInputClient, NSTextView, NSTrackingAreaOptions, NSView, NSWindow,
     };
     use objc2_foundation::{
@@ -17,6 +17,12 @@ mod imp {
         window: &'a NSWindow,
         mtm: MainThreadMarker,
         attached_child_window: bool,
+    }
+
+    #[derive(Clone, Copy)]
+    enum ContextClickGesture {
+        Secondary,
+        ControlPrimary,
     }
 
     impl<'a> AppKitInputDriver<'a> {
@@ -94,6 +100,45 @@ mod imp {
             };
             view.mouseUp(&up);
             Ok(())
+        }
+
+        /// Resolves the native AppKit context menu at `point` in window coordinates.
+        ///
+        /// AppKit treats secondary click and Control-primary click as equivalent
+        /// contextual intent, so this method keeps that platform detail behind
+        /// the backend-specific `context_click` API.
+        pub fn context_click(
+            &self,
+            point: Point,
+        ) -> Result<Option<Retained<NSMenu>>, InputSynthesisError> {
+            self.activate_window();
+            let point = ns_point(point);
+            let target = self
+                .target_view(point)
+                .or_else(|| self.window.contentView())
+                .ok_or(InputSynthesisError::MissingTarget)?;
+            self.context_click_target(&target, point)
+        }
+
+        /// Resolves the native AppKit context menu for `view` at `point`.
+        pub fn context_click_target(
+            &self,
+            view: &NSView,
+            point: NSPoint,
+        ) -> Result<Option<Retained<NSMenu>>, InputSynthesisError> {
+            self.activate_window();
+            for gesture in [
+                ContextClickGesture::Secondary,
+                ContextClickGesture::ControlPrimary,
+            ] {
+                let event = self.context_click_event(gesture, point)?;
+                if let Some(menu) = view.menuForEvent(&event) {
+                    view.willOpenMenu_withEvent(&menu, &event);
+                    menu.update();
+                    return Ok(Some(menu));
+                }
+            }
+            Ok(None)
         }
 
         /// Synthesizes a click that preserves NSApplication local mouse-up monitors.
@@ -548,6 +593,33 @@ mod imp {
                 1,
                 1.0,
             )
+        }
+
+        fn context_click_event(
+            &self,
+            gesture: ContextClickGesture,
+            point: NSPoint,
+        ) -> Result<Retained<NSEvent>, InputSynthesisError> {
+            let (event_type, modifiers) = match gesture {
+                ContextClickGesture::Secondary => {
+                    (NSEventType::RightMouseDown, NSEventModifierFlags::empty())
+                }
+                ContextClickGesture::ControlPrimary => {
+                    (NSEventType::LeftMouseDown, NSEventModifierFlags::Control)
+                }
+            };
+            NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+                event_type,
+                point,
+                modifiers,
+                0.0,
+                self.window.windowNumber().max(0),
+                None,
+                0,
+                1,
+                1.0,
+            )
+            .ok_or(InputSynthesisError::TransportFailure("context-click event creation"))
         }
 
         // AppKit does not reliably deliver owner-backed tracking-area mouseMoved callbacks for

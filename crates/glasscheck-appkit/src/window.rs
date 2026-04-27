@@ -18,6 +18,7 @@ mod imp {
 
     use crate::capture::{capture_view_image, crop_image_in_view_coordinates};
     use crate::input::AppKitInputDriver;
+    use crate::menu::{AppKitContextMenu, AppKitContextMenuError};
     use crate::screen::{
         configure_background_test_window, offscreen_window_content_rect,
         offscreen_window_frame_rect,
@@ -349,6 +350,18 @@ mod imp {
             self.click_node_with_search(predicate, &HitPointSearch::default())
         }
 
+        /// Opens the native AppKit context menu for the unique node matching `predicate`.
+        ///
+        /// The returned value is a retained `NSMenu` semantic handle, not a popup
+        /// window surface. AppKit-specific right-click versus Control-click
+        /// handling is encapsulated by the backend.
+        pub fn context_click_node(
+            &self,
+            predicate: &Selector,
+        ) -> Result<AppKitContextMenu, AppKitContextMenuError> {
+            self.context_click_node_with_search(predicate, &HitPointSearch::default())
+        }
+
         /// Resolves a semantic hit point for the unique node matching `predicate`.
         pub fn resolve_hit_point(
             &self,
@@ -471,6 +484,75 @@ mod imp {
                     .map_err(map_input_error)?;
             }
             Ok(())
+        }
+
+        /// Opens the native AppKit context menu using semantic hit-point search.
+        pub fn context_click_node_with_search(
+            &self,
+            predicate: &Selector,
+            search: &HitPointSearch,
+        ) -> Result<AppKitContextMenu, AppKitContextMenuError> {
+            if self.detached_root_view {
+                return Err(RegionResolveError::DetachedRootView.into());
+            }
+            let scene = self.snapshot_scene();
+            let handle = scene.find(predicate).map_err(map_query_error)?;
+            let node = scene
+                .node(handle)
+                .ok_or(RegionResolveError::InvalidHandle(handle))?;
+            let root_view = self.root_view();
+            let registered_view = self.registered_view_for_handle(handle, root_view.as_deref());
+            let (root_point, click_view) = self
+                .click_target(
+                    root_view.as_deref(),
+                    registered_view.as_deref(),
+                    node,
+                    search,
+                )
+                .ok_or(RegionResolveError::InputUnavailable)?;
+            let point = self.root_point_to_window_point(root_point);
+            let input = self.input();
+            let menu = match (click_view, registered_view) {
+                (Some(click_view), Some(registered_view)) => {
+                    let menu = input
+                        .context_click_target(&click_view, point)
+                        .map_err(|error| AppKitContextMenuError::Resolve(map_input_error(error)))?;
+                    if menu.is_some() || std::ptr::eq(&*click_view, &*registered_view) {
+                        menu
+                    } else {
+                        input
+                            .context_click_target(&registered_view, point)
+                            .map_err(|error| {
+                                AppKitContextMenuError::Resolve(map_input_error(error))
+                            })?
+                    }
+                }
+                (Some(view), None) | (None, Some(view)) => input
+                    .context_click_target(&view, point)
+                    .map_err(|error| AppKitContextMenuError::Resolve(map_input_error(error)))?,
+                (None, None) => input
+                    .context_click(Point::new(point.x, point.y))
+                    .map_err(|error| AppKitContextMenuError::Resolve(map_input_error(error)))?,
+            }
+            .ok_or(AppKitContextMenuError::NoContextMenu)?;
+            Ok(AppKitContextMenu::new(menu))
+        }
+
+        /// Opens the native AppKit context menu at a root-coordinate point.
+        pub fn context_click_root_point(
+            &self,
+            point: Point,
+        ) -> Result<AppKitContextMenu, AppKitContextMenuError> {
+            if self.detached_root_view {
+                return Err(RegionResolveError::DetachedRootView.into());
+            }
+            let point = self.root_point_to_window_point(NSPoint::new(point.x, point.y));
+            let menu = self
+                .input()
+                .context_click(Point::new(point.x, point.y))
+                .map_err(|error| AppKitContextMenuError::Resolve(map_input_error(error)))?
+                .ok_or(AppKitContextMenuError::NoContextMenu)?;
+            Ok(AppKitContextMenu::new(menu))
         }
 
         /// Moves the pointer to the semantic hit point of the unique node.

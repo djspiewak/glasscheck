@@ -6,16 +6,16 @@ mod imp {
     use std::ptr;
 
     use glasscheck_core::{
-        Image, NodeProvenanceKind, Point, PropertyValue, Rect, Role, Scene, Selector, SemanticNode,
-        Size,
+        Image, NodeProvenanceKind, Point, PropertyValue, QueryError, Rect, Role, Scene, Selector,
+        SemanticNode, Size,
     };
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, Sel};
     use objc2::{AnyThread, MainThreadOnly};
     use objc2_app_kit::{
         NSApplication, NSBezierPath, NSBitmapImageRep, NSColor, NSControlStateValueMixed,
-        NSControlStateValueOn, NSEventModifierFlags, NSGraphicsContext, NSMenu, NSMenuItem,
-        NSMenuItemCell, NSView,
+        NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSGraphicsContext,
+        NSMenu, NSMenuItem, NSMenuItemCell, NSView,
     };
     use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
 
@@ -26,6 +26,10 @@ mod imp {
     const HORIZONTAL_PADDING: f64 = 28.0;
     const MIN_MENU_WIDTH: f64 = 180.0;
     const MENU_MARGIN: f64 = 6.0;
+    const CONTEXT_MENU_ROOT_ID: &str = "context-menu";
+    const CONTEXT_MENU_ITEM_HEIGHT: f64 = 22.0;
+    const CONTEXT_MENU_ITEM_WIDTH: f64 = 320.0;
+    const CONTEXT_MENU_INDENT: f64 = 16.0;
 
     /// Main-thread driver for the process-wide AppKit menu bar.
     #[derive(Clone, Copy)]
@@ -50,6 +54,22 @@ mod imp {
         pub scene: Scene,
     }
 
+    /// Retained AppKit context menu opened by a semantic `context_click` call.
+    ///
+    /// This is a semantic handle over the native `NSMenu`, not a captured popup
+    /// window. AppKit does not expose context menus as stable `NSWindow` hosts
+    /// for hidden/background tests, so use [`snapshot_scene`] to inspect item
+    /// labels and state and [`activate_item`] or [`activate_item_at_path`] to
+    /// choose commands.
+    ///
+    /// [`snapshot_scene`]: AppKitContextMenu::snapshot_scene
+    /// [`activate_item`]: AppKitContextMenu::activate_item
+    /// [`activate_item_at_path`]: AppKitContextMenu::activate_item_at_path
+    #[derive(Debug)]
+    pub struct AppKitContextMenu {
+        menu: Retained<NSMenu>,
+    }
+
     /// Top-level menu lookup target.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum AppKitMenuTarget {
@@ -70,6 +90,27 @@ mod imp {
         ///
         /// The default is `false`, and the current renderer never opens a native popup.
         pub allow_visible_fallback: bool,
+    }
+
+    /// Errors returned while opening, inspecting, or activating an AppKit context menu.
+    #[derive(Debug)]
+    pub enum AppKitContextMenuError {
+        /// The host could not resolve the requested node or point for input.
+        Resolve(glasscheck_core::RegionResolveError),
+        /// No native `NSMenu` was available for the context-click target.
+        NoContextMenu,
+        /// The requested menu item selector failed.
+        Query(QueryError),
+        /// The selected semantic node does not describe an activatable menu item.
+        InvalidMenuItem,
+        /// The requested index path does not exist in the menu hierarchy.
+        InvalidMenuPath,
+        /// The item exists but is hidden.
+        HiddenMenuItem,
+        /// The item exists but is disabled.
+        DisabledMenuItem,
+        /// Native popup-surface capture is not supported in v1.
+        UnsupportedPopupSurface,
     }
 
     /// Errors returned by AppKit menu-bar testing helpers.
@@ -166,6 +207,34 @@ mod imp {
 
     impl std::error::Error for AppKitMenuError {}
 
+    impl fmt::Display for AppKitContextMenuError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Resolve(error) => write!(f, "context menu target resolution failed: {error}"),
+                Self::NoContextMenu => write!(f, "context click target did not expose an NSMenu"),
+                Self::Query(error) => write!(f, "context menu item lookup failed: {error}"),
+                Self::InvalidMenuItem => write!(f, "selected menu node is not activatable"),
+                Self::InvalidMenuPath => write!(f, "menu index path does not exist"),
+                Self::HiddenMenuItem => write!(f, "menu item is hidden"),
+                Self::DisabledMenuItem => write!(f, "menu item is disabled"),
+                Self::UnsupportedPopupSurface => {
+                    write!(
+                        f,
+                        "native popup-surface capture is unsupported for AppKit menus"
+                    )
+                }
+            }
+        }
+    }
+
+    impl std::error::Error for AppKitContextMenuError {}
+
+    impl From<glasscheck_core::RegionResolveError> for AppKitContextMenuError {
+        fn from(error: glasscheck_core::RegionResolveError) -> Self {
+            Self::Resolve(error)
+        }
+    }
+
     impl AppKitMenuBar {
         #[must_use]
         pub(crate) fn new(mtm: MainThreadMarker) -> Self {
@@ -195,6 +264,68 @@ mod imp {
                 title,
                 top_level_index: index,
             })
+        }
+    }
+
+    impl AppKitContextMenu {
+        pub(crate) fn new(menu: Retained<NSMenu>) -> Self {
+            menu.update();
+            Self { menu }
+        }
+
+        /// Returns the retained native menu.
+        #[must_use]
+        pub fn native_menu(&self) -> &NSMenu {
+            &self.menu
+        }
+
+        /// Captures the menu item hierarchy as a semantic scene.
+        #[must_use]
+        pub fn snapshot_scene(&self) -> Scene {
+            self.menu.update();
+            Scene::new(context_menu_nodes(&self.menu))
+        }
+
+        /// Activates the unique menu item matching `selector`.
+        pub fn activate_item(&self, selector: &Selector) -> Result<(), AppKitContextMenuError> {
+            self.menu.update();
+            let scene = self.snapshot_scene();
+            let handle = scene
+                .find(selector)
+                .map_err(AppKitContextMenuError::Query)?;
+            let node = scene
+                .node(handle)
+                .ok_or(AppKitContextMenuError::InvalidMenuItem)?;
+            let Some(PropertyValue::String(path)) = node.properties.get("glasscheck:menu_path")
+            else {
+                return Err(AppKitContextMenuError::InvalidMenuItem);
+            };
+            let path = parse_context_menu_path(path)?;
+            self.activate_item_at_path(&path)
+        }
+
+        /// Activates a menu item by zero-based index path.
+        pub fn activate_item_at_path(&self, path: &[usize]) -> Result<(), AppKitContextMenuError> {
+            self.menu.update();
+            let Some((menu, item, index)) = context_item_at_path(&self.menu, path) else {
+                return Err(AppKitContextMenuError::InvalidMenuPath);
+            };
+            if item.isSeparatorItem() || item.hasSubmenu() {
+                return Err(AppKitContextMenuError::InvalidMenuItem);
+            }
+            if item.isHiddenOrHasHiddenAncestor() {
+                return Err(AppKitContextMenuError::HiddenMenuItem);
+            }
+            if !item.isEnabled() {
+                return Err(AppKitContextMenuError::DisabledMenuItem);
+            }
+            menu.performActionForItemAtIndex(index as isize);
+            Ok(())
+        }
+
+        /// Cancels native menu tracking if a caller has displayed the menu manually.
+        pub fn cancel_tracking(&self) {
+            self.menu.cancelTrackingWithoutAnimation();
         }
     }
 
@@ -972,6 +1103,196 @@ mod imp {
         parts.join("+")
     }
 
+    pub(crate) fn context_menu_nodes(menu: &NSMenu) -> Vec<SemanticNode> {
+        let item_count = count_context_menu_items(menu);
+        let height = (item_count.max(1) as f64) * CONTEXT_MENU_ITEM_HEIGHT;
+        let mut nodes = vec![SemanticNode::new(
+            CONTEXT_MENU_ROOT_ID,
+            Role::Menu,
+            Rect::new(
+                Point::new(0.0, 0.0),
+                Size::new(CONTEXT_MENU_ITEM_WIDTH, height),
+            ),
+        )
+        .with_selector(CONTEXT_MENU_ROOT_ID)
+        .with_label(menu.title().to_string())
+        .with_property("glasscheck:menu_native_surface", PropertyValue::Bool(true))];
+        append_context_menu_items(menu, CONTEXT_MENU_ROOT_ID, 0, &mut Vec::new(), &mut nodes);
+        nodes
+    }
+
+    fn append_context_menu_items(
+        menu: &NSMenu,
+        parent_id: &str,
+        depth: usize,
+        path: &mut Vec<usize>,
+        nodes: &mut Vec<SemanticNode>,
+    ) {
+        for (index, item) in menu.itemArray().iter().enumerate() {
+            path.push(index);
+            let path_string = context_menu_path_string(path);
+            let id = format!("{CONTEXT_MENU_ROOT_ID}/item:{path_string}");
+            let row = nodes.len().saturating_sub(1) as f64;
+            let role = if item.isSeparatorItem() {
+                Role::Divider
+            } else {
+                Role::MenuItem
+            };
+            let mut node = SemanticNode::new(
+                id.clone(),
+                role,
+                Rect::new(
+                    Point::new(
+                        (depth as f64) * CONTEXT_MENU_INDENT,
+                        row * CONTEXT_MENU_ITEM_HEIGHT,
+                    ),
+                    Size::new(
+                        CONTEXT_MENU_ITEM_WIDTH - (depth as f64) * CONTEXT_MENU_INDENT,
+                        CONTEXT_MENU_ITEM_HEIGHT,
+                    ),
+                ),
+            )
+            .with_parent(parent_id, index)
+            .with_selector(format!("{CONTEXT_MENU_ROOT_ID}.item[{path_string}]"))
+            .with_property(
+                "glasscheck:menu_path",
+                PropertyValue::String(path_string.clone()),
+            )
+            .with_property(
+                "glasscheck:menu_depth",
+                PropertyValue::Integer(depth as i64),
+            )
+            .with_state("enabled", PropertyValue::Bool(item.isEnabled()))
+            .with_state(
+                "hidden",
+                PropertyValue::Bool(item.isHiddenOrHasHiddenAncestor()),
+            )
+            .with_state("has_submenu", PropertyValue::Bool(item.hasSubmenu()));
+
+            node.visible = !item.isHiddenOrHasHiddenAncestor();
+            node.hit_testable =
+                node.visible && item.isEnabled() && !item.isSeparatorItem() && !item.hasSubmenu();
+
+            if item.isSeparatorItem() {
+                node = node
+                    .with_selector(format!("{CONTEXT_MENU_ROOT_ID}.separator[{path_string}]"))
+                    .with_property("glasscheck:separator", PropertyValue::Bool(true));
+            } else {
+                let title = item.title().to_string();
+                node = node
+                    .with_label(title.clone())
+                    .with_selector(format!("{CONTEXT_MENU_ROOT_ID}.title:{title}"))
+                    .with_property(
+                        "glasscheck:key_equivalent",
+                        PropertyValue::String(item.keyEquivalent().to_string()),
+                    )
+                    .with_property(
+                        "glasscheck:key_equivalent_modifiers",
+                        PropertyValue::String(context_modifier_string(
+                            item.keyEquivalentModifierMask(),
+                        )),
+                    )
+                    .with_state(
+                        "checked",
+                        PropertyValue::Bool(item.state() == NSControlStateValueOn),
+                    )
+                    .with_state(
+                        "mixed",
+                        PropertyValue::Bool(item.state() == NSControlStateValueMixed),
+                    )
+                    .with_property(
+                        "glasscheck:menu_item_state",
+                        PropertyValue::String(context_menu_item_state(&item)),
+                    );
+            }
+
+            let has_submenu = item.hasSubmenu();
+            nodes.push(node);
+            if has_submenu {
+                if let Some(submenu) = item.submenu() {
+                    append_context_menu_items(&submenu, &id, depth + 1, path, nodes);
+                }
+            }
+            path.pop();
+        }
+    }
+
+    fn count_context_menu_items(menu: &NSMenu) -> usize {
+        let mut count = 0;
+        for item in menu.itemArray().iter() {
+            count += 1;
+            if let Some(submenu) = item.submenu() {
+                count += count_context_menu_items(&submenu);
+            }
+        }
+        count
+    }
+
+    fn context_item_at_path(
+        menu: &NSMenu,
+        path: &[usize],
+    ) -> Option<(Retained<NSMenu>, Retained<NSMenuItem>, usize)> {
+        let mut current = unsafe {
+            Retained::retain(menu as *const NSMenu as *mut NSMenu)
+                .expect("menu should retain successfully")
+        };
+        for (depth, index) in path.iter().copied().enumerate() {
+            let item = current.itemAtIndex(index as isize)?;
+            if depth == path.len() - 1 {
+                return Some((current, item, index));
+            }
+            current = item.submenu()?;
+        }
+        None
+    }
+
+    fn parse_context_menu_path(path: &str) -> Result<Vec<usize>, AppKitContextMenuError> {
+        path.split('/')
+            .map(|segment| {
+                segment
+                    .parse::<usize>()
+                    .map_err(|_| AppKitContextMenuError::InvalidMenuPath)
+            })
+            .collect()
+    }
+
+    fn context_menu_path_string(path: &[usize]) -> String {
+        path.iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
+    fn context_menu_item_state(item: &NSMenuItem) -> String {
+        let state = item.state();
+        if state == NSControlStateValueOn {
+            "on".into()
+        } else if state == NSControlStateValueMixed {
+            "mixed".into()
+        } else if state == NSControlStateValueOff {
+            "off".into()
+        } else {
+            state.to_string()
+        }
+    }
+
+    fn context_modifier_string(flags: NSEventModifierFlags) -> String {
+        let mut names = Vec::new();
+        if flags.contains(NSEventModifierFlags::Shift) {
+            names.push("shift");
+        }
+        if flags.contains(NSEventModifierFlags::Control) {
+            names.push("control");
+        }
+        if flags.contains(NSEventModifierFlags::Option) {
+            names.push("option");
+        }
+        if flags.contains(NSEventModifierFlags::Command) {
+            names.push("command");
+        }
+        names.join("+")
+    }
+
     fn slug(value: &str) -> String {
         let mut slug = String::new();
         let mut last_dash = false;
@@ -1002,6 +1323,9 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use glasscheck_core::{QueryError, TextMatch};
+        use objc2::sel;
+        use objc2_foundation::{MainThreadMarker, NSString};
 
         #[test]
         fn slug_normalizes_menu_titles_for_selectors() {
@@ -1086,6 +1410,192 @@ mod imp {
             assert_eq!(copy_bitmap_rows(&[1, 2, 3, 4], 8, 1, 4), None);
             assert_eq!(copy_bitmap_rows(&[1, 2, 3, 4], 4, 2, 4), None);
         }
+
+        #[test]
+        fn context_menu_scene_records_item_state_and_hierarchy() {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Root"));
+            let open = unsafe {
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("Open"),
+                    Some(sel!(open:)),
+                    &NSString::from_str("o"),
+                )
+            };
+            open.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+            open.setState(NSControlStateValueOn);
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            let disabled = unsafe {
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("Disabled"),
+                    Some(sel!(disabled:)),
+                    &NSString::from_str(""),
+                )
+            };
+            disabled.setEnabled(false);
+            let more = unsafe {
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("More"),
+                    None,
+                    &NSString::from_str(""),
+                )
+            };
+            let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("More"));
+            let mixed = unsafe {
+                submenu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("Mixed"),
+                    Some(sel!(mixed:)),
+                    &NSString::from_str(""),
+                )
+            };
+            mixed.setState(NSControlStateValueMixed);
+            more.setSubmenu(Some(&submenu));
+
+            let scene = Scene::new(context_menu_nodes(&menu));
+            let root = scene
+                .node(scene.find(&Selector::selector_eq("context-menu")).unwrap())
+                .unwrap();
+            assert_eq!(root.role, Role::Menu);
+            assert_eq!(root.label.as_deref(), Some("Root"));
+
+            let open = scene
+                .node(
+                    scene
+                        .find(&Selector::label(TextMatch::exact("Open")))
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(open.role, Role::MenuItem);
+            assert_eq!(open.state.get("checked"), Some(&PropertyValue::Bool(true)));
+            assert_eq!(
+                open.properties.get("glasscheck:key_equivalent_modifiers"),
+                Some(&PropertyValue::String("command".into()))
+            );
+
+            let separator = scene
+                .node(
+                    scene
+                        .find(&Selector::selector_eq("context-menu.separator[1]"))
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(separator.role, Role::Divider);
+
+            let disabled = scene
+                .node(
+                    scene
+                        .find(&Selector::label(TextMatch::exact("Disabled")))
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(
+                disabled.state.get("enabled"),
+                Some(&PropertyValue::Bool(false))
+            );
+            assert!(!disabled.hit_testable);
+
+            let mixed = scene
+                .node(
+                    scene
+                        .find(&Selector::selector_eq("context-menu.item[3/0]"))
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(mixed.parent_id.as_deref(), Some("context-menu/item:3"));
+            assert_eq!(mixed.state.get("mixed"), Some(&PropertyValue::Bool(true)));
+        }
+
+        #[test]
+        fn context_menu_activation_rejects_missing_or_ambiguous_items() {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Root"));
+            unsafe {
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("Duplicate"),
+                    Some(sel!(a:)),
+                    &NSString::from_str(""),
+                );
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("Duplicate"),
+                    Some(sel!(b:)),
+                    &NSString::from_str(""),
+                );
+            }
+
+            let context_menu = AppKitContextMenu::new(menu);
+            let error = context_menu
+                .activate_item(&Selector::label(TextMatch::exact("Duplicate")))
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                AppKitContextMenuError::Query(QueryError::MultipleMatches { .. })
+            ));
+
+            let error = context_menu
+                .activate_item(&Selector::label(TextMatch::exact("Missing")))
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                AppKitContextMenuError::Query(QueryError::NotFound { .. })
+            ));
+
+            let error = context_menu.activate_item_at_path(&[9]).unwrap_err();
+            assert!(matches!(error, AppKitContextMenuError::InvalidMenuPath));
+        }
+
+        #[test]
+        fn context_menu_activation_rejects_non_activatable_items() {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Root"));
+            unsafe {
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("Visible"),
+                    Some(sel!(visible:)),
+                    &NSString::from_str(""),
+                );
+            }
+            let hidden = unsafe {
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("Hidden"),
+                    Some(sel!(hidden:)),
+                    &NSString::from_str(""),
+                )
+            };
+            hidden.setHidden(true);
+            let submenu_parent = unsafe {
+                menu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("More"),
+                    None,
+                    &NSString::from_str(""),
+                )
+            };
+            let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("More"));
+            unsafe {
+                submenu.addItemWithTitle_action_keyEquivalent(
+                    &NSString::from_str("Nested"),
+                    Some(sel!(nested:)),
+                    &NSString::from_str(""),
+                );
+            }
+            submenu_parent.setSubmenu(Some(&submenu));
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+            let context_menu = AppKitContextMenu::new(menu);
+            let error = context_menu.activate_item_at_path(&[1]).unwrap_err();
+            assert!(matches!(error, AppKitContextMenuError::HiddenMenuItem));
+
+            let error = context_menu.activate_item_at_path(&[2]).unwrap_err();
+            assert!(matches!(error, AppKitContextMenuError::InvalidMenuItem));
+
+            let error = context_menu.activate_item_at_path(&[3]).unwrap_err();
+            assert!(matches!(error, AppKitContextMenuError::InvalidMenuItem));
+        }
     }
 }
 
@@ -1106,6 +1616,9 @@ mod imp {
         pub scene: Scene,
     }
 
+    #[derive(Debug)]
+    pub struct AppKitContextMenu;
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum AppKitMenuTarget {
         Title(String),
@@ -1124,6 +1637,11 @@ mod imp {
         UnsupportedPlatform,
     }
 
+    #[derive(Debug)]
+    pub enum AppKitContextMenuError {
+        UnsupportedPopupSurface,
+    }
+
     impl fmt::Display for AppKitMenuError {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             match self {
@@ -1136,6 +1654,6 @@ mod imp {
 }
 
 pub use imp::{
-    AppKitMenuBar, AppKitMenuCapture, AppKitMenuCaptureOptions, AppKitMenuError, AppKitMenuTarget,
-    AppKitOpenedMenu,
+    AppKitContextMenu, AppKitContextMenuError, AppKitMenuBar, AppKitMenuCapture,
+    AppKitMenuCaptureOptions, AppKitMenuError, AppKitMenuTarget, AppKitOpenedMenu,
 };

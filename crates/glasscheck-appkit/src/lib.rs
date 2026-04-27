@@ -26,8 +26,8 @@ pub use glasscheck_core::{HitPointSearch, HitPointStrategy, InstrumentedNode};
 pub use harness::AppKitHarness;
 pub use input::AppKitInputDriver;
 pub use menu::{
-    AppKitMenuBar, AppKitMenuCapture, AppKitMenuCaptureOptions, AppKitMenuError, AppKitMenuTarget,
-    AppKitOpenedMenu,
+    AppKitContextMenu, AppKitContextMenuError, AppKitMenuBar, AppKitMenuCapture,
+    AppKitMenuCaptureOptions, AppKitMenuError, AppKitMenuTarget, AppKitOpenedMenu,
 };
 pub use session::AppKitSession;
 pub use text::{AppKitAnchoredTextError, AppKitTextError, AppKitTextHarness};

@@ -10,7 +10,7 @@ mod imp {
     use objc2_app_kit::{NSApplication, NSWindow};
     use objc2_foundation::{MainThreadMarker, NSPoint};
 
-    use crate::{AppKitHarness, AppKitWindowHost, HitPointSearch};
+    use crate::{AppKitContextMenu, AppKitHarness, AppKitWindowHost, HitPointSearch};
 
     /// Coordinator for multi-surface AppKit test flows.
     pub struct AppKitSession {
@@ -200,8 +200,8 @@ mod imp {
         /// Panics if `f` re-enters the session via any method that accesses the
         /// internal surface map, including `attach_host`, `attach_window`,
         /// `remove_surface`, `surface_is_open`,
-        /// `snapshot_scene`, `click_node`, `hover_node`, `wait_for_surface_closed`,
-        /// `discover_window`, `wait_for_discovered_window`,
+        /// `snapshot_scene`, `click_node`, `context_click_node`, `hover_node`,
+        /// `wait_for_surface_closed`, `discover_window`, `wait_for_discovered_window`,
         /// `open_transient_with_click`, or a nested `with_surface` call.
         /// Only `wait_until` (on the underlying harness) is safe to call from `f`.
         pub fn with_surface<R>(
@@ -238,6 +238,19 @@ mod imp {
             predicate: &Selector,
         ) -> Option<Result<(), glasscheck_core::RegionResolveError>> {
             self.with_surface(id, |host| host.click_node(predicate))
+        }
+
+        /// Opens the native AppKit context menu for a node in the named surface.
+        ///
+        /// Returns `None` if the surface is absent or has been closed (and evicts
+        /// it as a side effect); `Some(Err(...))` if the node or menu can't be
+        /// resolved.
+        pub fn context_click_node(
+            &self,
+            id: &SurfaceId,
+            predicate: &Selector,
+        ) -> Option<Result<AppKitContextMenu, crate::AppKitContextMenuError>> {
+            self.with_surface(id, |host| host.context_click_node(predicate))
         }
 
         /// Synthesizes a mouse-hover over the node matching `predicate` in the named surface.

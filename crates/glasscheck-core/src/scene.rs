@@ -22,7 +22,7 @@ pub enum Role {
     Window,
     /// A native or application-level menu bar.
     MenuBar,
-    /// A menu or submenu container.
+    /// A native or semantic menu/submenu container.
     Menu,
     /// A selectable item within a menu.
     MenuItem,

@@ -42,6 +42,8 @@ For multi-surface flows, the facade also exposes a target-specific `glasscheck::
 
 On AppKit, main-thread capability is still explicit for native construction and attachment, but it is carried by the harness/host internally so shared post-mount calls stay marker-free. Harness-managed AppKit windows are kept as background test windows, so capture and input can run without temporary windows surfacing on screen.
 
+AppKit also exposes native context-menu testing through `context_click_node(...)`, `context_click_node_with_search(...)`, and `context_click_root_point(...)`. These APIs return an `AppKitContextMenu` semantic handle over the native `NSMenu`: tests can inspect menu items with `snapshot_scene()` and choose commands with `activate_item(...)` or `activate_item_at_path(...)`. Glasscheck keeps macOS secondary-click and Control-click equivalence inside the AppKit backend; callers should express the user intent as a context click.
+
 ## Crates
 
 Use `glasscheck` unless you are building a new backend or integrating with an existing native test harness.
@@ -309,7 +311,7 @@ assert!(compare_images(&actual, &expected, &CompareConfig::default()).passed);
 
 Only AppKit on macOS and GTK4 on Linux are supported native backends today.
 
-`glasscheck-appkit` is for in-process AppKit tests on macOS. It provides window hosting, pixel capture, scenes, hit-point-based interaction, and text rendering. Standard `NSControl` clicks are activated through AppKit control APIs when available.
+`glasscheck-appkit` is for in-process AppKit tests on macOS. It provides window hosting, pixel capture, scenes, hit-point-based interaction, native context-menu inspection, and text rendering. Standard `NSControl` clicks are activated through AppKit control APIs when available. Native context menus are exposed as retained `NSMenu` semantic handles rather than capturable popup window surfaces.
 
 `glasscheck-gtk` is the Linux GTK4 backend. It provides the same overall testing model. Higher-level semantic interactions such as `GtkWindowHost::click_node(...)` are best-effort and may use GTK widget/controller activation for registered widgets before falling back to native input synthesis. Direct pointer synthesis through `GtkInputDriver` uses native X11 dispatch on X11-backed windows; `key_press_queued` also uses XTest-based X11 injection so events flow through root-level and legacy controllers before the focused widget, while `key_press` follows GTK controller and text APIs directly. Outside that direct-input support surface, the native input driver reports unavailability instead of silently degrading.
 
